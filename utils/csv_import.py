@@ -1,52 +1,15 @@
-def get_csv_files(path):
+from typing import Dict, Tuple
+
+FileMap = Dict[str, Dict[str, str]]
+
+def get_csv_files(path: str) -> Tuple[FileMap, FileMap, FileMap]:
+
 
     files_csi = {}
     files_afinar = {}
     files_diana = {}
 
     files_csi = {
-        'sem_pessoa': {
-            'esp1': path + '\\user00_positionz00_esp01_2025-04-01_02.csv',
-            'esp2': path + '\\user00_positionz00_esp02_2025-04-01_02.csv',
-            'esp3': path + '\\user00_positionz00_esp03_2025-04-01_02.csv',
-            'esp4': path + '\\user00_positionz00_esp04_2025-04-01_02.csv',
-        },
-        'sem_pessoa_1': {
-            'esp1': path + '\\00_z00_esp1_2025-06-24.csv',
-            'esp2': path + '\\00_z00_esp2_2025-06-24.csv',
-            'esp3': path + '\\00_z00_esp3_2025-06-24.csv',
-            'esp4': path + '\\00_z00_esp4_2025-06-24.csv',
-        },
-        'd04': {
-            'esp1': path + '\\user01_positiond04_esp1_2025-04-02.csv',
-            'esp2': path + '\\user01_positiond04_esp2_2025-04-02.csv',
-            'esp3': path + '\\user01_positiond04_esp3_2025-04-02.csv',
-            'esp4': path + '\\user01_positiond04_esp4_2025-04-02.csv',
-        },
-        'd09': {
-            'esp1': path + '\\user01_positiond09_esp1_2025-04-02.csv',
-            'esp2': path + '\\user01_positiond09_esp2_2025-04-02.csv',
-            'esp3': path + '\\user01_positiond09_esp3_2025-04-02.csv',
-            'esp4': path + '\\user01_positiond09_esp4_2025-04-02.csv',
-        },
-        'c06': {
-            'esp1': path + '\\user01_positionc06_esp1_2025-04-30.csv',
-            'esp2': path + '\\user01_positionc06_esp2_2025-04-30.csv',
-            'esp3': path + '\\user01_positionc06_esp3_2025-04-30.csv',
-            'esp4': path + '\\user01_positionc06_esp4_2025-04-30.csv',
-        },
-        'a02': {
-            'esp1': path + '\\user01_positiona02_esp01_2025-04-01.csv',
-            'esp2': path + '\\user01_positiona02_esp02_2025-04-01.csv',
-            'esp3': path + '\\user01_positiona02_esp03_2025-04-01.csv',
-            'esp4': path + '\\user01_positiona02_esp04_2025-04-01.csv',
-        },
-        'b07': {
-            'esp1': path + '\\user01_positionb07_esp01_2025-04-01.csv',
-            'esp2': path + '\\user01_positionb07_esp02_2025-04-01.csv',
-            'esp3': path + '\\user01_positionb07_esp03_2025-04-01.csv',
-            'esp4': path + '\\user01_positionb07_esp04_2025-04-01.csv',
-        },
         'a00': {
             'esp1': path + '\\user01_positiona00_esp01_2025-04-01.csv',
             'esp2': path + '\\user01_positiona00_esp02_2025-04-01.csv',
@@ -58,6 +21,12 @@ def get_csv_files(path):
             'esp2': path + '\\user01_positiona01_esp02_2025-04-01.csv',
             'esp3': path + '\\user01_positiona01_esp03_2025-04-01.csv',
             'esp4': path + '\\user01_positiona01_esp04_2025-04-01.csv',
+        },
+        'a02': {
+            'esp1': path + '\\user01_positiona02_esp01_2025-04-01.csv',
+            'esp2': path + '\\user01_positiona02_esp02_2025-04-01.csv',
+            'esp3': path + '\\user01_positiona02_esp03_2025-04-01.csv',
+            'esp4': path + '\\user01_positiona02_esp04_2025-04-01.csv',
         },
         'a09': {
             'esp1': path + '\\user01_positiona09_esp01_2025-04-01.csv',
@@ -119,6 +88,12 @@ def get_csv_files(path):
             'esp3': path + '\\user01_positionb06_esp03_2025-04-01.csv',
             'esp4': path + '\\user01_positionb06_esp04_2025-04-01.csv',
         },
+        'b07': {
+            'esp1': path + '\\user01_positionb07_esp01_2025-04-01.csv',
+            'esp2': path + '\\user01_positionb07_esp02_2025-04-01.csv',
+            'esp3': path + '\\user01_positionb07_esp03_2025-04-01.csv',
+            'esp4': path + '\\user01_positionb07_esp04_2025-04-01.csv',
+        },
         'b08': {
             'esp1': path + '\\user01_positionb08_esp01_2025-04-01.csv',
             'esp2': path + '\\user01_positionb08_esp02_2025-04-01.csv',
@@ -173,6 +148,12 @@ def get_csv_files(path):
             'esp3': path + '\\user01_positionc05_esp03_2025-04-02.csv',
             'esp4': path + '\\user01_positionc05_esp04_2025-04-02.csv',
         },
+        'c06': {
+            'esp1': path + '\\user01_positionc06_esp1_2025-04-30.csv',
+            'esp2': path + '\\user01_positionc06_esp2_2025-04-30.csv',
+            'esp3': path + '\\user01_positionc06_esp3_2025-04-30.csv',
+            'esp4': path + '\\user01_positionc06_esp4_2025-04-30.csv',
+        },
         'c07': {
             'esp1': path + '\\user01_positionc07_esp1_2025-04-02.csv',
             'esp2': path + '\\user01_positionc07_esp2_2025-04-02.csv',
@@ -221,6 +202,12 @@ def get_csv_files(path):
             'esp3': path + '\\user01_positiond03_esp3_2025-04-02.csv',
             'esp4': path + '\\user01_positiond03_esp4_2025-04-02.csv',
         },
+        'd04': {
+            'esp1': path + '\\user01_positiond04_esp1_2025-04-02.csv',
+            'esp2': path + '\\user01_positiond04_esp2_2025-04-02.csv',
+            'esp3': path + '\\user01_positiond04_esp3_2025-04-02.csv',
+            'esp4': path + '\\user01_positiond04_esp4_2025-04-02.csv',
+        },
         'd05': {
             'esp1': path + '\\user01_positiond05_esp1_2025-04-02.csv',
             'esp2': path + '\\user01_positiond05_esp2_2025-04-02.csv',
@@ -244,6 +231,12 @@ def get_csv_files(path):
             'esp2': path + '\\user01_positiond08_esp2_2025-04-02.csv',
             'esp3': path + '\\user01_positiond08_esp3_2025-04-02.csv',
             'esp4': path + '\\user01_positiond08_esp4_2025-04-02.csv',
+        },
+        'd09': {
+            'esp1': path + '\\user01_positiond09_esp1_2025-04-02.csv',
+            'esp2': path + '\\user01_positiond09_esp2_2025-04-02.csv',
+            'esp3': path + '\\user01_positiond09_esp3_2025-04-02.csv',
+            'esp4': path + '\\user01_positiond09_esp4_2025-04-02.csv',
         },
         'd10': {
             'esp1': path + '\\user01_positiond10_esp1_2025-04-02.csv',
@@ -274,46 +267,22 @@ def get_csv_files(path):
             'esp2': path + '\\user01_positione06_esp2_2025-04-02.csv',
             'esp3': path + '\\user01_positione06_esp3_2025-04-02.csv',
             'esp4': path + '\\user01_positione06_esp4_2025-04-02.csv',
-        }
+        },
+        'sem_pessoa': {
+            'esp1': path + '\\user00_positionz00_esp01_2025-04-01_02.csv',
+            'esp2': path + '\\user00_positionz00_esp02_2025-04-01_02.csv',
+            'esp3': path + '\\user00_positionz00_esp03_2025-04-01_02.csv',
+            'esp4': path + '\\user00_positionz00_esp04_2025-04-01_02.csv',
+        },
+        'sem_pessoa_1': {
+            'esp1': path + '\\00_z00_esp1_2025-06-24.csv',
+            'esp2': path + '\\00_z00_esp2_2025-06-24.csv',
+            'esp3': path + '\\00_z00_esp3_2025-06-24.csv',
+            'esp4': path + '\\00_z00_esp4_2025-06-24.csv',
+        },
     }
 
     files_diana = {
-        'a02': {
-            'esp1': path + '\\02_a02_esp1.csv',
-            'esp2': path + '\\02_a02_esp2.csv',
-            'esp3': path + '\\02_a02_esp3.csv',
-            'esp4': path + '\\02_a02_esp4.csv',
-        },
-        'b07': {
-            'esp1': path + '\\02_b07_esp1.csv',
-            'esp2': path + '\\02_b07_esp2.csv',
-            'esp3': path + '\\02_b07_esp3.csv',
-            'esp4': path + '\\02_b07_esp4.csv',
-        },
-        'd04': {
-            'esp1': path + '\\02_d04_esp1.csv',
-            'esp2': path + '\\02_d04_esp2.csv',
-            'esp3': path + '\\02_d04_esp3.csv',
-            'esp4': path + '\\02_d04_esp4.csv',
-        },
-        'd09': {
-            'esp1': path + '\\02_d09_esp1.csv',
-            'esp2': path + '\\02_d09_esp2.csv',
-            'esp3': path + '\\02_d09_esp3.csv',
-            'esp4': path + '\\02_d09_esp4.csv',
-        },
-        'sem_pessoa': {
-            'esp1': path + '\\20250602-103346_00_z00_esp1.csv',
-            'esp2': path + '\\20250602-103346_00_z00_esp2.csv',
-            'esp3': path + '\\20250602-103346_00_z00_esp3.csv',
-            'esp4': path + '\\20250602-103346_00_z00_esp4.csv',
-        },
-        'sem_pessoa_1': {
-            'esp1': path + '\\00_z00_esp1_2025-06-24 (1).csv',
-            'esp2': path + '\\00_z00_esp2_2025-06-24 (1).csv',
-            'esp3': path + '\\00_z00_esp3_2025-06-24 (1).csv',
-            'esp4': path + '\\00_z00_esp4_2025-06-24 (1).csv',
-        },
         'a00': {
             'esp1': path + '\\02_a02_esp1.csv',
             'esp2': path + '\\02_a02_esp2.csv',
@@ -321,6 +290,12 @@ def get_csv_files(path):
             'esp4': path + '\\02_a02_esp4.csv',
         },
         'a01': {
+            'esp1': path + '\\02_a02_esp1.csv',
+            'esp2': path + '\\02_a02_esp2.csv',
+            'esp3': path + '\\02_a02_esp3.csv',
+            'esp4': path + '\\02_a02_esp4.csv',
+        },
+        'a02': {
             'esp1': path + '\\02_a02_esp1.csv',
             'esp2': path + '\\02_a02_esp2.csv',
             'esp3': path + '\\02_a02_esp3.csv',
@@ -385,6 +360,12 @@ def get_csv_files(path):
             'esp2': path + '\\02_b06_esp2.csv',
             'esp3': path + '\\02_b06_esp3.csv',
             'esp4': path + '\\02_b06_esp4.csv',
+        },
+        'b07': {
+            'esp1': path + '\\02_b07_esp1.csv',
+            'esp2': path + '\\02_b07_esp2.csv',
+            'esp3': path + '\\02_b07_esp3.csv',
+            'esp4': path + '\\02_b07_esp4.csv',
         },
         'b08': {
             'esp1': path + '\\02_b08_esp1.csv',
@@ -494,6 +475,12 @@ def get_csv_files(path):
             'esp3': path + '\\02_d03_esp3.csv',
             'esp4': path + '\\02_d03_esp4.csv',
         },
+        'd04': {
+            'esp1': path + '\\02_d04_esp1.csv',
+            'esp2': path + '\\02_d04_esp2.csv',
+            'esp3': path + '\\02_d04_esp3.csv',
+            'esp4': path + '\\02_d04_esp4.csv',
+        },
         'd05': {
             'esp1': path + '\\02_d05_esp1.csv',
             'esp2': path + '\\02_d05_esp2.csv',
@@ -517,6 +504,12 @@ def get_csv_files(path):
             'esp2': path + '\\02_d08_esp2.csv',
             'esp3': path + '\\02_d08_esp3.csv',
             'esp4': path + '\\02_d08_esp4.csv',
+        },
+        'd09': {
+            'esp1': path + '\\02_d09_esp1.csv',
+            'esp2': path + '\\02_d09_esp2.csv',
+            'esp3': path + '\\02_d09_esp3.csv',
+            'esp4': path + '\\02_d09_esp4.csv',
         },
         'd10': {
             'esp1': path + '\\02_d10_esp1.csv',
@@ -547,7 +540,19 @@ def get_csv_files(path):
             'esp2': path + '\\02_e06_esp2.csv',
             'esp3': path + '\\02_e06_esp3.csv',
             'esp4': path + '\\02_e06_esp4.csv',
-        }
+        },
+        'sem_pessoa': {
+            'esp1': path + '\\20250602-103346_00_z00_esp1.csv',
+            'esp2': path + '\\20250602-103346_00_z00_esp2.csv',
+            'esp3': path + '\\20250602-103346_00_z00_esp3.csv',
+            'esp4': path + '\\20250602-103346_00_z00_esp4.csv',
+        },
+        'sem_pessoa_1': {
+            'esp1': path + '\\00_z00_esp1_2025-06-24 (1).csv',
+            'esp2': path + '\\00_z00_esp2_2025-06-24 (1).csv',
+            'esp3': path + '\\00_z00_esp3_2025-06-24 (1).csv',
+            'esp4': path + '\\00_z00_esp4_2025-06-24 (1).csv',
+        },
     }
 
     files_afinar = {
