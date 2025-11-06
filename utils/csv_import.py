@@ -3,7 +3,6 @@ import os
 
 FileMap = Dict[str, Dict[str, str]]
 
-
 # algumas notas a reter
 # # utilizamos keys para evitar repetições de código
 # # utilizamos os.path.join em vez de "\\ + " para criar paths
