@@ -1,5 +1,5 @@
-
 from pathlib import Path
+from typing import Dict
 import re
 import shutil
 import argparse
@@ -10,7 +10,7 @@ POS_BARE_RE = re.compile(r'^[a-ez]\d{2}$', re.IGNORECASE)
 ESP_RE = re.compile(r'^esp0*([1-4])$', re.IGNORECASE)
 INT_RE = re.compile(r'^\d{1,3}$')
 
-def parse_tokens(tokens):
+def parse_tokens(tokens: list[str]) -> tuple[int, str, int]:
     userid = None
     location = None
     espid = None
@@ -49,7 +49,7 @@ def parse_tokens(tokens):
 
     return userid, location, espid
 
-def transform_name(name, existing_counts):
+def transform_name(name: str, existing_counts: Dict[str, int]) -> str:
     stem = name.rsplit('.', 1)[0]
     tokens = stem.split('_')
     userid, location, espid = parse_tokens(tokens)
@@ -61,10 +61,10 @@ def transform_name(name, existing_counts):
 
     return f"{base_name}-{rep:02d}.csv"
 
-def process(src: Path, dst: Path, dry_run=False, recursive=True):
-    count = 0
-    existing_counts = {}
-    files = list(src.rglob("*.csv")) if recursive else list(src.glob("*.csv"))
+def process(src: Path, dst: Path, dry_run: bool = False, recursive: bool = True) -> int:
+    count: int = 0
+    existing_counts: Dict[str, int] = {}
+    files: list[Path] = list(src.rglob("*.csv")) if recursive else list(src.glob("*.csv"))
 
     dst.mkdir(parents=True, exist_ok=True)
 
@@ -92,6 +92,14 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="Print actions without copying")
     args = ap.parse_args()
 
+    try :
+        if not args.source.is_dir():
+            print(f"Error: Source path '{args.source}' is not a directory.")
+            return
+    except Exception as e:
+        print(f"Error: Cannot access source path '{args.source}': {e}")
+        return
+    
     recursive = not args.no_recursive
     processed = process(args.source, args.dest, dry_run=args.dry_run, recursive=recursive)
     if args.dry_run:
