@@ -20,7 +20,7 @@ from sklearn.model_selection import GridSearchCV
 import joblib
 
 # other .py files
-from utils.csv_import import get_csv_files
+from utils.csv_import import get_csv_files, get_csv_files_generalistic
 
 # seaborn for advanced plotting
 import seaborn as sns
