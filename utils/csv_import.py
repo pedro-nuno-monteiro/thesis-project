@@ -85,3 +85,34 @@ def get_csv_files(path: str) -> Tuple[FileMap, FileMap, FileMap]:
                             user_files.setdefault(posicao, {})[f"esp_{esp_id}"] = file_path
 
     return files_loureiro, files_diana, files_afinar
+
+
+# Data loading for generic data (without specific the collection for size, as it should be the same for all users!!)
+
+def get_csv_files_generalistic(path: str) -> Tuple[FileMap, FileMap, FileMap]: 
+
+    loaded_files: FileMap = {}
+
+    users = [0, 1, 2]
+
+    posicoes = ['z00', 'a00', 'a01', 'a02', 'a09', 'a10', 'a11', 'b00', 'b01', 'b02',
+        'b03', 'b04', 'b05', 'b06', 'b07', 'b08', 'b09', 'b10', 'b11', 'c01', 'c02', 'c03',
+        'c04', 'c05', 'c06', 'c07', 'c08', 'c09', 'c10', 'c11', 'd01', 'd02', 'd03',
+        'd04', 'd05', 'd06', 'd07', 'd08', 'd09', 'd10', 'd11', 'e04', 'e05', 'e06']
+    
+    esp_ids = [1, 2, 3, 4]
+    repetition_ids = [1, 2, 3, 4, 5]
+
+    # get files
+    for user_id in users:      
+        for pos in posicoes:
+            for esp_id in esp_ids:
+                for rep in repetition_ids:
+
+                    file_path = os.path.join(path, f"{user_id:02d}-{pos}-{esp_id:02d}-{rep:02d}.csv")
+
+                    if os.path.exists(file_path):
+                        # key = f"user_{user_id}_{pos}_rep_{rep}"
+                        loaded_files.setdefault(pos, {})[f"esp_{esp_id}"] = file_path
+    
+    return loaded_files
