@@ -72,7 +72,7 @@ def get_csv_files(path: str) -> Tuple[FileMap, FileMap, FileMap]:
                         if key:
                             user_files.setdefault(key, {})[f"esp_{esp_id}"] = file_path
 
-                    # loureiro
+                    # loureiro e diana
                     else:
                         # posição vazia
                         if posicao == "z00":
