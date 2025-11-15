@@ -1,14 +1,14 @@
-from pathlib import Path
-from typing import Dict
+import argparse
 import re
 import shutil
-import argparse
+from pathlib import Path
 
-USER_RE = re.compile(r'^user(\d{1,3})$', re.IGNORECASE)
-POS_PREFIX_RE = re.compile(r'^position([a-ez]\d{2})$', re.IGNORECASE)
-POS_BARE_RE = re.compile(r'^[a-ez]\d{2}$', re.IGNORECASE)
-ESP_RE = re.compile(r'^esp0*([1-4])$', re.IGNORECASE)
-INT_RE = re.compile(r'^\d{1,3}$')
+USER_RE = re.compile(r"^user(\d{1,3})$", re.IGNORECASE)
+POS_PREFIX_RE = re.compile(r"^position([a-ez]\d{2})$", re.IGNORECASE)
+POS_BARE_RE = re.compile(r"^[a-ez]\d{2}$", re.IGNORECASE)
+ESP_RE = re.compile(r"^esp0*([1-4])$", re.IGNORECASE)
+INT_RE = re.compile(r"^\d{1,3}$")
+
 
 def parse_tokens(tokens: list[str]) -> tuple[int, str, int]:
     userid = None
@@ -49,9 +49,10 @@ def parse_tokens(tokens: list[str]) -> tuple[int, str, int]:
 
     return userid, location, espid
 
-def transform_name(name: str, existing_counts: Dict[str, int]) -> str:
-    stem = name.rsplit('.', 1)[0]
-    tokens = stem.split('_')
+
+def transform_name(name: str, existing_counts: dict[str, int]) -> str:
+    stem = name.rsplit(".", 1)[0]
+    tokens = stem.split("_")
     userid, location, espid = parse_tokens(tokens)
     base_name = f"{userid:02d}-{location}-{espid:02d}"
 
@@ -61,10 +62,13 @@ def transform_name(name: str, existing_counts: Dict[str, int]) -> str:
 
     return f"{base_name}-{rep:02d}.csv"
 
+
 def process(src: Path, dst: Path, dry_run: bool = False, recursive: bool = True) -> int:
     count: int = 0
-    existing_counts: Dict[str, int] = {}
-    files: list[Path] = list(src.rglob("*.csv")) if recursive else list(src.glob("*.csv"))
+    existing_counts: dict[str, int] = {}
+    files: list[Path] = (
+        list(src.rglob("*.csv")) if recursive else list(src.glob("*.csv"))
+    )
 
     dst.mkdir(parents=True, exist_ok=True)
 
@@ -82,30 +86,38 @@ def process(src: Path, dst: Path, dry_run: bool = False, recursive: bool = True)
             print(f"[SKIP] {f}  (reason: {e})")
     return count
 
-def main():
+
+def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Copy CSV files with new names like 'userid-location-espid-rep.csv'."
+        description="Copy CSV files with new names like 'userid-location-espid-rep.csv'.",
     )
     ap.add_argument("source", type=Path, help="Source folder to scan for CSV files")
     ap.add_argument("dest", type=Path, help="Destination folder to copy files to")
-    ap.add_argument("--no-recursive", action="store_true", help="Do not scan subfolders")
-    ap.add_argument("--dry-run", action="store_true", help="Print actions without copying")
+    ap.add_argument(
+        "--no-recursive", action="store_true", help="Do not scan subfolders",
+    )
+    ap.add_argument(
+        "--dry-run", action="store_true", help="Print actions without copying",
+    )
     args = ap.parse_args()
 
-    try :
+    try:
         if not args.source.is_dir():
             print(f"Error: Source path '{args.source}' is not a directory.")
             return
     except Exception as e:
         print(f"Error: Cannot access source path '{args.source}': {e}")
         return
-    
+
     recursive = not args.no_recursive
-    processed = process(args.source, args.dest, dry_run=args.dry_run, recursive=recursive)
+    processed = process(
+        args.source, args.dest, dry_run=args.dry_run, recursive=recursive,
+    )
     if args.dry_run:
         print(f"Planned {processed} file(s).")
     else:
         print(f"Copied {processed} file(s).")
+
 
 if __name__ == "__main__":
     main()
