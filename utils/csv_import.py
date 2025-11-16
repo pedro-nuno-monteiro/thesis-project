@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 FileMap = dict[str, dict[str, str]]
@@ -37,17 +38,50 @@ def get_csv_files(path: str) -> tuple[FileMap, FileMap, FileMap]:
     users: list[int] = [0, 1, 2]
 
     posicoes: list[str] = [
-        "z00", "a00", "a01", "a02",
-        "a09", "a10", "a11", "b00",
-        "b01", "b02", "b03", "b04",
-        "b05", "b06", "b07", "b08",
-        "b09", "b10", "b11", "c01",
-        "c02", "c03", "c04", "c05",
-        "c06", "c07", "c08", "c09",
-        "c10", "c11", "d01", "d02",
-        "d03", "d04", "d05", "d06",
-        "d07", "d08", "d09", "d10",
-        "d11", "e04", "e05", "e06",
+        "z00",
+        "a00",
+        "a01",
+        "a02",
+        "a09",
+        "a10",
+        "a11",
+        "b00",
+        "b01",
+        "b02",
+        "b03",
+        "b04",
+        "b05",
+        "b06",
+        "b07",
+        "b08",
+        "b09",
+        "b10",
+        "b11",
+        "c01",
+        "c02",
+        "c03",
+        "c04",
+        "c05",
+        "c06",
+        "c07",
+        "c08",
+        "c09",
+        "c10",
+        "c11",
+        "d01",
+        "d02",
+        "d03",
+        "d04",
+        "d05",
+        "d06",
+        "d07",
+        "d08",
+        "d09",
+        "d10",
+        "d11",
+        "e04",
+        "e05",
+        "e06",
     ]
 
     posicoes_afinar: list[str] = ["z00"]
@@ -68,7 +102,6 @@ def get_csv_files(path: str) -> tuple[FileMap, FileMap, FileMap]:
                         file_path = base / f"{user_id:02d}-{posicao}-{esp_id:02d}-{rep:02d}.csv"
                     else:
                         file_path = base / f"{user_id:02d}-{posicao}-{esp_id:02d}-01.csv"
-
                     if user_id == 0:
                         if posicao not in posicoes_afinar:
                             continue
@@ -77,28 +110,75 @@ def get_csv_files(path: str) -> tuple[FileMap, FileMap, FileMap]:
                             user_files.setdefault(key, {})[f"esp_{esp_id}"] = file_path
 
                     # loureiro e diana
-                    elif posicao == "z00":
+                    else:
                         # posição vazia
-                        key = sala_vazia_keys.get(rep)
-                        if key:
-                            user_files.setdefault(key, {})[f"esp_{esp_id}"] = file_path
-
+                        if posicao == "z00":
+                            key = sala_vazia_keys.get(rep)
+                            if key:
+                                user_files.setdefault(key, {})[f"esp_{esp_id}"] = (
+                                    file_path
+                                )
+                        # posição normal
+                        else:
+                            user_files.setdefault(posicao, {})[f"esp_{esp_id}"] = file_path
     return files_loureiro, files_diana, files_afinar
 
 
 # Data loading for generic data (without specific the collection for size,
 # as it should be the same for all users!!)
 
-def get_csv_files_generalistic(path: str) -> FileMap:
 
+def get_csv_files_generalistic(path: str) -> FileMap:
     loaded_files: FileMap = {}
 
     users = [0, 1, 2]
 
-    posicoes = ['z00', 'a00', 'a01', 'a02', 'a09', 'a10', 'a11', 'b00', 'b01', 'b02',
-        'b03', 'b04', 'b05', 'b06', 'b07', 'b08', 'b09', 'b10', 'b11', 'c01', 'c02',
-        'c03', 'c04', 'c05', 'c06', 'c07', 'c08', 'c09', 'c10', 'c11', 'd01', 'd02',
-        'd03', 'd04', 'd05', 'd06', 'd07', 'd08', 'd09', 'd10', 'd11', 'e04', 'e05', 'e06']
+    posicoes = [
+        "z00",
+        "a00",
+        "a01",
+        "a02",
+        "a09",
+        "a10",
+        "a11",
+        "b00",
+        "b01",
+        "b02",
+        "b03",
+        "b04",
+        "b05",
+        "b06",
+        "b07",
+        "b08",
+        "b09",
+        "b10",
+        "b11",
+        "c01",
+        "c02",
+        "c03",
+        "c04",
+        "c05",
+        "c06",
+        "c07",
+        "c08",
+        "c09",
+        "c10",
+        "c11",
+        "d01",
+        "d02",
+        "d03",
+        "d04",
+        "d05",
+        "d06",
+        "d07",
+        "d08",
+        "d09",
+        "d10",
+        "d11",
+        "e04",
+        "e05",
+        "e06",
+    ]
 
     esp_ids = [1, 2, 3, 4]
     repetition_ids = [1, 2, 3, 4, 5]
@@ -110,7 +190,6 @@ def get_csv_files_generalistic(path: str) -> FileMap:
         for pos in posicoes:
             for esp_id in esp_ids:
                 for rep in repetition_ids:
-
                     file_path = base / f"{user_id:02d}-{pos}-{esp_id:02d}-{rep:02d}.csv"
 
                     if file_path.exists():
