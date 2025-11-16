@@ -4,8 +4,8 @@ import shutil
 from pathlib import Path
 
 USER_RE = re.compile(r"^user(\d{1,3})$", re.IGNORECASE)
-POS_PREFIX_RE = re.compile(r"^position([a-ez]\d{2})$", re.IGNORECASE)
-POS_BARE_RE = re.compile(r"^[a-ez]\d{2}$", re.IGNORECASE)
+POS_PREFIX_RE = re.compile(r"^position([a-ezw]\d{2})$", re.IGNORECASE)
+POS_BARE_RE = re.compile(r"^[a-ezw]\d{2}$", re.IGNORECASE)
 ESP_RE = re.compile(r"^esp0*([1-4])$", re.IGNORECASE)
 INT_RE = re.compile(r"^\d{1,3}$")
 
