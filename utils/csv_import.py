@@ -1,6 +1,63 @@
-import os
+from pathlib import Path
 
-FileMap = dict[str, dict[str, str]]
+# {"user_01" : {"a00": {"esp_1": path, "esp_2": path, ...},
+#            "a01": {...},
+#            ... }
+#  "user_02" : {...},
+#  ...}
+FileMap = dict[str, dict[str, dict[str, Path]]]
+
+
+# Data loading for generic data (without specific the collection for size,
+# as it should be the same for all users!!)
+
+# user_id-location-esp_id-repetition_id.csv
+
+# nesta função importamos todos os ficheiros CSV seguindo,
+# # para user/pessoa que testou
+# # para cada posição
+# # para cada esp
+def get_csv_files_generalistic(path: str) -> FileMap:
+
+    files: FileMap = {}
+    base: Path = Path(path)
+
+    # legenda
+    # # 0 - dados extra
+    # # 1 - loureiro
+    # # 2 - diana
+    users_id = [0, 1, 2]
+
+    # z00 - sala vazia
+    # w01 - sala com pessoa (geral)
+    posicoes = ["z00", "w00", "a00", "a01", "a02", "a09", "a10",
+        "a11", "b00", "b01", "b02", "b03", "b04", "b05", "b06",
+        "b07", "b08", "b09", "b10", "b11", "c01", "c02", "c03",
+        "c04", "c05", "c06", "c07", "c08", "c09", "c10", "c11",
+        "d01", "d02", "d03", "d04", "d05", "d06", "d07", "d08",
+        "d09", "d10", "d11", "e04", "e05", "e06",
+    ]
+
+    esp_ids = [1, 2, 3, 4]
+    repetition_ids = [1, 2]
+
+    for user_id in users_id:
+        user_key = f"user_{user_id}"
+        files.setdefault(user_key, {})
+        for posicao in posicoes:
+            files[user_key].setdefault(posicao, {})
+            for esp_id in esp_ids:
+                esp_key = f"esp_{esp_id}"
+                files[user_key][posicao].setdefault(esp_key, [])
+                for rep in repetition_ids:
+
+                    filename = f"{user_id:02d}-{posicao}-{esp_id:02d}-{rep:02d}.csv"
+                    file_path = base / filename
+
+                    if file_path.exists():
+                        files[user_key][posicao][esp_key].append(file_path)
+
+    return files
 
 
 # algumas notas a reter
@@ -85,6 +142,9 @@ def get_csv_files(path: str) -> tuple[FileMap, FileMap, FileMap]:
 
     posicoes_afinar: list[str] = ["z00"]
 
+    # convert base path to Path for / operator
+    base = Path(path)
+
     # get files
     for user_id in users:
         user_files = user_files_map[user_id]
@@ -93,16 +153,11 @@ def get_csv_files(path: str) -> tuple[FileMap, FileMap, FileMap]:
             for esp_id in range(1, 5):
                 # incluir até à 4ª por causa do ficheiro afinar
                 for rep in range(1, 5):
-                    # utilizar os.path.join em vez de "\\ + "
+                    # utilizar Path / operator em vez de os.path.join
                     if posicao in posicoes_afinar:
-                        file_path = os.path.join(
-                            path, f"{user_id:02d}-{posicao}-{esp_id:02d}-{rep:02d}.csv"
-                        )
+                        file_path = base / f"{user_id:02d}-{posicao}-{esp_id:02d}-{rep:02d}.csv"
                     else:
-                        file_path = os.path.join(
-                            path, f"{user_id:02d}-{posicao}-{esp_id:02d}-01.csv"
-                        )
-
+                        file_path = base / f"{user_id:02d}-{posicao}-{esp_id:02d}-01.csv"
                     if user_id == 0:
                         if posicao not in posicoes_afinar:
                             continue
@@ -111,14 +166,16 @@ def get_csv_files(path: str) -> tuple[FileMap, FileMap, FileMap]:
                             user_files.setdefault(key, {})[f"esp_{esp_id}"] = file_path
 
                     # loureiro e diana
-                    elif posicao == "z00":
-                        # posição vazia
-                        key = sala_vazia_keys.get(rep)
-                        if key:
-                            user_files.setdefault(key, {})[f"esp_{esp_id}"] = file_path
-
                     else:
+                        # posição vazia
+                        if posicao == "z00":
+                            key = sala_vazia_keys.get(rep)
+                            if key:
+                                user_files.setdefault(key, {})[f"esp_{esp_id}"] = (
+                                    file_path
+                                )
                         # posição normal
-                        user_files.setdefault(posicao, {})[f"esp_{esp_id}"] = file_path
-
+                        else:
+                            user_files.setdefault(posicao, {})[f"esp_{esp_id}"] = file_path
     return files_loureiro, files_diana, files_afinar
+
