@@ -39,7 +39,7 @@ def get_csv_files_generalistic(path: str) -> FileMap:
     ]
 
     esp_ids = [1, 2, 3, 4]
-    repetition_ids = [1, 2]
+    repetition_ids = [1]
 
     for user_id in users_id:
         user_key = f"user_{user_id}"
@@ -55,7 +55,8 @@ def get_csv_files_generalistic(path: str) -> FileMap:
                     file_path = base / filename
 
                     if file_path.exists():
-                        files[user_key][posicao][esp_key].append(file_path)
+                        files[user_key][posicao][esp_key].append(str(file_path))
+                        print(f"Found file: {file_path}")
 
     return files
 
