@@ -83,6 +83,9 @@ def get_csv_files_generalistic(path: str) -> FileMap:
 	return files
 
 
+# --------------------------------------------------
+# já não é utilizada
+
 # algumas notas a reter
 # # utilizamos keys para evitar repetições de código
 # # utilizamos os.path.join em vez de "\\ + " para criar paths
