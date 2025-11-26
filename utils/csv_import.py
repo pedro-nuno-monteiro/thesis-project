@@ -6,7 +6,8 @@ from pathlib import Path
 #            ... }
 #  "user_02" : {...},
 #  ...}
-FileMap = dict[str, dict[str, dict[str, Path]]]
+# top-level: user -> esp -> position -> list of Paths
+FileMap = dict[str, dict[str, dict[str, list[Path]]]]
 
 # user_id-location-esp_id-repetition_id.csv
 PATTERN = re.compile(r"^(\d+)-([a-zA-Z])(\d+)-(\d+)-(\d+)$")
@@ -44,30 +45,28 @@ def sort_meta_info(path: str) -> tuple[list[int], list[str], list[int], list[int
 # nesta função importamos todos os ficheiros CSV seguindo,
 # # para user/pessoa que testou
 # # para cada posição
-# # para cada esp
 def get_csv_files_generalistic(path: str) -> FileMap:
-
 	files: FileMap = {}
 	base: Path = Path(path)
 
-    # legenda
-    # # 0 - dados extra
-    # # 1 - loureiro
-    # # 2 - diana
-    users_id = [0, 1, 2]
+	# legenda
+	# # 0 - dados extra
+	# # 1 - loureiro
+	# # 2 - diana
+	users_id = [0, 1, 2]
 
-    # z00 - sala vazia
-    # w01 - sala com pessoa (geral)
-    posicoes = ["z00", "w00", "a00", "a01", "a02", "a09", "a10",
-        "a11", "b00", "b01", "b02", "b03", "b04", "b05", "b06",
-        "b07", "b08", "b09", "b10", "b11", "c01", "c02", "c03",
-        "c04", "c05", "c06", "c07", "c08", "c09", "c10", "c11",
-        "d01", "d02", "d03", "d04", "d05", "d06", "d07", "d08",
-        "d09", "d10", "d11", "e04", "e05", "e06",
-    ]
+	# z00 - sala vazia
+	# w01 - sala com pessoa (geral)
+	posicoes = ["z00", "w00", "a00", "a01", "a02", "a09", "a10",
+		"a11", "b00", "b01", "b02", "b03", "b04", "b05", "b06",
+		"b07", "b08", "b09", "b10", "b11", "c01", "c02", "c03",
+		"c04", "c05", "c06", "c07", "c08", "c09", "c10", "c11",
+		"d01", "d02", "d03", "d04", "d05", "d06", "d07", "d08",
+		"d09", "d10", "d11", "e04", "e05", "e06",
+	]
 
-    esp_ids = [1, 2, 3, 4]
-    repetition_ids = [1, 2]
+	esp_ids = [1, 2, 3, 4]
+	repetition_ids = [1, 2]
 
 	for user_id in users_id:
 		user_key = f"user_{user_id}"
@@ -78,17 +77,58 @@ def get_csv_files_generalistic(path: str) -> FileMap:
 			files[user_key][esp_key] = {}
 
 			for posicao in posicoes:
-				files[user_key][esp_key][posicao] = None
+				# store list of repetitions per position
+				files[user_key][esp_key][posicao] = []
 
 				for rep in repetition_ids:
 					filename = f"{user_id:02d}-{posicao}-{esp_id:02d}-{rep:02d}.csv"
 					file_path = base / filename
 
-                    if file_path.exists():
-                        files[user_key][posicao][esp_key].append(file_path)
+					if file_path.exists():
+						files[user_key][esp_key][posicao].append(file_path)
 
 	return files
 
+
+def get_csv_files_generalistic_2(path: str) -> FileMap:
+
+    files: FileMap = {}
+    base: Path = Path(path)
+
+    # legenda
+    # # 0 - dados extra
+    # # 1 - loureiro
+    # # 2 - diana
+    users_id = [0, 1, 2]
+
+    # z00 - sala vazia
+    # w01 - sala com pessoa (geral)
+    posicoes = ["z00", "a00", "a01", "a02", "a09", "a10",
+        "a11", "b00", "b01", "b02", "b03", "b04", "b05", "b06",
+        "b07", "b08", "b09", "b10", "b11", "c01", "c02", "c03",
+        "c04", "c05", "c06", "c07", "c08", "c09", "c10", "c11",
+        "d01", "d02", "d03", "d04", "d05", "d06", "d07", "d08",
+        "d09", "d10", "d11", "e04", "e05", "e06",
+    ]
+
+    esp_ids = [1, 2, 3, 4]
+    repetition_ids = [1,2,3]
+
+    for user_id in users_id:
+        for posicao in posicoes:
+            for esp_id in esp_ids:
+                for rep in repetition_ids:
+                    
+                    filename = f"{user_id:02d}-{posicao}-{esp_id:02d}-{rep:02d}.csv"
+                    file_path = base / filename
+
+                    if file_path.exists():
+                        key = f"{user_id}_{posicao}_{esp_id}_{rep}"
+
+                        files.setdefault(key, []).append(str(file_path))
+                        print(f"Found file: {file_path}")
+
+    return files
 
 # --------------------------------------------------
 # já não é utilizada
