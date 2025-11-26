@@ -66,19 +66,19 @@ def get_csv_files_generalistic(path: str) -> FileMap:
 		user_key = f"user_{user_id}"
 		files[user_key] = {}
 
-		for posicao in posicoes:
-			files[user_key][posicao] = {}
+		for esp_id in esp_ids:
+			esp_key = f"esp_{esp_id}"
+			files[user_key][esp_key] = {}
 
-			for esp_id in esp_ids:
-				esp_key = f"esp_{esp_id}"
-				files[user_key][posicao][esp_key] = None
+			for posicao in posicoes:
+				files[user_key][esp_key][posicao] = None
 
 				for rep in repetition_ids:
 					filename = f"{user_id:02d}-{posicao}-{esp_id:02d}-{rep:02d}.csv"
 					file_path = base / filename
 
 					if file_path.exists():
-						files[user_key][posicao][esp_key] = file_path
+						files[user_key][esp_key][posicao] = file_path
 
 	return files
 
