@@ -2,9 +2,21 @@
 
 This repository contains code, notebooks and data used for a Wi‑Fi sensing experiment (thesis project).
 
+## Notebooks
+
+### `General-Data-Collecting-[meu].ipynb`
+The primary working notebook for user identification in indoor environments using Wi-Fi CSI data. This notebook combines and improves upon previous work from Miguel's and Diana's projects, implementing a complete machine learning pipeline for detecting which user is present in a room. Includes data preprocessing, feature extraction, normalization, and Random Forest classification with hyperparameter tuning.
+
+### `Wi-Fi-Sensing-[meu].ipynb`
+A refactored version of Miguel's original project with cleaner code structure, improved readability, and detailed comments explaining the CSI processing steps and machine learning workflow.
+
+### `Position-Selection-[meu].ipynb`
+An enhanced version of Diana's position detection notebook, reorganized for better clarity with improved comments and code structure to make the analysis more accessible.
+
+### `Generalistic_WIFI_Sensing.ipynb`
+An early experimental notebook started by Óscar that was not continued in later development.
+
 ## Contents
-- `Wi‑Fi-Sensing-[meu].ipynb` — main analysis and ML pipeline (data processing → features → Random Forest).
-- `General-Data-Collecting-[meu].ipynb`, `Position-Selection-[meu].ipynb` — additional notebooks used during data collection and analysis.
 - `data/` — raw and processed CSV files collected from the CSI device(s). Subfolders group datasets (e.g. `CSI DATA RENAMED [alterado]`).
 - `utils/` — helper scripts used by the notebooks (CSV importer, file renaming, etc.).
 
@@ -39,4 +51,8 @@ pip install -r requirements.txt
 
 ## License
 See `LICENSE` if present. No license specified by default.
+
+---
+
+*This README was created and maintained with assistance from GitHub Copilot.*
 
