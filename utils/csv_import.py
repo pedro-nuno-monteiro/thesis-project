@@ -85,6 +85,7 @@ def get_csv_files_generalistic(path: str) -> FileMap:
 
 # --------------------------------------------------
 # já não é utilizada
+# apenas no projeto antigo (Wi-Fi-Sensing-[meu])
 
 # algumas notas a reter
 # # utilizamos keys para evitar repetições de código
