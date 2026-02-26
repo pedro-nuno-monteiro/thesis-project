@@ -8,11 +8,48 @@ from pathlib import Path
 #  ...}
 FileMap = dict[str, dict[str, dict[str, Path]]]
 
-# user_id-location-esp_id-repetition_id.csv
-PATTERN = re.compile(r"^(\d+)-([a-zA-Z])(\d+)-(\d+)-(\d+)$")
+# user_id-activity_id-place_id-esp_id-timestamp.csv
+PATTERN = re.compile(
+    r"^(?P<user>\d+)_(?P<activity>\d+)_(?P<place>\d+)_(?P<esp>\d+)_(?P<date>\d{4}-\d{2}-\d{2})\.csv$",
+)
 
 
 def sort_meta_info(path: str) -> tuple[list[int], list[str], list[int], list[int]]:
+
+	base: Path = Path(path)
+	users_id = set()
+	activities_id = set()
+	places_id = set()
+	esps_id = set()
+
+	for file in base.glob("*.csv"):
+		match = PATTERN.match(file.name)
+		if not match:
+			print("skipped on no match, ", file.name)
+			continue
+
+		user = int(match.group("user"))
+		activity = int(match.group("activity"))
+		place = int(match.group("place"))
+		esp = int(match.group("esp"))
+
+		users_id.add(user)
+		activities_id.add(activity)
+		places_id.add(place)
+		esps_id.add(esp)
+
+	return (
+		sorted(users_id),
+		sorted(activities_id),
+		sorted(places_id),
+		sorted(esps_id),
+	)
+
+
+# ------------------
+# já não é utilizada
+# ------------------
+def sort_meta_info_old(path: str) -> tuple[list[int], list[str], list[int], list[int]]:
 
 	base: Path = Path(path)
 	users_id = set()
@@ -43,9 +80,65 @@ def sort_meta_info(path: str) -> tuple[list[int], list[str], list[int], list[int
 
 # nesta função importamos todos os ficheiros CSV seguindo,
 # # para user/pessoa que testou
-# # para cada posição
+# # para cada atividade
+# # para cada cenário
 # # para cada esp
 def get_csv_files_generalistic(path: str) -> FileMap:
+
+	files: FileMap = {}
+	base: Path = Path(path)
+
+	# legenda
+
+	# USER ID
+	# # 00 - ninguém
+	# # 01 - Pepas
+
+	# ACTIVITY
+	# # 00 - empty room
+	# # 01 - walking
+
+	# # PLACE
+	# # 01 - Gab. Pepas
+	# # 02 - Gab. Rafa
+	# # 03 - Gab. Lab
+	# # 04 - Lab.
+
+	for file in base.glob("*.csv"):
+
+		match = PATTERN.match(file.name)
+		if not match:
+			continue
+
+		user = int(match.group("user"))
+		activity = int(match.group("activity"))
+		place = int(match.group("place"))
+		esp = int(match.group("esp"))
+
+		user_key = f"user_{user}"
+		activity_key = f"activity_{activity}"
+		place_key = f"place_{place}"
+		esp_key = f"esp_{esp}"
+
+		files.setdefault(user_key, {})
+		files[user_key].setdefault(activity_key, {})
+		files[user_key][activity_key].setdefault(place_key, {})
+		files[user_key][activity_key][place_key].setdefault(esp_key, [])
+
+		# append file (support multiple timestamps)
+		files[user_key][activity_key][place_key][esp_key].append(file)
+
+	return files
+
+
+# ------------------
+# já não é utilizada
+# ------------------
+# nesta função importamos todos os ficheiros CSV seguindo,
+# # para user/pessoa que testou
+# # para cada cenário
+# # para cada esp
+def get_csv_files_generalistic_old(path: str) -> FileMap:
 
 	files: FileMap = {}
 	base: Path = Path(path)
@@ -205,4 +298,3 @@ def get_csv_files(path: str) -> tuple[FileMap, FileMap, FileMap]:
 						else:
 							user_files.setdefault(posicao, {})[f"esp_{esp_id}"] = file_path
 	return files_loureiro, files_diana, files_afinar
-
