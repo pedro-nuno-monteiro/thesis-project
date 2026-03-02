@@ -13,6 +13,7 @@ PATTERN = re.compile(
     r"^(?P<user>\d+)_(?P<activity>\d+)_(?P<place>\d+)_(?P<esp>\d+)_(?P<date>\d{4}-\d{2}-\d{2})\.csv$",
 )
 
+PATTERN_OLD = re.compile(r"^(\d+)-([a-zA-Z])(\d+)-(\d+)-(\d+)$")
 
 def sort_meta_info(path: str) -> tuple[list[int], list[str], list[int], list[int]]:
 
@@ -28,10 +29,10 @@ def sort_meta_info(path: str) -> tuple[list[int], list[str], list[int], list[int
 			print("skipped on no match, ", file.name)
 			continue
 
-		user = int(match.group("user"))
-		activity = int(match.group("activity"))
-		place = int(match.group("place"))
-		esp = int(match.group("esp"))
+		user = match.group("user")
+		activity = match.group("activity")
+		place = match.group("place")
+		esp = match.group("esp")
 
 		users_id.add(user)
 		activities_id.add(activity)
@@ -58,7 +59,7 @@ def sort_meta_info_old(path: str) -> tuple[list[int], list[str], list[int], list
 	repetition_ids = set()
 
 	for file in base.glob("*.csv"):
-		match = PATTERN.match(file.stem)
+		match = PATTERN_OLD.match(file.stem)
 		if not match:
 			print("skipped on no match, ", file.name)
 			continue
@@ -143,7 +144,7 @@ def get_csv_files_generalistic_old(path: str) -> FileMap:
 	files: FileMap = {}
 	base: Path = Path(path)
 
-	users_id, posicoes, esp_ids, repetition_ids = sort_meta_info(path)
+	users_id, posicoes, esp_ids, repetition_ids = sort_meta_info_old(path)
 
 	# legenda - hard coded
 	# # users_id
