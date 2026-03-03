@@ -111,10 +111,10 @@ def get_csv_files_generalistic(path: str) -> FileMap:
 		if not match:
 			continue
 
-		user = int(match.group("user"))
-		activity = int(match.group("activity"))
-		place = int(match.group("place"))
-		esp = int(match.group("esp"))
+		user = match.group("user")
+		activity = match.group("activity")
+		place = match.group("place")
+		esp = match.group("esp")
 
 		user_key = f"user_{user}"
 		activity_key = f"activity_{activity}"
