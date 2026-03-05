@@ -1,10 +1,12 @@
 import re
 from pathlib import Path
 
-# user_id-activity_id-place_id-esp_id-timestamp.csv
-# scenario_id - user_id - activity_id - esp_id - timestamp.csv
+FileMap = dict[str, dict[str, dict[str, dict[str, Path]]]]
+
+# scenario_id - user_id - activity_id - esp_id - date - time.csv
+# example: 21_00_00_01_2026-03-05_15-30.csv
 PATTERN = re.compile(
-    r"^(?P<scenario>\d+)_(?P<user>\d+)_(?P<activity>\d+)_(?P<esp>\d+)_(?P<date>\d{4}-\d{2}-\d{2})\.csv$",
+    r"^(?P<scenario>\d+)_(?P<user>\d+)_(?P<activity>\d+)_(?P<esp>\d+)_(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2})\.csv$",
 )
 
 
@@ -32,17 +34,14 @@ def sort_meta_info(path: str) -> tuple[list[int], list[str], list[int], list[int
         esps_id.add(esp)
 
     return (
+        sorted(scenarios_id),
         sorted(users_id),
         sorted(activities_id),
-        sorted(scenarios_id),
         sorted(esps_id),
     )
 
 
-FileMap = dict[str, dict[str, dict[str, dict[str, Path]]]]
-
-
-def get_csv_files_generalistic(path: str):
+def get_csv_files_generalistic(path: str) -> FileMap:
     files: FileMap = {}
     base: Path = Path(path)
 
