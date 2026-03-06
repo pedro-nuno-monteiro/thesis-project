@@ -48,6 +48,9 @@ esp_mac_map = {
     "D0:CF:13:ED:9A:8C": "07",
 }
 
+# Packet count tracking for each ESP
+esp_packet_count = {}
+
 # CSV HEADER (if needed)
 # CSV_HEADER = "type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local_timestamp,sig_len,rx_state,len,first_word,data\n"
 
@@ -95,6 +98,12 @@ while True:
     print("Data received from:", esp_mac)
 
     esp_id = esp_mac_map.get(esp_mac, esp_mac.replace(":", ""))
+
+    # Increment packet count for this ESP
+    if esp_id not in esp_packet_count:
+        esp_packet_count[esp_id] = 0
+    esp_packet_count[esp_id] += 1
+    print(f"ESP {esp_id} - Packets received: {esp_packet_count[esp_id]}")
 
     filename = os.path.join(
         save_directory,
