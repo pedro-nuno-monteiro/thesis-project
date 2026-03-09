@@ -1,24 +1,26 @@
-# pyproject.toml - metadata + dependency management (PEP 621)
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "thesis-project"
 version = "0.1.0"
 description = "Data analysis project."
 readme = "README.md"
+requires-python = ">=3.9"
 authors = [
     { name = "Pedro Monteiro", email = "pedropessoamonteiro@gmail.com" }
 ]
 
 [tool.ruff]
-extend-include = ["*.ipynb"]
-line-length = 100
-#indent-width = 4
 target-version = "py39"
+line-length = 100
+extend-include = ["*.ipynb"]
 
 [tool.ruff.lint]
-extend-select = ["E", "F", "N", "I", "SIM", "UP", "ALL"]
+select = ["E", "F", "N", "I", "SIM", "UP", "ALL"]
 ignore = ["T201", "Q000", "ERA001", "D103", "W191", "PLR1702", "D100", "CPY001", "INP001"]
 fixable = ["ALL"]
-unfixable = []
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [tool.ruff.format]
@@ -26,5 +28,4 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
-docstring-code-format = false
 docstring-code-line-length = "dynamic"
