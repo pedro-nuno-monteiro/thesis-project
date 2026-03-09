@@ -10,7 +10,7 @@ authors = [
 
 [tool.ruff]
 extend-include = ["*.ipynb"]
-line-length = 88
+line-length = 100
 #indent-width = 4
 target-version = "py39"
 
