@@ -1,4 +1,5 @@
 import os
+import re
 import socket
 import time
 
@@ -26,6 +27,12 @@ print("* 11 - Cen. 1, 2.4 GHz")
 print("* 12 - Cen. 1, 5.0 GHz")
 print("* 21 - Cen. 2, 2.4 GHz")
 print("* 22 - Cen. 2, 5.0 GHz")
+
+print(" *\n * X.Y.Z.H")
+print(" * X - layout ESPs/router")
+print(" * Y - freq. (2.4 GHz vs 5 GHz)")
+print(" * Z - posicionamento ESP")
+print(" * H - altura ESP (0 - 2 (m))")
 scenario = input("* * Enter scenario: ").strip()
 
 print("\n* Collection Duration")
@@ -50,6 +57,30 @@ esp_mac_map = {
 
 # Packet count tracking for each ESP
 esp_packet_count = {}
+esp_trial_map = {}
+
+
+def get_next_trial_number(
+    directory: str,
+    scenario_id: str,
+    user: str,
+    activity_id: str,
+    esp_id: str,
+) -> int:
+    # Match files by prefix fields and trial id, ignoring any timestamp format after trial.
+    pattern = re.compile(
+        rf"^{re.escape(scenario_id)}_{re.escape(user)}_{re.escape(activity_id)}_"
+        rf"{re.escape(esp_id)}_(\d+)_.*\.csv$",
+    )
+
+    last_trial = 0
+    for file_name in os.listdir(directory):
+        match = pattern.match(file_name)
+        if match:
+            last_trial = max(last_trial, int(match.group(1)))
+
+    return last_trial + 1
+
 
 # CSV HEADER (if needed)
 # CSV_HEADER = "type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local_timestamp,sig_len,rx_state,len,first_word,data\n"
@@ -105,9 +136,24 @@ while True:
     esp_packet_count[esp_id] += 1
     print(f"ESP {esp_id} - Packets received: {esp_packet_count[esp_id]}")
 
+    if esp_id not in esp_trial_map:
+        esp_trial_map[esp_id] = get_next_trial_number(
+            save_directory,
+            scenario,
+            user_id,
+            activity,
+            esp_id,
+        )
+        print(
+            f"ESP {esp_id} - Using trial {esp_trial_map[esp_id]:02d} "
+            f"for {scenario}/{user_id}/{activity}/{esp_id}",
+        )
+
+    trial = esp_trial_map[esp_id]
+
     filename = os.path.join(
         save_directory,
-        f"{scenario}_{user_id}_{activity}_{esp_id}_{timestamp}.csv"
+        f"{scenario}_{user_id}_{activity}_{esp_id}_{trial:02d}_{timestamp}.csv",
     )
 
     with open(filename, "a") as file:
