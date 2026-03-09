@@ -1,7 +1,8 @@
 import re
+import warnings
 from pathlib import Path
 
-FileMap = dict[str, dict[str, dict[str, dict[str, Path]]]]
+FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, Path]]]]]
 
 # scenario_id - user_id - activity_id - esp_id - trial - date - time.csv
 # example: 21_00_00_01_01_03_2026-03-05_15-30.csv
@@ -70,9 +71,16 @@ def get_csv_files_generalistic(path: str) -> FileMap:
         files[scenario_key].setdefault(user_key, {})
         files[scenario_key][user_key].setdefault(activity_key, {})
         files[scenario_key][user_key][activity_key].setdefault(esp_key, {})
-        files[scenario_key][user_key][activity_key][esp_key].setdefault(trial_key, [])
+        trial_path = files[scenario_key][user_key][activity_key][esp_key].get(trial_key)
+        if trial_path is not None:
+            warning_msg = (
+                "Multiple CSV paths found for the same "
+                f"scenario/user/activity/esp/trial: {scenario_key}/{user_key}/{activity_key}/"
+                f"{esp_key}/{trial_key}. Existing: {trial_path.name}, New: {file.name}"
+            )
+            warnings.warn(warning_msg, stacklevel=2)
+            continue
 
-        # append file (support multiple timestamps)
-        files[scenario_key][user_key][activity_key][esp_key][trial_key].append(file)
+        files[scenario_key][user_key][activity_key][esp_key][trial_key] = file
 
     return files
