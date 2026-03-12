@@ -5,9 +5,9 @@ from pathlib import Path
 FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, Path]]]]]
 
 # scenario_id - user_id - activity_id - esp_id - trial - date - time.csv
-# example: 21_00_00_01_01_03_2026-03-05_15-30.csv
+# example: 22112_00_00_05_01_2026-03-12_12-46-30.csv
 PATTERN = re.compile(
-    r"^(?P<scenario>\d+)_(?P<user>\d+)_(?P<activity>\d+)_(?P<esp>\d+)_(?P<trial>\d+)_(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2})\.csv$",
+    r"^(?P<scenario>\d+)_(?P<user>\d+)_(?P<activity>\d+)_(?P<esp>\d+)_(?P<trial>\d+)_(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2}(?:-\d{2})?)\.csv$",
 )
 
 
