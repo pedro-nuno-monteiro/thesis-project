@@ -14,17 +14,18 @@ SCENARIO_ID_MAPS = {
     "frequency_band": {
         "1": "2.4 Ghz",
         "2": "5 Ghz",
+        "3": "Mixed freq.",
     },
     "sensor_placement": {
         "1": "Lay Down",
         "2": "Standing",
-        "3": "Random",
+        "3": "Random plac.",
     },
     "height": {
         "0": "floor",
-        "1": "1 meter",
-        "2": "2 meters",
-        "3": "Random",
+        "1": "1 m",
+        "2": "2 m",
+        "3": "Random height",
     },
     "esp_count": {
         "1": "1 ESP",
@@ -34,6 +35,7 @@ SCENARIO_ID_MAPS = {
         "5": "5 ESPs",
     },
 }
+
 
 
 def decode_scenario_id(scenario_id: str | int) -> dict[str, str]:
