@@ -1,8 +1,9 @@
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib import gridspec
-from pathlib import Path
 import re
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib import gridspec
 
 csi_map = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 
@@ -40,7 +41,6 @@ SCENARIO_ID_MAPS = {
 }
 
 
-
 def decode_scenario_id(scenario_id: str | int) -> dict[str, str]:
     scenario_str = str(scenario_id)
 
@@ -71,7 +71,7 @@ def scenario_id_to_label(scenario_id: str | int) -> str:
             decoded["sensor_placement"],
             decoded["height"],
             decoded["esp_count"],
-        ]
+        ],
     )
 
 
@@ -96,7 +96,7 @@ def _measurement_plot_filename(
             _sanitize_filename_part(activity),
             _sanitize_filename_part(esp),
             _sanitize_filename_part(trial),
-        ]
+        ],
     )
     suffix_clean = _sanitize_filename_part(suffix) if suffix else ""
     if suffix_clean:
@@ -365,10 +365,19 @@ def plot_scenario_comparison_vs_subcarrier(
         color = esp_colors[esp]
         linestyle = "--" if user == "user_01" else "-"
 
-        ax_mag.plot(subcarrier_idx, profile, linewidth=2, label=label, color=color, linestyle=linestyle)
+        ax_mag.plot(
+            subcarrier_idx, profile, linewidth=2, label=label, color=color, linestyle=linestyle
+        )
         if show_db and ax_db is not None:
             profile_db = _amplitude_to_db(profile, db_floor=db_floor)
-            ax_db.plot(subcarrier_idx, profile_db, linewidth=2, label=label, color=color, linestyle=linestyle)
+            ax_db.plot(
+                subcarrier_idx,
+                profile_db,
+                linewidth=2,
+                label=label,
+                color=color,
+                linestyle=linestyle,
+            )
         plotted += 1
 
     if plotted == 0:
@@ -432,7 +441,7 @@ def plot_subcarrier_magnitude_vs_time(
     except KeyError:
         print(
             f"[SKIP] Missing data: scenario={scenario_label}, user={user}, "
-            f"activity={activity}, esp={esp}, trial={trial}"
+            f"activity={activity}, esp={esp}, trial={trial}",
         )
         return
 
@@ -454,8 +463,7 @@ def plot_subcarrier_magnitude_vs_time(
     mag_series = magnitude[:, subcarrier_idx]
 
     title = (
-        f"{scenario_label} | {user} | {activity} | {esp} | {trial} | "
-        f"Subcarrier={subcarrier_idx}"
+        f"{scenario_label} | {user} | {activity} | {esp} | {trial} | Subcarrier={subcarrier_idx}"
     )
 
     if save_path is None:
@@ -475,7 +483,10 @@ def plot_subcarrier_magnitude_vs_time(
 
     if show_db:
         fig, (ax_mag, ax_db) = plt.subplots(
-            2, 1, figsize=(figsize[0], max(7, int(figsize[1] * 1.7))), sharex=True
+            2,
+            1,
+            figsize=(figsize[0], max(7, int(figsize[1] * 1.7))),
+            sharex=True,
         )
 
         ax_mag.plot(time_s, mag_series, color="steelblue", linewidth=linewidth)
@@ -533,7 +544,7 @@ def plot_all_packets_vs_subcarrier(
     except KeyError:
         print(
             f"[SKIP] Missing data: scenario={scenario}, user={user}, "
-            f"activity={activity}, esp={esp}, trial={trial}"
+            f"activity={activity}, esp={esp}, trial={trial}",
         )
         return
 
@@ -642,7 +653,7 @@ def plot_all_packets_vs_subcarrier(
         ax_mag.set_ylabel("CSI magnitude")
         ax_mag.set_title(
             f"All packets | {scenario_id_to_label(scenario)} | {user} | {activity} | {esp} | {trial}\n"
-            f"shape={magnitude.shape}"
+            f"shape={magnitude.shape}",
         )
         ax_mag.grid(alpha=0.3)
         ax_mag.legend(loc="best")
@@ -696,7 +707,7 @@ def plot_all_packets_vs_subcarrier(
         plt.ylabel("CSI magnitude")
         plt.title(
             f"All packets | {scenario_id_to_label(scenario)} | {user} | {activity} | {esp} | {trial}\n"
-            f"shape={magnitude.shape}"
+            f"shape={magnitude.shape}",
         )
         plt.xticks(np.arange(0, n_subcarriers, x_tick_step))
         plt.grid(alpha=0.3)
