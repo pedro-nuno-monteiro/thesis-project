@@ -47,13 +47,21 @@ def decode_scenario_id(scenario_id: str | int) -> dict[str, str]:
     if scenario_str.startswith("scenario_"):
         scenario_str = scenario_str.split("_", 1)[1]
 
-    if len(scenario_str) != 5 or not scenario_str.isdigit():
-        raise ValueError(f"Invalid scenario_id '{scenario_id}'. Expected 5 digits, e.g. '21313'.")
+    parts = scenario_str.split("_", 1)
+    base_scenario = parts[0]
+    zone = parts[1].upper() if len(parts) > 1 else ""
 
-    d1, d2, d3, d4, d5 = scenario_str
+    if len(base_scenario) != 5 or not base_scenario.isdigit():
+        raise ValueError(
+            f"Invalid scenario_id '{scenario_id}'. Expected 5 digits with optional zone suffix, e.g. '21313_A'.",
+        )
+
+    d1, d2, d3, d4, d5 = base_scenario
 
     return {
         "scenario_id": scenario_str,
+        "base_scenario_id": base_scenario,
+        "zone": zone,
         "scenario_number": SCENARIO_ID_MAPS["scenario_number"].get(d1, f"Unknown ({d1})"),
         "frequency_band": SCENARIO_ID_MAPS["frequency_band"].get(d2, f"Unknown ({d2})"),
         "sensor_placement": SCENARIO_ID_MAPS["sensor_placement"].get(d3, f"Unknown ({d3})"),
@@ -64,15 +72,18 @@ def decode_scenario_id(scenario_id: str | int) -> dict[str, str]:
 
 def scenario_id_to_label(scenario_id: str | int) -> str:
     decoded = decode_scenario_id(scenario_id)
-    return "; ".join(
-        [
-            decoded["scenario_number"],
-            decoded["frequency_band"],
-            decoded["sensor_placement"],
-            decoded["height"],
-            decoded["esp_count"],
-        ],
-    )
+    parts = [
+        decoded["scenario_number"],
+        decoded["frequency_band"],
+        decoded["sensor_placement"],
+        decoded["height"],
+        decoded["esp_count"],
+    ]
+
+    if decoded["zone"]:
+        parts.append(f"Zone {decoded['zone']}")
+
+    return "; ".join(parts)
 
 
 def _sanitize_filename_part(value: str) -> str:
@@ -366,7 +377,12 @@ def plot_scenario_comparison_vs_subcarrier(
         linestyle = "--" if user == "user_01" else "-"
 
         ax_mag.plot(
-            subcarrier_idx, profile, linewidth=2, label=label, color=color, linestyle=linestyle
+            subcarrier_idx,
+            profile,
+            linewidth=2,
+            label=label,
+            color=color,
+            linestyle=linestyle,
         )
         if show_db and ax_db is not None:
             profile_db = _amplitude_to_db(profile, db_floor=db_floor)

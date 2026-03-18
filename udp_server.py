@@ -21,6 +21,8 @@ ESP_MAC_MAP = {
     "D0:CF:13:ED:B7:D8": "05",
     "D0:CF:13:ED:9A:2C": "06",
     "D0:CF:13:ED:9A:8C": "07",
+    "D0:CF:13:ED:C4:AC": "08",
+    "D0:CF:13:ED:9A:4C": "09",
 }
 
 VALID_ID_PATTERN = re.compile(r"^[A-Za-z0-9.:-]+$")
@@ -39,6 +41,15 @@ def prompt_identifier(prompt: str) -> str:
             "Only letters, numbers, '.', ':', and '-' are allowed in identifiers.",
         )
     return value
+
+
+def prompt_zone() -> str:
+    value = prompt_text("* * Enter zone (A, AB, ABC, etc.): ")
+    if not value:
+        raise ValueError("Zone cannot be empty.")
+    if not value.replace(" ", "").isalpha():
+        raise ValueError("Zone must contain only letters.")
+    return value.replace(" ", "").upper()
 
 
 def prompt_duration_minutes() -> float:
@@ -60,13 +71,14 @@ def resolve_save_directory() -> Path:
 def get_next_trial_number(
     directory: Path,
     scenario_id: str,
+    zone: str,
     user_id: str,
     activity_id: str,
     esp_id: str,
 ) -> int:
     pattern = re.compile(
-        rf"^{re.escape(scenario_id)}_{re.escape(user_id)}_{re.escape(activity_id)}_"
-        rf"{re.escape(esp_id)}_(\d+)_.*\.csv$",
+        rf"^{re.escape(scenario_id)}_{re.escape(zone)}_{re.escape(user_id)}_"
+        rf"{re.escape(activity_id)}_{re.escape(esp_id)}_(\d+)_.*\.csv$",
     )
 
     last_trial = 0
@@ -88,7 +100,7 @@ def create_socket() -> socket.socket:
     return sock
 
 
-def prompt_session_metadata() -> tuple[str, str, str, float]:
+def prompt_session_metadata() -> tuple[str, str, str, str, float]:
     print("\n* User ID")
     print("* 00 - Nobody")
     print("* 01 - Pedro")
@@ -108,10 +120,14 @@ def prompt_session_metadata() -> tuple[str, str, str, float]:
     print(" * N - ESPs used | 1/2/3/4/5")
     scenario_id = prompt_identifier("* * Enter scenario: ")
 
+    print("\n* Zone")
+    print(" * Zone label for ESP placement (e.g., A, AB, ABC)")
+    zone = prompt_zone()
+
     print("\n* Collection Duration")
     duration_minutes = prompt_duration_minutes()
 
-    return user_id, activity_id, scenario_id, duration_minutes
+    return user_id, activity_id, scenario_id, zone, duration_minutes
 
 
 def parse_packet(data: bytes) -> tuple[str, str] | None:
@@ -135,7 +151,7 @@ def parse_packet(data: bytes) -> tuple[str, str] | None:
 
 def main() -> int:
     try:
-        user_id, activity_id, scenario_id, duration_minutes = prompt_session_metadata()
+        user_id, activity_id, scenario_id, zone, duration_minutes = prompt_session_metadata()
     except ValueError as exc:
         print(f"Input error: {exc}")
         return 1
@@ -201,17 +217,18 @@ def main() -> int:
                 trial_by_esp[esp_id] = get_next_trial_number(
                     save_directory,
                     scenario_id,
+                    zone,
                     user_id,
                     activity_id,
                     esp_id,
                 )
                 file_path_by_esp[esp_id] = save_directory / (
-                    f"{scenario_id}_{user_id}_{activity_id}_{esp_id}_"
+                    f"{scenario_id}_{zone}_{user_id}_{activity_id}_{esp_id}_"
                     f"{trial_by_esp[esp_id]:02d}_{session_timestamp}.csv"
                 )
                 print(
                     f"ESP {esp_id} - Using trial {trial_by_esp[esp_id]:02d} "
-                    f"for {scenario_id}/{user_id}/{activity_id}/{esp_id}",
+                    f"for {scenario_id}/{zone}/{user_id}/{activity_id}/{esp_id}",
                 )
 
             output_file = file_path_by_esp[esp_id]
