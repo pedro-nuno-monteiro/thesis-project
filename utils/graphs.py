@@ -14,6 +14,7 @@ SCENARIO_ID_MAPS = {
 	"scenario_number": {
 		"1": "Scen. 1",
 		"2": "Scen. 2",
+		"3": "Scen. 3",
 	},
 	"frequency_band": {
 		"1": "2.4 Ghz",
@@ -261,6 +262,260 @@ def _amplitude_to_db(amplitude: np.ndarray, db_floor: float = -120.0) -> np.ndar
 	amplitude_safe = np.maximum(amplitude, eps)
 	amplitude_db = 20 * np.log10(amplitude_safe)
 	return np.maximum(amplitude_db, db_floor)
+
+
+def _standardize_subcarriers(magnitude: np.ndarray) -> np.ndarray:
+	centered = magnitude - np.mean(magnitude, axis=0, keepdims=True)
+	std = np.std(centered, axis=0, keepdims=True)
+	std[std == 0] = 1.0
+	return centered / std
+
+
+def _extract_motion_trace(
+	magnitude: np.ndarray,
+	aggregation: str = "pca",
+	subcarrier_idx: int | None = None,
+) -> tuple[np.ndarray, str]:
+	if magnitude.ndim != 2:
+		raise ValueError("magnitude must be a 2D matrix shaped as (packets, subcarriers).")
+
+	n_packets, n_subcarriers = magnitude.shape
+	if n_packets < 2 or n_subcarriers < 1:
+		raise ValueError("magnitude must contain at least 2 packets and 1 subcarrier.")
+
+	dynamic_magnitude = _standardize_subcarriers(magnitude)
+
+	if aggregation == "pca":
+		_, singular_values, vt = np.linalg.svd(dynamic_magnitude, full_matrices=False)
+		trace = dynamic_magnitude @ vt[0]
+		if np.mean(trace) < 0:
+			trace = -trace
+		if singular_values.size > 0 and singular_values[0] > 0:
+			trace = trace / singular_values[0]
+		label = "PCA motion trace (PC1)"
+	elif aggregation == "mean":
+		trace = np.mean(dynamic_magnitude, axis=1)
+		label = "Mean standardized magnitude"
+	elif aggregation == "median":
+		trace = np.median(dynamic_magnitude, axis=1)
+		label = "Median standardized magnitude"
+	elif aggregation == "subcarrier":
+		if subcarrier_idx is None:
+			subcarrier_idx = n_subcarriers // 2
+		if subcarrier_idx < 0 or subcarrier_idx >= n_subcarriers:
+			raise ValueError(f"subcarrier_idx must be in [0, {n_subcarriers - 1}]")
+		trace = dynamic_magnitude[:, subcarrier_idx]
+		label = f"Standardized subcarrier {subcarrier_idx}"
+	else:
+		raise ValueError("aggregation must be one of: 'pca', 'mean', 'median', 'subcarrier'")
+
+	trace = trace - np.mean(trace)
+	return trace, label
+
+
+def _compute_stft_spectrogram(
+	signal: np.ndarray,
+	sampling_rate_hz: float,
+	window_size: int,
+	overlap: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+	if sampling_rate_hz <= 0:
+		raise ValueError("sampling_rate_hz must be > 0.")
+	if window_size <= 1:
+		raise ValueError("window_size must be > 1.")
+	if overlap < 0 or overlap >= window_size:
+		raise ValueError("overlap must satisfy 0 <= overlap < window_size.")
+	if signal.ndim != 1:
+		raise ValueError("signal must be a 1D array.")
+	if signal.size < window_size:
+		raise ValueError(
+			f"signal length ({signal.size}) must be at least window_size ({window_size}).",
+		)
+
+	step = window_size - overlap
+	window = np.hanning(window_size)
+	window_energy = np.sum(window**2)
+	if window_energy == 0:
+		raise ValueError("Invalid STFT window; energy is zero.")
+
+	spectra: list[np.ndarray] = []
+	time_bins_s: list[float] = []
+
+	for start_idx in range(0, signal.size - window_size + 1, step):
+		segment = signal[start_idx : start_idx + window_size]
+		windowed = segment * window
+		spectrum = np.fft.rfft(windowed)
+		power = (np.abs(spectrum) ** 2) / window_energy
+		spectra.append(power)
+		time_bins_s.append((start_idx + window_size / 2) / sampling_rate_hz)
+
+	power_matrix = np.stack(spectra, axis=1)
+	frequency_bins_hz = np.fft.rfftfreq(window_size, d=1.0 / sampling_rate_hz)
+	return frequency_bins_hz, np.array(time_bins_s), power_matrix
+
+
+def plot_csi_spectrogram(
+	magnitude_data: csi_map,
+	scenario: str,
+	user: str,
+	activity: str,
+	esp: str,
+	trial: str,
+	sampling_rate_hz: float = 10.0,
+	aggregation: str = "pca",
+	subcarrier_idx: int | None = None,
+	window_size: int = 128,
+	overlap: int = 96,
+	figsize: tuple[int, int] = (12, 10),
+	show_reference_heatmap: bool = True,
+	top_frequency_hz: float | None = None,
+	db_floor: float = -120.0,
+	save_path: str | Path | None = None,
+) -> None:
+	"""
+	Render a CSI spectrogram using a CSI-aware 1D motion trace.
+
+	The default pipeline mirrors common CSI spectrogram workflows:
+	1. remove the static per-subcarrier component,
+	2. standardize each subcarrier,
+	3. extract a representative motion trace (PC1 by default),
+	4. apply STFT to visualize time-frequency energy.
+	"""
+	try:
+		magnitude = magnitude_data[scenario][user][activity][esp][trial]
+	except KeyError:
+		print(
+			f"[SKIP] Missing data: scenario={scenario}, user={user}, "
+			f"activity={activity}, esp={esp}, trial={trial}",
+		)
+		return
+
+	if magnitude is None or magnitude.size == 0:
+		print("[SKIP] Empty magnitude matrix.")
+		return
+
+	n_packets, _ = magnitude.shape
+	if n_packets < 8:
+		print("[SKIP] Not enough packets to compute a meaningful spectrogram.")
+		return
+
+	window_size = min(window_size, n_packets)
+	if window_size < 8:
+		print("[SKIP] window_size must be at least 8 samples after clipping to the signal length.")
+		return
+	if overlap >= window_size:
+		overlap = max(0, window_size // 2)
+
+	try:
+		motion_trace, trace_label = _extract_motion_trace(
+			magnitude,
+			aggregation=aggregation,
+			subcarrier_idx=subcarrier_idx,
+		)
+		freq_hz, time_s, power = _compute_stft_spectrogram(
+			motion_trace,
+			sampling_rate_hz=sampling_rate_hz,
+			window_size=window_size,
+			overlap=overlap,
+		)
+	except ValueError as exc:
+		print(f"[SKIP] {exc}")
+		return
+
+	power_db = _amplitude_to_db(np.sqrt(power), db_floor=db_floor)
+
+	if top_frequency_hz is not None:
+		freq_mask = freq_hz <= top_frequency_hz
+		if not np.any(freq_mask):
+			print(f"[SKIP] top_frequency_hz={top_frequency_hz} removes all frequency bins.")
+			return
+		freq_hz = freq_hz[freq_mask]
+		power_db = power_db[freq_mask, :]
+
+	scenario_label = scenario_id_to_label(scenario)
+	title = f"{scenario_label} | {user} | {activity} | {esp} | {trial}"
+	time_trace_s = np.arange(n_packets) / sampling_rate_hz
+	dynamic_heatmap = _standardize_subcarriers(magnitude)
+
+	if save_path is None:
+		save_path = (
+			Path("images")
+			/ "saved_graphs"
+			/ "spectrogram"
+			/ _measurement_plot_filename(
+				scenario,
+				user,
+				activity,
+				esp,
+				trial,
+				suffix=f"spectrogram_{aggregation}",
+			)
+		)
+
+	n_rows = 3 if show_reference_heatmap else 2
+	height_ratios = [1.2, 1.0, 2.2] if show_reference_heatmap else [1.0, 2.2]
+	fig, axes = plt.subplots(
+		n_rows,
+		1,
+		figsize=figsize,
+		sharex=False,
+		gridspec_kw={"height_ratios": height_ratios},
+	)
+	axes = np.atleast_1d(axes)
+	ax_idx = 0
+
+	if show_reference_heatmap:
+		ax_heatmap = axes[ax_idx]
+		im_heatmap = ax_heatmap.imshow(
+			dynamic_heatmap.T,
+			aspect="auto",
+			origin="lower",
+			cmap="coolwarm",
+			extent=[time_trace_s.min(), time_trace_s.max(), 0, dynamic_heatmap.shape[1] - 1],
+		)
+		ax_heatmap.set_ylabel("Subcarrier")
+		ax_heatmap.set_title(f"{title}\nDynamic CSI heatmap (per-subcarrier standardized)")
+		ax_heatmap.grid(False)
+		fig.colorbar(
+			im_heatmap,
+			ax=ax_heatmap,
+			shrink=0.85,
+			pad=0.02,
+			label="Standardized amplitude",
+		)
+		ax_idx += 1
+
+	ax_trace = axes[ax_idx]
+	ax_trace.plot(time_trace_s, motion_trace, color="black", linewidth=1.5)
+	ax_trace.set_ylabel("Trace value")
+	ax_trace.set_title(
+		f"Representative CSI trace for STFT | {trace_label} | "
+		f"window={window_size}, overlap={overlap}",
+	)
+	ax_trace.grid(alpha=0.3)
+	ax_idx += 1
+
+	ax_spec = axes[ax_idx]
+	mesh = ax_spec.pcolormesh(
+		time_s,
+		freq_hz,
+		power_db,
+		shading="auto",
+		cmap="magma",
+	)
+	ax_spec.set_xlabel("Time (s)")
+	ax_spec.set_ylabel("Frequency (Hz)")
+	ax_spec.set_title("CSI spectrogram (STFT magnitude in dB)")
+	ax_spec.grid(alpha=0.15)
+	fig.colorbar(mesh, ax=ax_spec, shrink=0.9, pad=0.02, label="Magnitude (dB)")
+
+	plt.tight_layout()
+	if save_path is not None:
+		save_path = Path(save_path)
+		save_path.parent.mkdir(parents=True, exist_ok=True)
+		fig.savefig(save_path, dpi=200, bbox_inches="tight")
+		print(f"Saved plot: {save_path}")
+	plt.show()
 
 
 def plot_csi_magnitude_vs_subcarrier(
