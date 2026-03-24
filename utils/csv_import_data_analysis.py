@@ -7,7 +7,7 @@ FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, Path]]]]]
 # scenario_id - zone - user_id - activity_id - esp_id - trial - date - time.csv
 # example: 22313_ABC_00_00_05_01_2026-03-12_12-46-30.csv
 PATTERN = re.compile(
-    r"^(?P<scenario>\d+)_(?P<zone>[A-Z]+)_(?P<user>\d+)_(?P<activity>\d+)_(?P<esp>\d+)_(?P<trial>\d+)_(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2}(?:-\d{2})?)\.csv$",
+    r"^(?P<scenario>\d+)_(?:(?P<zone>[A-Z]+)_)?(?P<user>\d+)_(?P<activity>\d+)_(?P<esp>\d+)_(?P<trial>\d+)_(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2}(?:-\d{2})?)\.csv$",
 )
 
 
@@ -35,14 +35,17 @@ def sort_meta_info(
         trial = match.group("trial")
         zone = match.group("zone")
 
-        scenario_with_zone = f"{scenario}_{zone}"
+        if zone:
+            scenario_with_zone = f"{scenario}_{zone}"
+            zones_id.add(zone)
+        else:
+            scenario_with_zone = scenario
 
         scenarios_id.add(scenario_with_zone)
         users_id.add(user)
         activities_id.add(activity)
         esps_id.add(esp)
         trial_id.add(trial)
-        zones_id.add(zone)
 
     return (
         sorted(scenarios_id),
@@ -70,7 +73,11 @@ def get_csv_files_generalistic(path: str) -> FileMap:
         esp = match.group("esp")
         trial = match.group("trial")
 
-        scenario_key = f"scenario_{scenario}_{zone}"
+        if zone:
+            scenario_key = f"scenario_{scenario}_{zone}"
+        else:
+            scenario_key = f"scenario_{scenario}"
+
         user_key = f"user_{user}"
         activity_key = f"activity_{activity}"
         esp_key = f"esp_{esp}"
