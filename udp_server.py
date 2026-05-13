@@ -12,6 +12,7 @@ UDP_PORT = 5001
 RECV_BUFFER_SIZE = 4096
 SOCKET_TIMEOUT_SECONDS = 1.0
 DEFAULT_SAVE_DIRECTORY = Path.cwd() / "csi_frames"
+DEFAULT_UDP_PORT = 5001
 
 ESP_MAC_MAP = {
     "90:38:0C:EA:D3:78": "01",
@@ -55,19 +56,37 @@ def prompt_identifier(prompt: str) -> str:
     return value
 
 
-def prompt_zone() -> str:
-    value = prompt_text("* * Enter zone (A, AB, ABC, etc.): ")
+def prompt_user_id() -> str:
+    value = prompt_identifier("* * Enter user ID: ")
+    if not value.isdigit():
+        raise ValueError("User ID must contain only digits.")
+    return value.zfill(2)
+
+
+def prompt_location() -> str:
+    value = prompt_text("* * Enter location (x-y, e.g. 1-3): ")
     if not value:
-        raise ValueError("Zone cannot be empty.")
-    if not value.replace(" ", "").isalpha():
-        raise ValueError("Zone must contain only letters.")
-    return value.replace(" ", "").upper()
+        raise ValueError("Location cannot be empty.")
+
+    normalized_value = value.replace(" ", "")
+    if not re.fullmatch(r"\d+-\d+", normalized_value):
+        raise ValueError("Location must follow the x-y pattern using numbers.")
+
+    return normalized_value
 
 
-def prompt_duration_minutes() -> float:
-    raw_value = prompt_text("* * Enter duration in minutes (0 for unlimited): ")
+def prompt_run_duration_seconds() -> float:
+    default_duration_seconds = 60.0
+    raw_value = prompt_text(
+        "* * Run for 60 seconds? Press ENTER for yes, or type anything else to set a custom duration: ",
+    )
+
+    if not raw_value:
+        return default_duration_seconds
+
+    raw_duration = prompt_text("* * Enter duration in seconds (0 for unlimited): ")
     try:
-        return max(float(raw_value), 0.0)
+        return max(float(raw_duration), 0.0)
     except ValueError:
         print("Invalid duration. Falling back to unlimited collection.")
         return 0.0
@@ -80,17 +99,32 @@ def resolve_save_directory() -> Path:
     return DEFAULT_SAVE_DIRECTORY
 
 
+def resolve_udp_port() -> int:
+    configured_port = os.environ.get("CSI_UDP_PORT")
+    if not configured_port:
+        return DEFAULT_UDP_PORT
+
+    try:
+        udp_port = int(configured_port)
+    except ValueError as exc:
+        raise ValueError("CSI_UDP_PORT must be an integer.") from exc
+
+    if not 1 <= udp_port <= 65535:
+        raise ValueError("CSI_UDP_PORT must be between 1 and 65535.")
+
+    return udp_port
+
+
 def get_next_trial_number(
     directory: Path,
     scenario_id: str,
-    zone: str,
+    location: str,
     user_id: str,
-    activity_id: str,
     esp_id: str,
 ) -> int:
     pattern = re.compile(
-        rf"^{re.escape(scenario_id)}_{re.escape(zone)}_{re.escape(user_id)}_"
-        rf"{re.escape(activity_id)}_{re.escape(esp_id)}_(\d+)_.*\.csv$",
+        rf"^{re.escape(scenario_id)}_{re.escape(location)}_{re.escape(user_id)}_"
+        rf"{re.escape(esp_id)}_(\d+)_.*\.csv$",
     )
 
     last_trial = 0
@@ -104,42 +138,32 @@ def get_next_trial_number(
     return last_trial + 1
 
 
-def create_socket() -> socket.socket:
+def create_socket(udp_port: int) -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
     sock.settimeout(SOCKET_TIMEOUT_SECONDS)
-    sock.bind((UDP_IP, UDP_PORT))
+    sock.bind((UDP_IP, udp_port))
     return sock
 
 
-def prompt_session_metadata() -> tuple[str, str, str, str, float]:
+def prompt_session_metadata() -> tuple[str, str, str, float]:
+    print("\n* Scenario ID")
+    print("* 1, 2, 3, etc.")
+    scenario_id = prompt_identifier("* * Enter scenario: ")
+
+    print("\n* Location")
+    print(" * Location label in x-y format (e.g., 1-3, 5-2, 7-9)")
+    location = prompt_location()
+
     print("\n* User ID")
     print("* 00 - Nobody")
     print("* 01 - Pedro")
-    user_id = prompt_identifier("* * Enter user ID: ")
-
-    print("\n* Activity ID")
-    print("* 00 - Empty Room")
-    print("* 01 - Walking")
-    activity_id = prompt_identifier("* * Enter activity: ")
-
-    print("\n* Scenario ID")
-    print(" * X.Y.Z.H.N")
-    print(" * X - ESP/router layout (scenario 1 vs scenario 2) | 1/2")
-    print(" * Y - frequency band (2.4 GHz vs 5 GHz) | 1/2")
-    print(" * Z - ESP positioning (1 - layed on a table, 2 - standing, 3 - mix) | 1/2/3")
-    print(" * H - ESP height (0 - floor, 1 - 1 m, 2 - 2m, 3 - random) | 0/1/2/3")
-    print(" * N - ESPs used | 1/2/3/4/5")
-    scenario_id = prompt_identifier("* * Enter scenario: ")
-
-    print("\n* Zone")
-    print(" * Zone label for ESP placement (e.g., A, AB, ABC)")
-    zone = prompt_zone()
+    user_id = prompt_user_id()
 
     print("\n* Collection Duration")
-    duration_minutes = prompt_duration_minutes()
+    duration_seconds = prompt_run_duration_seconds()
 
-    return user_id, activity_id, scenario_id, zone, duration_minutes
+    return user_id, scenario_id, location, duration_seconds
 
 
 def parse_packet(data: bytes) -> tuple[str, str] | None:
@@ -163,31 +187,40 @@ def parse_packet(data: bytes) -> tuple[str, str] | None:
 
 def main() -> int:
     try:
-        user_id, activity_id, scenario_id, zone, duration_minutes = prompt_session_metadata()
+        user_id, scenario_id, location, duration_seconds = prompt_session_metadata()
     except ValueError as exc:
         print(f"Input error: {exc}")
+        return 1
+
+    try:
+        udp_port = resolve_udp_port()
+    except ValueError as exc:
+        print(f"Configuration error: {exc}")
         return 1
 
     save_directory = resolve_save_directory()
     save_directory.mkdir(parents=True, exist_ok=True)
 
     try:
-        sock = create_socket()
+        sock = create_socket(udp_port)
     except OSError as exc:
-        print(f"Failed to start UDP server on {UDP_IP}:{UDP_PORT}: {exc}")
+        print(
+            f"Failed to start UDP server on {UDP_IP}:{udp_port}: {exc}. "
+            "Another process is already using that port. Stop it or set CSI_UDP_PORT to a free UDP port.",
+        )
         return 1
 
     packet_count_by_esp: dict[str, int] = {}
     trial_by_esp: dict[str, int] = {}
     file_path_by_esp: dict[str, Path] = {}
 
-    session_timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    session_timestamp = time.strftime("%d-%m_%H-%M-%S")
     start_time = time.monotonic()
 
-    print(f"\nUDP server listening on {UDP_IP}:{UDP_PORT}")
+    print(f"\nUDP server listening on {UDP_IP}:{udp_port}")
     print(f"Saving CSI frames to: {save_directory}")
-    if duration_minutes > 0:
-        print(f"Collection will run for {duration_minutes} minute(s)")
+    if duration_seconds > 0:
+        print(f"Collection will run for {duration_seconds} second(s)")
     else:
         print("Collection will run indefinitely (press Ctrl+C to stop)")
     input("Press ENTER to run")
@@ -195,12 +228,12 @@ def main() -> int:
 
     try:
         while True:
-            if duration_minutes > 0:
-                elapsed_minutes = (time.monotonic() - start_time) / 60
-                if elapsed_minutes >= duration_minutes:
+            if duration_seconds > 0:
+                elapsed_seconds = time.monotonic() - start_time
+                if elapsed_seconds >= duration_seconds:
                     print("\n----------------------------------------------")
                     print(
-                        f"Duration of {duration_minutes} minute(s) reached. Stopping collection.",
+                        f"Duration of {duration_seconds} second(s) reached. Stopping collection.",
                     )
                     print("----------------------------------------------")
                     break
@@ -229,18 +262,17 @@ def main() -> int:
                 trial_by_esp[esp_id] = get_next_trial_number(
                     save_directory,
                     scenario_id,
-                    zone,
+                    location,
                     user_id,
-                    activity_id,
                     esp_id,
                 )
                 file_path_by_esp[esp_id] = save_directory / (
-                    f"{scenario_id}_{zone}_{user_id}_{activity_id}_{esp_id}_"
+                    f"{scenario_id}_{location}_{user_id}_{esp_id}_"
                     f"{trial_by_esp[esp_id]:02d}_{session_timestamp}.csv"
                 )
                 print(
                     f"ESP {esp_id} - Using trial {trial_by_esp[esp_id]:02d} "
-                    f"for {scenario_id}/{zone}/{user_id}/{activity_id}/{esp_id}",
+                    f"for {scenario_id}/{location}/{user_id}/{esp_id}",
                 )
 
             output_file = file_path_by_esp[esp_id]
