@@ -51,7 +51,7 @@ def sort_meta_info(
     )
 
 
-def get_csv_files_generalistic(path: str) -> FileMap:
+def get_csv_files(path: str) -> FileMap:
     files: FileMap = {}
     base: Path = Path(path)
 
