@@ -8,11 +8,10 @@ import time
 from pathlib import Path
 
 UDP_IP = "0.0.0.0"
-UDP_PORT = 5001
+DEFAULT_UDP_PORT = 5001
 RECV_BUFFER_SIZE = 4096
 SOCKET_TIMEOUT_SECONDS = 1.0
 DEFAULT_SAVE_DIRECTORY = Path.cwd() / "csi_frames"
-DEFAULT_UDP_PORT = 5001
 
 ESP_MAC_MAP = {
     "90:38:0C:EA:D3:78": "01",
@@ -39,6 +38,7 @@ ESP_MAC_MAP = {
 }
 
 VALID_ID_PATTERN = re.compile(r"^[A-Za-z0-9.:-]+$")
+LOCATION_PATTERN = re.compile(r"^[A-G]-(?:[1-9]|1[0-4])$")
 
 
 def prompt_text(prompt: str) -> str:
@@ -64,21 +64,23 @@ def prompt_user_id() -> str:
 
 
 def prompt_location() -> str:
-    value = prompt_text("* * Enter location (x-y, e.g. 1-3): ")
+    value = prompt_text("* * Enter location (e.g. A-4, D-2, F-10): ")
     if not value:
         raise ValueError("Location cannot be empty.")
 
-    normalized_value = value.replace(" ", "")
-    if not re.fullmatch(r"\d+-\d+", normalized_value):
-        raise ValueError("Location must follow the x-y pattern using numbers.")
+    normalized_value = value.replace(" ", "").upper()
+    if not LOCATION_PATTERN.fullmatch(normalized_value):
+        raise ValueError(
+            "Location must use a letter from A to G and a number from 1 to 14, e.g. A-4.",
+        )
 
     return normalized_value
 
 
 def prompt_run_duration_seconds() -> float:
-    default_duration_seconds = 60.0
+    default_duration_seconds = 30.0
     raw_value = prompt_text(
-        "* * Run for 60 seconds? Press ENTER for yes, or type anything else to set a custom duration: ",
+        "* * Run for 30 seconds? Press ENTER for yes, or type anything else to set a custom duration: ",
     )
 
     if not raw_value:
@@ -140,6 +142,7 @@ def get_next_trial_number(
 
 def create_socket(udp_port: int) -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
     sock.settimeout(SOCKET_TIMEOUT_SECONDS)
     sock.bind((UDP_IP, udp_port))
@@ -152,7 +155,7 @@ def prompt_session_metadata() -> tuple[str, str, str, float]:
     scenario_id = prompt_identifier("* * Enter scenario: ")
 
     print("\n* Location")
-    print(" * Location label in x-y format (e.g., 1-3, 5-2, 7-9)")
+    print(" * Location label in x-y format (e.g., A-4, D-2, F-10)")
     location = prompt_location()
 
     print("\n* User ID")
@@ -185,6 +188,16 @@ def parse_packet(data: bytes) -> tuple[str, str] | None:
     return esp_mac, csi_data
 
 
+def get_esp_id(esp_mac: str) -> str:
+    esp_id = ESP_MAC_MAP.get(esp_mac)
+
+    if esp_id is None:
+        esp_id = esp_mac.replace(":", "")
+        print(f"Warning: unknown ESP MAC {esp_mac}. Using fallback ID {esp_id}.")
+
+    return esp_id
+
+
 def main() -> int:
     try:
         user_id, scenario_id, location, duration_seconds = prompt_session_metadata()
@@ -215,15 +228,18 @@ def main() -> int:
     file_path_by_esp: dict[str, Path] = {}
 
     session_timestamp = time.strftime("%d-%m_%H-%M-%S")
-    start_time = time.monotonic()
 
     print(f"\nUDP server listening on {UDP_IP}:{udp_port}")
     print(f"Saving CSI frames to: {save_directory}")
+
     if duration_seconds > 0:
         print(f"Collection will run for {duration_seconds} second(s)")
     else:
         print("Collection will run indefinitely (press Ctrl+C to stop)")
+
     input("Press ENTER to run")
+    start_time = time.monotonic()
+
     print("----------------------------------------------")
 
     try:
@@ -250,13 +266,11 @@ def main() -> int:
                 continue
 
             esp_mac, csi_data = parsed_packet
-            esp_id = ESP_MAC_MAP.get(esp_mac, esp_mac.replace(":", ""))
+            esp_id = get_esp_id(esp_mac)
 
             packet_count_by_esp[esp_id] = packet_count_by_esp.get(esp_id, 0) + 1
             print(f"Data received from: {esp_mac}")
-            print(
-                f"ESP {esp_id} - Packets received: {packet_count_by_esp[esp_id]}",
-            )
+            print(f"ESP {esp_id} - Packets received: {packet_count_by_esp[esp_id]}")
 
             if esp_id not in trial_by_esp:
                 trial_by_esp[esp_id] = get_next_trial_number(
@@ -270,12 +284,14 @@ def main() -> int:
                     f"{scenario_id}_{location}_{user_id}_{esp_id}_"
                     f"{trial_by_esp[esp_id]:02d}_{session_timestamp}.csv"
                 )
+
                 print(
                     f"ESP {esp_id} - Using trial {trial_by_esp[esp_id]:02d} "
                     f"for {scenario_id}/{location}/{user_id}/{esp_id}",
                 )
 
             output_file = file_path_by_esp[esp_id]
+
             try:
                 with output_file.open("a", encoding="utf-8", newline="") as file:
                     file.write(f"{csi_data}\n")
@@ -286,6 +302,7 @@ def main() -> int:
 
             print(f"CSI saved: ESP {esp_id} -> {output_file.name}")
             print("----------------------------------------------")
+
     except KeyboardInterrupt:
         print("\nInterrupted by user. Stopping collection.")
     finally:

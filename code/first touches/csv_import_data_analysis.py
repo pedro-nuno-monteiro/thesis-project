@@ -1,0 +1,102 @@
+import re
+import warnings
+from pathlib import Path
+
+FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, Path]]]]]
+
+# scenario_id - zone - user_id - activity_id - esp_id - trial - date - time.csv
+# example: 22313_ABC_00_00_05_01_2026-03-12_12-46-30.csv
+PATTERN = re.compile(
+    r"^(?P<scenario>\d+)_(?:(?P<zone>[A-Z]+)_)?(?P<user>\d+)_(?P<activity>\d+)_(?P<esp>\d+)_(?P<trial>\d+)_(?P<date>\d{4}-\d{2}-\d{2})_(?P<time>\d{2}-\d{2}(?:-\d{2})?)\.csv$",
+)
+
+
+def sort_meta_info(
+    path: str,
+) -> tuple[list[str], list[str], list[str], list[str], list[str], list[str]]:
+    base: Path = Path(path)
+    scenarios_id = set()
+    users_id = set()
+    activities_id = set()
+    esps_id = set()
+    trial_id = set()
+    zones_id = set()
+
+    for file in base.glob("*.csv"):
+        match = PATTERN.match(file.name)
+        if not match:
+            print("skipped on no match, ", file.name)
+            continue
+
+        scenario = match.group("scenario")
+        user = match.group("user")
+        activity = match.group("activity")
+        esp = match.group("esp")
+        trial = match.group("trial")
+        zone = match.group("zone")
+
+        if zone:
+            scenario_with_zone = f"{scenario}_{zone}"
+            zones_id.add(zone)
+        else:
+            scenario_with_zone = scenario
+
+        scenarios_id.add(scenario_with_zone)
+        users_id.add(user)
+        activities_id.add(activity)
+        esps_id.add(esp)
+        trial_id.add(trial)
+
+    return (
+        sorted(scenarios_id),
+        sorted(users_id),
+        sorted(activities_id),
+        sorted(esps_id),
+        sorted(trial_id),
+        sorted(zones_id),
+    )
+
+
+def get_csv_files_generalistic(path: str) -> FileMap:
+    files: FileMap = {}
+    base: Path = Path(path)
+
+    for file in base.glob("*.csv"):
+        match = PATTERN.match(file.name)
+        if not match:
+            continue
+
+        scenario = match.group("scenario")
+        zone = match.group("zone")
+        user = match.group("user")
+        activity = match.group("activity")
+        esp = match.group("esp")
+        trial = match.group("trial")
+
+        if zone:
+            scenario_key = f"scenario_{scenario}_{zone}"
+        else:
+            scenario_key = f"scenario_{scenario}"
+
+        user_key = f"user_{user}"
+        activity_key = f"activity_{activity}"
+        esp_key = f"esp_{esp}"
+        trial_key = f"trial_{trial}"
+
+        files.setdefault(scenario_key, {})
+        files[scenario_key].setdefault(user_key, {})
+        files[scenario_key][user_key].setdefault(activity_key, {})
+        files[scenario_key][user_key][activity_key].setdefault(esp_key, {})
+        trial_path = files[scenario_key][user_key][activity_key][esp_key].get(trial_key)
+        if trial_path is not None:
+            warning_msg = (
+                "Multiple CSV paths found for the same "
+                f"scenario/user/activity/esp/trial: {scenario_key}/{user_key}/{activity_key}/"
+                f"{esp_key}/{trial_key}. Existing: {trial_path.name}, New: {file.name}"
+            )
+            warnings.warn(warning_msg, stacklevel=2)
+            continue
+
+        files[scenario_key][user_key][activity_key][esp_key][trial_key] = file
+
+    return files
