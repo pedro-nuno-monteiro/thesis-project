@@ -7,7 +7,7 @@ FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, Path]]]]]
 # scenario_id - location_x-location_y - user_id - esp_id - trial - timestamp.csv
 # 1_A-1_00_10_01_15-05_14-59-23.csv
 PATTERN = re.compile(
-    r"^(?P<scenario>\d+)_(?P<location>[A-G]-(?:[1-9]|1[0-4]))_"
+    r"^(?P<scenario>\d+)_(?P<location>(?:[A-G]-(?:[1-9]|1[0-4])|Z-0))_"
     r"(?P<user>\d+)_(?P<esp>\d+)_(?P<trial>\d+)_"
     r"(?P<timestamp>\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.csv$",
     re.IGNORECASE,

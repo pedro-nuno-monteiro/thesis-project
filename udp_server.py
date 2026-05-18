@@ -11,7 +11,7 @@ UDP_IP = "0.0.0.0"
 DEFAULT_UDP_PORT = 5001
 RECV_BUFFER_SIZE = 4096
 SOCKET_TIMEOUT_SECONDS = 1.0
-DEFAULT_SAVE_DIRECTORY = Path.cwd() / "csi_frames"
+DEFAULT_SAVE_DIRECTORY = Path.cwd() / "csi_packets"
 
 ESP_MAC_MAP = {
     "90:38:0C:EA:D3:78": "01",
@@ -38,7 +38,7 @@ ESP_MAC_MAP = {
 }
 
 VALID_ID_PATTERN = re.compile(r"^[A-Za-z0-9.:-]+$")
-LOCATION_PATTERN = re.compile(r"^[A-G]-(?:[1-9]|1[0-4])$")
+LOCATION_PATTERN = re.compile(r"^(?:(?P<letter>[A-G])-?(?P<number>[1-9]|1[0-4])|Z-?0)$")
 
 
 def prompt_text(prompt: str) -> str:
@@ -63,18 +63,33 @@ def prompt_user_id() -> str:
     return value.zfill(2)
 
 
-def prompt_location() -> str:
-    value = prompt_text("* * Enter location (e.g. A-4, D-2, F-10): ")
+def normalize_location(value: str) -> str:
     if not value:
         raise ValueError("Location cannot be empty.")
 
     normalized_value = value.replace(" ", "").upper()
-    if not LOCATION_PATTERN.fullmatch(normalized_value):
+    match = LOCATION_PATTERN.fullmatch(normalized_value)
+    if not match:
         raise ValueError(
-            "Location must use a letter from A to G and a number from 1 to 14, e.g. A-4.",
+            "Location must use a letter from A to G and a number from 1 to 14, e.g. A4 or A-4, or Z0/Z-0 for an empty room.",
         )
 
-    return normalized_value
+    if normalized_value.replace("-", "") == "Z0":
+        return "Z-0"
+
+    return f"{match.group('letter')}-{match.group('number')}"
+
+
+def prompt_location() -> str:
+    value = prompt_text(" * * Enter location (e.g. A4, D-2, F10, Z0 for empty room): ")
+    return normalize_location(value)
+
+
+def prompt_location_or_stop() -> str | None:
+    value = prompt_text("* * Enter location, or press ENTER to stop: ")
+    if not value:
+        return None
+    return normalize_location(value)
 
 
 def prompt_run_duration_seconds() -> float:
@@ -86,12 +101,18 @@ def prompt_run_duration_seconds() -> float:
     if not raw_value:
         return default_duration_seconds
 
-    raw_duration = prompt_text("* * Enter duration in seconds (0 for unlimited): ")
+    raw_duration = prompt_text("* * Enter duration in seconds: ")
     try:
-        return max(float(raw_duration), 0.0)
+        duration_seconds = float(raw_duration)
     except ValueError:
-        print("Invalid duration. Falling back to unlimited collection.")
-        return 0.0
+        print("Invalid duration. Falling back to 30 seconds.")
+        return default_duration_seconds
+
+    if duration_seconds <= 0:
+        print("Duration must be greater than 0. Falling back to 30 seconds.")
+        return default_duration_seconds
+
+    return duration_seconds
 
 
 def resolve_save_directory() -> Path:
@@ -149,14 +170,10 @@ def create_socket(udp_port: int) -> socket.socket:
     return sock
 
 
-def prompt_session_metadata() -> tuple[str, str, str, float]:
+def prompt_session_metadata() -> tuple[str, str, float]:
     print("\n* Scenario ID")
     print("* 1, 2, 3, etc.")
     scenario_id = prompt_identifier("* * Enter scenario: ")
-
-    print("\n* Location")
-    print(" * Location label in x-y format (e.g., A-4, D-2, F-10)")
-    location = prompt_location()
 
     print("\n* User ID")
     print("* 00 - Nobody")
@@ -166,7 +183,13 @@ def prompt_session_metadata() -> tuple[str, str, str, float]:
     print("\n* Collection Duration")
     duration_seconds = prompt_run_duration_seconds()
 
-    return user_id, scenario_id, location, duration_seconds
+    return user_id, scenario_id, duration_seconds
+
+
+def print_location_help() -> None:
+    print("\n * Location")
+    print(" * Location label in x-y format (e.g., A4, A-4, a4, a-4)")
+    print(" * Z-0 - Empty room")
 
 
 def parse_packet(data: bytes) -> tuple[str, str] | None:
@@ -198,9 +221,113 @@ def get_esp_id(esp_mac: str) -> str:
     return esp_id
 
 
+def drain_pending_packets(sock: socket.socket, max_seconds: float = 0.25) -> int:
+    original_timeout = sock.gettimeout()
+    drained_packets = 0
+    deadline = time.monotonic() + max_seconds
+    sock.setblocking(False)
+
+    try:
+        while time.monotonic() < deadline:
+            try:
+                sock.recvfrom(RECV_BUFFER_SIZE)
+            except (BlockingIOError, InterruptedError, socket.timeout):
+                break
+            drained_packets += 1
+    finally:
+        sock.settimeout(original_timeout)
+
+    return drained_packets
+
+
+def collect_location(
+    sock: socket.socket,
+    save_directory: Path,
+    scenario_id: str,
+    location: str,
+    user_id: str,
+    duration_seconds: float,
+) -> None:
+    packet_count_by_esp: dict[str, int] = {}
+    trial_by_esp: dict[str, int] = {}
+    file_path_by_esp: dict[str, Path] = {}
+    capture_timestamp = time.strftime("%d-%m_%H-%M-%S")
+    start_time = time.monotonic()
+
+    print("----------------------------------------------")
+    print(f"Recording location {location}")
+
+    while True:
+        if duration_seconds > 0:
+            elapsed_seconds = time.monotonic() - start_time
+            if elapsed_seconds >= duration_seconds:
+                print("\n----------------------------------------------")
+                print(
+                    f"Duration of {duration_seconds} second(s) reached for {location}.",
+                )
+                print("----------------------------------------------")
+                break
+
+        try:
+            data, addr = sock.recvfrom(RECV_BUFFER_SIZE)
+        except socket.timeout:
+            continue
+
+        parsed_packet = parse_packet(data)
+        if parsed_packet is None:
+            print(f"Invalid packet received from {addr}")
+            print("----------------------------------------------")
+            continue
+
+        esp_mac, csi_data = parsed_packet
+        esp_id = get_esp_id(esp_mac)
+
+        packet_count_by_esp[esp_id] = packet_count_by_esp.get(esp_id, 0) + 1
+        # Debug:
+        # print(f"Data received from: {esp_mac}")
+        # print(f"ESP {esp_id} - Packets received: {packet_count_by_esp[esp_id]}")
+
+        if esp_id not in trial_by_esp:
+            trial_by_esp[esp_id] = get_next_trial_number(
+                save_directory,
+                scenario_id,
+                location,
+                user_id,
+                esp_id,
+            )
+            file_path_by_esp[esp_id] = save_directory / (
+                f"{scenario_id}_{location}_{user_id}_{esp_id}_"
+                f"{trial_by_esp[esp_id]:02d}_{capture_timestamp}.csv"
+            )
+
+            print(
+                f"ESP {esp_id} - Using trial {trial_by_esp[esp_id]:02d} "
+                f"for {scenario_id}/{location}/{user_id}/{esp_id}",
+            )
+
+        output_file = file_path_by_esp[esp_id]
+
+        try:
+            with output_file.open("a", encoding="utf-8", newline="") as file:
+                file.write(f"{csi_data}\n")
+        except OSError as exc:
+            print(f"Failed to write packet for ESP {esp_id}: {exc}")
+            print("----------------------------------------------")
+            continue
+
+        # Debug:
+        # print(f"CSI saved: ESP {esp_id} -> {output_file.name}")
+        # print("----------------------------------------------")
+
+    packet_summary = " ".join(
+        f"{esp_id}:{packet_count}" for esp_id, packet_count in sorted(packet_count_by_esp.items())
+    )
+    print(f"{location} packets | {packet_summary or 'none'}")
+
+
 def main() -> int:
     try:
-        user_id, scenario_id, location, duration_seconds = prompt_session_metadata()
+        user_id, scenario_id, duration_seconds = prompt_session_metadata()
     except ValueError as exc:
         print(f"Input error: {exc}")
         return 1
@@ -223,85 +350,36 @@ def main() -> int:
         )
         return 1
 
-    packet_count_by_esp: dict[str, int] = {}
-    trial_by_esp: dict[str, int] = {}
-    file_path_by_esp: dict[str, Path] = {}
-
-    session_timestamp = time.strftime("%d-%m_%H-%M-%S")
-
     print(f"\nUDP server listening on {UDP_IP}:{udp_port}")
     print(f"Saving CSI frames to: {save_directory}")
 
-    if duration_seconds > 0:
-        print(f"Collection will run for {duration_seconds} second(s)")
-    else:
-        print("Collection will run indefinitely (press Ctrl+C to stop)")
-
-    input("Press ENTER to run")
-    start_time = time.monotonic()
-
-    print("----------------------------------------------")
+    print(f"Each location will record for {duration_seconds} second(s)")
 
     try:
         while True:
-            if duration_seconds > 0:
-                elapsed_seconds = time.monotonic() - start_time
-                if elapsed_seconds >= duration_seconds:
-                    print("\n----------------------------------------------")
-                    print(
-                        f"Duration of {duration_seconds} second(s) reached. Stopping collection.",
-                    )
-                    print("----------------------------------------------")
-                    break
-
             try:
-                data, addr = sock.recvfrom(RECV_BUFFER_SIZE)
-            except socket.timeout:
+                print_location_help()
+                location = prompt_location_or_stop()
+            except ValueError as exc:
+                print(f"Input error: {exc}")
                 continue
 
-            parsed_packet = parse_packet(data)
-            if parsed_packet is None:
-                print(f"Invalid packet received from {addr}")
-                print("----------------------------------------------")
-                continue
+            if location is None:
+                break
 
-            esp_mac, csi_data = parsed_packet
-            esp_id = get_esp_id(esp_mac)
-
-            packet_count_by_esp[esp_id] = packet_count_by_esp.get(esp_id, 0) + 1
-            print(f"Data received from: {esp_mac}")
-            print(f"ESP {esp_id} - Packets received: {packet_count_by_esp[esp_id]}")
-
-            if esp_id not in trial_by_esp:
-                trial_by_esp[esp_id] = get_next_trial_number(
-                    save_directory,
-                    scenario_id,
-                    location,
-                    user_id,
-                    esp_id,
-                )
-                file_path_by_esp[esp_id] = save_directory / (
-                    f"{scenario_id}_{location}_{user_id}_{esp_id}_"
-                    f"{trial_by_esp[esp_id]:02d}_{session_timestamp}.csv"
-                )
-
-                print(
-                    f"ESP {esp_id} - Using trial {trial_by_esp[esp_id]:02d} "
-                    f"for {scenario_id}/{location}/{user_id}/{esp_id}",
-                )
-
-            output_file = file_path_by_esp[esp_id]
-
-            try:
-                with output_file.open("a", encoding="utf-8", newline="") as file:
-                    file.write(f"{csi_data}\n")
-            except OSError as exc:
-                print(f"Failed to write packet for ESP {esp_id}: {exc}")
-                print("----------------------------------------------")
-                continue
-
-            print(f"CSI saved: ESP {esp_id} -> {output_file.name}")
-            print("----------------------------------------------")
+            input(f"\nVolunteer to {location}. ENTER to record")
+            drained_packets = drain_pending_packets(sock)
+            if drained_packets:
+                print(f"Discarded {drained_packets} transition packet(s).")
+            collect_location(
+                sock,
+                save_directory,
+                scenario_id,
+                location,
+                user_id,
+                duration_seconds,
+            )
+            print(f"Paused after {location}. Transition packets will not be saved.")
 
     except KeyboardInterrupt:
         print("\nInterrupted by user. Stopping collection.")
