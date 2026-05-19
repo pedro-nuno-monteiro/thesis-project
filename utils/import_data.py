@@ -4,8 +4,9 @@ from pathlib import Path
 
 FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, Path]]]]]
 USER_NAMES = {
-    "01": "Pedro",
-    "02": "Cabaço",
+    "01": "Pedro Monteiro",
+    "02": "Guilherme Cabaço",
+    "03": "Henrique",
 }
 
 # scenario_id - location_x-location_y - user_id - esp_id - trial - timestamp.csv
