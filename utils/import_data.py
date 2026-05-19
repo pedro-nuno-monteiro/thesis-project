@@ -3,6 +3,10 @@ import warnings
 from pathlib import Path
 
 FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, Path]]]]]
+USER_NAMES = {
+    "01": "Pedro",
+    "02": "Cabaço",
+}
 
 # scenario_id - location_x-location_y - user_id - esp_id - trial - timestamp.csv
 # 1_A-1_00_10_01_15-05_14-59-23.csv
@@ -90,3 +94,60 @@ def get_csv_files(path: str) -> FileMap:
         files[scenario_key][location_key][user_key][esp_key][trial_key] = file
 
     return files
+
+
+def get_locations_by_user(files: FileMap) -> dict[str, set[str]]:
+    locations_by_user: dict[str, set[str]] = {}
+
+    for locations_map in files.values():
+        for location_key, users_map in locations_map.items():
+            location = location_key.removeprefix("location_")
+
+            for user_key in users_map:
+                user_id = user_key.removeprefix("user_")
+                locations_by_user.setdefault(user_id, set()).add(location)
+
+    return locations_by_user
+
+
+def print_user_location_tables(
+    files: FileMap,
+    row_letters: str = "ABCDEF",
+    max_column: int = 14,
+) -> None:
+    locations_by_user = get_locations_by_user(files)
+
+    columns = list(range(1, max_column + 1))
+    header = "   " + " ".join(f"{column:>2}" for column in columns)
+    user_ids = sorted(set(USER_NAMES) | set(locations_by_user))
+
+    if not user_ids:
+        print("No user locations found.")
+        return
+
+    for user_id in user_ids:
+        user_name = USER_NAMES.get(user_id, "Unknown")
+        user_locations = locations_by_user.get(user_id, set())
+
+        print(f"\nUser {user_id} - {user_name}")
+        print(header)
+
+        for row_letter in row_letters:
+            cells = [
+                " X" if f"{row_letter}-{column}" in user_locations else " ."
+                for column in columns
+            ]
+            print(f"{row_letter} |" + " ".join(cells))
+
+        grid_locations = {
+            f"{row_letter}-{column}"
+            for row_letter in row_letters
+            for column in columns
+        }
+        extra_locations = sorted(user_locations - grid_locations)
+
+        if extra_locations:
+            print(f"Other locations: {', '.join(extra_locations)}")
+
+        if not user_locations:
+            print("No files found for this user.")
