@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 import re
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping, Sequence
+
+    import pandas as pd
+    from matplotlib.axes import Axes
 
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 MagnitudeSetMap = dict[str, CsiMap]
@@ -16,6 +22,19 @@ SelectedMagnitudeSetEntry = tuple[str, np.ndarray | None]
 SelectedMagnitudeSetGroup = tuple[str, str, str, str, str, list[SelectedMagnitudeSetEntry]]
 
 LOCATION_PATTERN = re.compile(r"^(?:(?P<letter>[A-G])(?:-)?(?P<number>[1-9]|1[0-4])|Z-?0)$")
+RF_METRIC_COLUMNS = (
+    "accuracy",
+    "balanced_accuracy",
+    "precision_macro",
+    "recall_macro",
+    "f1_macro",
+    "precision_weighted",
+    "recall_weighted",
+    "f1_weighted",
+)
+RF_SPLIT_ORDER = ("random", "group")
+RF_DATASET_ORDER = ("2.4 GHz", "5 GHz", "Fusion")
+CONFUSION_MATRIX_DIMS = 2
 
 
 def infer_esp_pairs(esps_map: dict[str, dict[str, np.ndarray]]) -> list[tuple[str, str]]:
@@ -383,6 +402,211 @@ def make_subplot_grid(entry_count: int, column_count: int) -> tuple[int, int]:
 def hide_unused_axes(axes: np.ndarray, used_count: int) -> None:
     for ax in axes.ravel()[used_count:]:
         ax.set_visible(False)
+
+
+def order_existing_values(
+    values: Sequence[str],
+    preferred_order: Sequence[str],
+) -> list[str]:
+    value_set = set(values)
+    ordered_values = [value for value in preferred_order if value in value_set]
+    ordered_values.extend(sorted(value_set - set(ordered_values)))
+    return ordered_values
+
+
+def plot_random_forest_metric_comparison(
+    results: pd.DataFrame,
+    metric_columns: Sequence[str] = RF_METRIC_COLUMNS,
+    split_order: Sequence[str] = RF_SPLIT_ORDER,
+    dataset_order: Sequence[str] = RF_DATASET_ORDER,
+) -> None:
+    if results.empty:
+        print("No Random Forest results to plot.")
+        return
+
+    available_metrics = [metric for metric in metric_columns if metric in results.columns]
+    if not available_metrics:
+        print("No Random Forest metric columns found.")
+        return
+
+    datasets = order_existing_values(results["dataset"].astype(str).unique(), dataset_order)
+    splits = order_existing_values(results["split"].astype(str).unique(), split_order)
+    row_count, column_count = make_subplot_grid(len(available_metrics), 2)
+    fig, axes = plt.subplots(
+        row_count,
+        column_count,
+        figsize=(7.5 * column_count, 4.4 * row_count),
+        constrained_layout=True,
+        squeeze=False,
+    )
+    x_positions = np.arange(len(datasets))
+    bar_width = min(0.36, 0.80 / max(1, len(splits)))
+
+    for ax, metric in zip(axes.ravel(), available_metrics):
+        for split_idx, split_name in enumerate(splits):
+            values = [
+                _random_forest_metric_value(results, dataset_name, split_name, metric)
+                for dataset_name in datasets
+            ]
+            offset = (split_idx - (len(splits) - 1) / 2) * bar_width
+            bars = ax.bar(
+                x_positions + offset,
+                values,
+                width=bar_width,
+                label=split_name,
+            )
+            ax.bar_label(bars, fmt="%.3f", padding=3, fontsize=8)
+
+        ax.set_title(metric.replace("_", " ").title())
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(datasets)
+        ax.set_ylim(0.0, 1.05)
+        ax.set_ylabel("Score")
+        ax.grid(axis="y", alpha=0.25)
+        ax.legend(title="Split")
+
+    hide_unused_axes(axes, len(available_metrics))
+    fig.suptitle("Random Forest Metrics by Dataset and Split")
+    plt.show()
+
+
+def _random_forest_metric_value(
+    results: pd.DataFrame,
+    dataset_name: str,
+    split_name: str,
+    metric: str,
+) -> float:
+    rows = results[
+        (results["dataset"].astype(str) == dataset_name)
+        & (results["split"].astype(str) == split_name)
+    ]
+    if rows.empty:
+        return np.nan
+
+    return float(rows.iloc[0][metric])
+
+
+def plot_random_forest_confusion_matrices(
+    confusion_matrices: Mapping[tuple[str, str], object],
+    split_order: Sequence[str] = RF_SPLIT_ORDER,
+    dataset_order: Sequence[str] = RF_DATASET_ORDER,
+    *,
+    normalize: bool = False,
+    cmap: str = "Blues",
+) -> None:
+    if not confusion_matrices:
+        print("No Random Forest confusion matrices to plot.")
+        return
+
+    datasets = order_existing_values(
+        [dataset_name for dataset_name, _ in confusion_matrices],
+        dataset_order,
+    )
+    splits = order_existing_values(
+        [split_name for _, split_name in confusion_matrices],
+        split_order,
+    )
+    fig, axes = plt.subplots(
+        len(datasets),
+        len(splits),
+        figsize=(5.4 * len(splits), 4.6 * len(datasets)),
+        constrained_layout=True,
+        squeeze=False,
+    )
+    vmax = 1.0 if normalize else _max_confusion_matrix_value(confusion_matrices)
+    images = []
+
+    for row_idx, dataset_name in enumerate(datasets):
+        for column_idx, split_name in enumerate(splits):
+            ax = axes[row_idx, column_idx]
+            matrix = confusion_matrices.get((dataset_name, split_name))
+
+            if matrix is None:
+                _plot_empty_confusion_matrix(ax, dataset_name, split_name)
+                continue
+
+            raw_values, actual_labels, predicted_labels = _confusion_matrix_values(matrix)
+            values = _normalize_confusion_matrix(raw_values) if normalize else raw_values
+            image = ax.imshow(values, cmap=cmap, vmin=0.0, vmax=vmax)
+            images.append(image)
+            _annotate_confusion_matrix(
+                ax,
+                raw_values,
+                values,
+                normalize=normalize,
+                threshold=vmax / 2,
+            )
+            ax.set_title(f"{dataset_name} | {split_name}")
+            ax.set_xlabel("Predicted label")
+            ax.set_ylabel("Actual label")
+            ax.set_xticks(np.arange(len(predicted_labels)))
+            ax.set_xticklabels(predicted_labels, rotation=45, ha="right")
+            ax.set_yticks(np.arange(len(actual_labels)))
+            ax.set_yticklabels(actual_labels)
+
+    if images:
+        colorbar_label = "Row-normalized proportion" if normalize else "Count"
+        fig.colorbar(images[-1], ax=axes.ravel().tolist(), shrink=0.82, label=colorbar_label)
+
+    title_suffix = "Normalized" if normalize else "Counts"
+    fig.suptitle(f"Random Forest Confusion Matrices ({title_suffix})")
+    plt.show()
+
+
+def _max_confusion_matrix_value(confusion_matrices: Mapping[tuple[str, str], object]) -> float:
+    max_values = []
+
+    for matrix in confusion_matrices.values():
+        values, _, _ = _confusion_matrix_values(matrix)
+        if values.size:
+            max_values.append(float(values.max()))
+
+    if not max_values:
+        return 1.0
+
+    return max(1.0, *max_values)
+
+
+def _confusion_matrix_values(matrix: object) -> tuple[np.ndarray, list[str], list[str]]:
+    if hasattr(matrix, "to_numpy"):
+        values = matrix.to_numpy(dtype=float)
+        actual_labels = [str(label) for label in matrix.index]
+        predicted_labels = [str(label) for label in matrix.columns]
+        return values, actual_labels, predicted_labels
+
+    values = np.asarray(matrix, dtype=float)
+    label_count = values.shape[0] if values.ndim == CONFUSION_MATRIX_DIMS else 0
+    labels = [str(label) for label in range(label_count)]
+    return values, labels, labels
+
+
+def _normalize_confusion_matrix(values: np.ndarray) -> np.ndarray:
+    row_sums = values.sum(axis=1, keepdims=True)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.divide(values, row_sums, out=np.zeros_like(values), where=row_sums != 0)
+
+
+def _annotate_confusion_matrix(
+    ax: Axes,
+    raw_values: np.ndarray,
+    values: np.ndarray,
+    *,
+    normalize: bool,
+    threshold: float,
+) -> None:
+    for row_idx in range(values.shape[0]):
+        for column_idx in range(values.shape[1]):
+            value = values[row_idx, column_idx]
+            label = f"{value:.2f}" if normalize else f"{raw_values[row_idx, column_idx]:.0f}"
+            color = "white" if value > threshold else "black"
+            ax.text(column_idx, row_idx, label, ha="center", va="center", color=color)
+
+
+def _plot_empty_confusion_matrix(ax: Axes, dataset_name: str, split_name: str) -> None:
+    ax.set_title(f"{dataset_name} | {split_name}")
+    ax.text(0.5, 0.5, "No matrix", ha="center", va="center", transform=ax.transAxes)
+    ax.set_axis_off()
 
 
 def plot_selected_magnitude_profiles(
