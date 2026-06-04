@@ -19,6 +19,9 @@ PATTERN = re.compile(
 )
 
 
+# This function scans the specified directory for CSV files that match a specific naming pattern.
+# It collects unique values for scenarios, locations, users, esps,
+# and trials found in the file names and returns them as sorted lists.
 def sort_meta_info(
     path: str,
 ) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
@@ -56,6 +59,9 @@ def sort_meta_info(
     )
 
 
+# This function scans the specified directory for CSV files that match a specific naming pattern.
+# It organizes the found files into a nested dictionary structure based on their metadata
+# (scenario, location, user, esp, trial).
 def get_csv_files(path: str) -> FileMap:
     files: FileMap = {}
     base: Path = Path(path)
@@ -97,6 +103,7 @@ def get_csv_files(path: str) -> FileMap:
     return files
 
 
+# This function extracts the locations associated with each user from the provided file map.
 def get_locations_by_user(files: FileMap) -> dict[str, set[str]]:
     locations_by_user: dict[str, set[str]] = {}
 
@@ -111,6 +118,8 @@ def get_locations_by_user(files: FileMap) -> dict[str, set[str]]:
     return locations_by_user
 
 
+# This function prints a table of user locations based on the provided file map.
+# It organizes the data by user and location, showing which locations each user has files for.
 def print_user_location_tables(
     files: FileMap,
     row_letters: str = "ABCDEF",

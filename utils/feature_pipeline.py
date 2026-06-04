@@ -31,6 +31,8 @@ ESP_IDS_BY_SCENARIO: dict[FeatureScenario, tuple[int, ...]] = {
 }
 
 
+# This function maps a location key to a room label (0, 1, 2, or 3)
+# based on the location's row and column.
 def room_label_for_location(location_key: str) -> int | None:
     location = location_key.removeprefix("location_").upper()
     if location == "Z-0":
@@ -55,6 +57,8 @@ def room_label_for_location(location_key: str) -> int | None:
     return None
 
 
+# This function computes statistical features for the given
+# magnitude data using a sliding window approach.
 def compute_window_features(
     magnitude: np.ndarray,
     *,
@@ -102,15 +106,9 @@ def compute_window_features(
     return features
 
 
-# function that builds a dataframe for a given frequency scenario, with one row
-# per window of features, and columns for metadata and features.
-# The dataframe is built by iterating over the magnitude data and extracting
-# features for each trial that has data for the required ESPs.
-# The function returns a dataframe with columns for the frequency scenario,
-# scenario, location, user, trial, group_id, window_idx, label, and features for each ESP.
-# The function takes parameters for window size, overlap size, whether to calibrate the
-# magnitude data, and whether to require all ESPs to be present for a trial.
-
+# This function builds a feature dataframe for a given
+# frequency scenario by iterating through the magnitude
+# data and extracting features for each trial that matches the scenario.
 def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
     magnitude_data: CsiMap,
     frequency_scenario: FeatureScenario,
@@ -162,10 +160,13 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
                     if not esp_features:
                         continue
 
+                    # determine the minimum number of windows across all ESPs for this trial
                     min_windows = min(features.shape[0] for features in esp_features.values())
                     if min_windows == 0:
                         continue
 
+                    # extend the feature columns list with any new
+                    # feature columns from this trial's ESPs
                     _extend_feature_columns(
                         feature_columns,
                         known_feature_columns,
@@ -190,7 +191,6 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
 
 # function that is called by the main script
 # builds three dataframes, one for each frequency scenario, and returns them as a tuple
-
 def build_frequency_feature_dataframes(
     magnitude_data: CsiMap,
     *,
@@ -275,6 +275,11 @@ def _subcarrier_count_from_features(features: np.ndarray) -> int:
     return features.shape[1] // feature_count
 
 
+# This function extracts features for each ESP in the given trial and returns a dictionary
+# mapping ESP keys to their corresponding feature arrays. The features are computed using the
+# compute_window_features function, which applies a sliding window to the magnitude data and
+# computes statistical features for each window. The function takes parameters for window size,
+# overlap size, and whether to calibrate the magnitude data before feature extraction.
 def _features_by_esp(  # noqa: PLR0913
     esps_map: dict[str, dict[str, np.ndarray]],
     selected_esp_keys: list[str],
@@ -302,7 +307,14 @@ def _features_by_esp(  # noqa: PLR0913
 
     return esp_features
 
-
+# This function builds a list of rows for a given group of features
+# corresponding to a specific trial.
+# Each row corresponds to a window of features and includes metadata
+# such as frequency scenario, scenario, location, user, trial, group_id, window index, and label.
+# The function iterates over the windows of features for each ESP and constructs a dictionary
+# for each window, which is then added to the list of rows.
+# The feature values for each ESP are included in the row with
+# column names that indicate the ESP, feature name, and sub
 def _rows_for_group(  # noqa: PLR0913
     esp_keys: tuple[str, ...],
     esp_features: dict[str, np.ndarray],
