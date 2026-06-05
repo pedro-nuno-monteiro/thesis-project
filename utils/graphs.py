@@ -35,6 +35,17 @@ RF_METRIC_COLUMNS = (
 RF_SPLIT_ORDER = ("random", "group")
 RF_DATASET_ORDER = ("2.4 GHz", "5 GHz", "Fusion")
 CONFUSION_MATRIX_DIMS = 2
+LOW_FREQUENCY_ESP_IDS = range(1, 11)
+HIGH_FREQUENCY_ESP_OFFSET = 10
+SPARSE_3D_SUBCARRIER_TICK_COUNT = 8
+RF_REPORT_METRIC_ROWS = {
+    "precision_macro": ("macro avg", "precision"),
+    "recall_macro": ("macro avg", "recall"),
+    "f1_macro": ("macro avg", "f1-score"),
+    "precision_weighted": ("weighted avg", "precision"),
+    "recall_weighted": ("weighted avg", "recall"),
+    "f1_weighted": ("weighted avg", "f1-score"),
+}
 
 
 def infer_esp_pairs(esps_map: dict[str, dict[str, np.ndarray]]) -> list[tuple[str, str]]:
@@ -102,6 +113,17 @@ def set_all_subcarrier_ticks(ax, subcarrier_count: int) -> None:
     subcarrier_index = np.arange(subcarrier_count)
     ax.set_xticks(subcarrier_index)
     ax.set_xticklabels(subcarrier_index, rotation=90, fontsize=6)
+
+
+def set_sparse_subcarrier_ticks(ax, subcarrier_count: int) -> None:
+    if subcarrier_count <= 0:
+        return
+
+    tick_count = min(SPARSE_3D_SUBCARRIER_TICK_COUNT, subcarrier_count)
+    tick_positions = np.linspace(0, subcarrier_count - 1, tick_count, dtype=int)
+    tick_positions = np.unique(tick_positions)
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_positions)
 
 
 def plot_pair_magnitude_profiles(
@@ -201,7 +223,7 @@ def plot_pair_magnitude_surfaces_3d(
                 ax.set_xlabel("Subcarrier index")
                 ax.set_ylabel("Packet number")
                 ax.set_zlabel("CSI magnitude")
-                set_all_subcarrier_ticks(ax, magnitude.shape[1])
+                set_sparse_subcarrier_ticks(ax, magnitude.shape[1])
                 fig.colorbar(surface, ax=ax, shrink=0.65, pad=0.08)
 
         fig.suptitle(f"3D CSI magnitude | {title}")
@@ -270,6 +292,36 @@ def sorted_location_keys(location_keys: set[str]) -> list[str]:
 
 def sorted_esp_keys(esp_keys: set[str]) -> list[str]:
     return sorted(esp_keys, key=lambda esp_key: int(format_esp_key(esp_key)))
+
+
+def paired_esp_keys(esp_keys: list[str]) -> list[str]:
+    esp_by_id: dict[int, str] = {}
+    unordered_esp_keys = []
+
+    for esp_key in esp_keys:
+        try:
+            esp_id = int(format_esp_key(esp_key))
+        except ValueError:
+            unordered_esp_keys.append(esp_key)
+            continue
+
+        esp_by_id[esp_id] = esp_key
+
+    ordered_esp_keys = []
+    used_ids: set[int] = set()
+
+    for low_esp_id in LOW_FREQUENCY_ESP_IDS:
+        high_esp_id = low_esp_id + HIGH_FREQUENCY_ESP_OFFSET
+
+        for esp_id in (low_esp_id, high_esp_id):
+            if esp_id in esp_by_id:
+                ordered_esp_keys.append(esp_by_id[esp_id])
+                used_ids.add(esp_id)
+
+    remaining_ids = sorted(set(esp_by_id) - used_ids)
+    ordered_esp_keys.extend(esp_by_id[esp_id] for esp_id in remaining_ids)
+    ordered_esp_keys.extend(unordered_esp_keys)
+    return ordered_esp_keys
 
 
 def get_available_location_keys(magnitudes: CsiMap) -> list[str]:
@@ -341,7 +393,7 @@ def prompt_esp_keys(magnitudes: CsiMap, location_key: str) -> list[str]:
     while True:
         answer = input("Which ESPs do you want to analyse? ").strip()
         if answer.lower() == "all":
-            return available_esps
+            return paired_esp_keys(available_esps)
 
         esp_keys = [
             esp_key
@@ -468,6 +520,35 @@ def plot_random_forest_metric_comparison(
     hide_unused_axes(axes, len(available_metrics))
     fig.suptitle("Random Forest Metrics by Dataset and Split")
     plt.show()
+
+
+def add_random_forest_report_metrics(
+    results: pd.DataFrame,
+    classification_reports: Mapping[tuple[str, str], pd.DataFrame],
+) -> pd.DataFrame:
+    enriched_results = results.copy()
+
+    for row_idx, row in enriched_results.iterrows():
+        model_key = (str(row["dataset"]), str(row["split"]))
+        report = classification_reports.get(model_key)
+        if report is None:
+            continue
+
+        for metric_column, (report_row, report_column) in RF_REPORT_METRIC_ROWS.items():
+            if metric_column not in enriched_results.columns:
+                enriched_results[metric_column] = np.nan
+            if not _has_report_metric(report, report_row, report_column):
+                continue
+
+            enriched_results.loc[row_idx, metric_column] = float(
+                report.loc[report_row, report_column],
+            )
+
+    return enriched_results
+
+
+def _has_report_metric(report: pd.DataFrame, report_row: str, report_column: str) -> bool:
+    return report_row in report.index and report_column in report.columns
 
 
 def _random_forest_metric_value(
@@ -702,7 +783,7 @@ def plot_selected_magnitude_surfaces_3d(
             ax.set_xlabel("Subcarrier index")
             ax.set_ylabel("Packet number")
             ax.set_zlabel("CSI magnitude")
-            set_all_subcarrier_ticks(ax, magnitude.shape[1])
+            set_sparse_subcarrier_ticks(ax, magnitude.shape[1])
 
         fig.suptitle(f"3D CSI magnitude | {title}")
         plt.show()
@@ -812,7 +893,7 @@ def prompt_esp_keys_for_magnitude_sets(
     while True:
         answer = input("Which ESPs do you want to analyse? ").strip()
         if answer.lower() == "all":
-            return available_esps
+            return paired_esp_keys(available_esps)
 
         esp_keys = [
             esp_key
@@ -1024,7 +1105,7 @@ def plot_selected_magnitude_set_surfaces_3d(
             ax.set_xlabel("Subcarrier index")
             ax.set_ylabel("Packet number")
             ax.set_zlabel("CSI magnitude")
-            set_all_subcarrier_ticks(ax, magnitude.shape[1])
+            set_sparse_subcarrier_ticks(ax, magnitude.shape[1])
 
         fig.suptitle(f"3D CSI magnitude | {title}")
         plt.show()
