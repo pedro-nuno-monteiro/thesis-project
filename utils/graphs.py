@@ -5,19 +5,23 @@ from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
+    from pathlib import Path
 
-    import pandas as pd
     from matplotlib.axes import Axes
 
+FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, str]]]]]
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 MagnitudeSetMap = dict[str, CsiMap]
 PairEntry = tuple[str, str, np.ndarray, np.ndarray]
 TrialPairGroup = tuple[str, str, str, str, list[PairEntry]]
 SelectedEntry = tuple[str, np.ndarray]
 SelectedTrialGroup = tuple[str, str, str, str, list[SelectedEntry]]
+SelectedFileEntry = tuple[str, str]
+SelectedFileGroup = tuple[str, str, str, str, list[SelectedFileEntry]]
 SelectedMagnitudeSetEntry = tuple[str, np.ndarray | None]
 SelectedMagnitudeSetGroup = tuple[str, str, str, str, str, list[SelectedMagnitudeSetEntry]]
 
@@ -38,6 +42,13 @@ CONFUSION_MATRIX_DIMS = 2
 LOW_FREQUENCY_ESP_IDS = range(1, 11)
 HIGH_FREQUENCY_ESP_OFFSET = 10
 SPARSE_3D_SUBCARRIER_TICK_COUNT = 8
+TWO_GHZ_CSI_COLUMN = 24
+FIVE_GHZ_CSI_COLUMN = 14
+TWO_GHZ_RAW_LENGTH = 128
+FIVE_GHZ_RAW_LENGTH = 114
+FIVE_GHZ_MIN_ESP_ID = 11
+FIVE_GHZ_MAX_ESP_ID = 20
+MAX_IQ_LEGEND_ITEMS = 12
 RF_REPORT_METRIC_ROWS = {
     "precision_macro": ("macro avg", "precision"),
     "recall_macro": ("macro avg", "recall"),
@@ -1149,29 +1160,26 @@ def plot_magnitude_sets_analysis_interactive(
     )
 
 
-def extract_complex_csi_from_file(file_path: str | Path, its5ghz: bool) -> np.ndarray:
-    import pandas as pd
-    import re
+def extract_complex_csi_from_file(file_path: str | Path, *, its5ghz: bool) -> np.ndarray:
+    csi_column = FIVE_GHZ_CSI_COLUMN if its5ghz else TWO_GHZ_CSI_COLUMN
+    expected_length = FIVE_GHZ_RAW_LENGTH if its5ghz else TWO_GHZ_RAW_LENGTH
+    file_csv = pd.read_csv(str(file_path), header=None, usecols=[csi_column])
+    csi_raw = file_csv.iloc[:, 0]
+    valid_csi: list[list[float]] = []
 
-    file_csv = pd.read_csv(str(file_path), header=None, usecols=[7, 14]) if its5ghz else pd.read_csv(str(file_path), header=None, usecols=[24])
-    csi_raw = file_csv.iloc[:, 1] if its5ghz else file_csv.iloc[:, 0]
-
-    total_values_2_4 = 128
-    total_sc_5 = 114
-    valid_csi = []
-
-    for _, entry in csi_raw.items():
+    for entry in csi_raw.values:
         match = re.search(r"\[(.*?)\]", str(entry))
         if not match:
             continue
-        nums = [float(n) for n in re.findall(r"-?\d+", match.group(1))]
-        if (its5ghz and len(nums) == total_sc_5) or (not its5ghz and len(nums) == total_values_2_4):
+
+        nums = [float(number) for number in re.findall(r"-?\d+", match.group(1))]
+        if len(nums) == expected_length:
             valid_csi.append(nums)
 
-    if len(valid_csi) == 0:
+    if not valid_csi:
         return np.empty((0, 0), dtype=complex)
 
-    valid_csi = np.array(valid_csi)
+    valid_csi = np.array(valid_csi, dtype=float)
     if not its5ghz:
         real = valid_csi[:, 1::2]
         imag = valid_csi[:, ::2]
@@ -1180,25 +1188,35 @@ def extract_complex_csi_from_file(file_path: str | Path, its5ghz: bool) -> np.nd
         active_sc = fft_csi[:, 6:58]
         active_sc = np.delete(active_sc, [26, 27], axis=1)
     else:
-        real = valid_csi[:, 1::2]
         imag = valid_csi[:, ::2]
+        real = valid_csi[:, 1::2]
         complex_csi = real + 1j * imag
         active_sc = np.delete(complex_csi, [28], axis=1)
 
     return active_sc
 
 
-def iter_selected_file_groups(files: FileMap, location_key: str, esp_keys: list[str]) -> Iterator[SelectedTrialGroup]:
+def iter_selected_file_groups(
+    files: FileMap,
+    location_key: str,
+    esp_keys: list[str],
+) -> Iterator[SelectedFileGroup]:
     for scenario_key, locations_map in files.items():
         users_map = locations_map.get(location_key)
         if users_map is None:
             continue
 
         for user_key, esps_map in users_map.items():
-            trial_keys = sorted({trial_key for esp_key in esp_keys for trial_key in esps_map.get(esp_key, {})})
+            trial_keys = sorted(
+                {
+                    trial_key
+                    for esp_key in esp_keys
+                    for trial_key in esps_map.get(esp_key, {})
+                },
+            )
 
             for trial_key in trial_keys:
-                entries: list[SelectedEntry] = []
+                entries: list[SelectedFileEntry] = []
                 for esp_key in esp_keys:
                     file_path = esps_map.get(esp_key, {}).get(trial_key)
                     if file_path is None:
@@ -1209,55 +1227,118 @@ def iter_selected_file_groups(files: FileMap, location_key: str, esp_keys: list[
                     yield (scenario_key, location_key, user_key, trial_key, entries)
 
 
-def plot_selected_iq_constellations(
+def iq_subcarrier_indices(
+    sc_indices: Sequence[int] | str | None,
+    subcarrier_count: int,
+) -> list[int]:
+    if subcarrier_count <= 0:
+        return []
+    if sc_indices is None:
+        return [0]
+    if isinstance(sc_indices, str):
+        if sc_indices.strip().lower() == "all":
+            return list(range(subcarrier_count))
+        sc_indices = [int(number) for number in re.findall(r"-?\d+", sc_indices)]
+
+    return [
+        sc
+        for sc in dict.fromkeys(int(sc) for sc in sc_indices)
+        if 0 <= sc < subcarrier_count
+    ]
+
+
+def plot_selected_iq_constellations(  # noqa: PLR0913, PLR0915
     files: FileMap,
     location_key: str,
     esp_keys: list[str],
-    sc_indices: list[int] | None = None,
+    sc_indices: Sequence[int] | str | None = None,
     sample_stride: int = 1,
     column_count: int = 2,
 ) -> None:
+    if sample_stride < 1:
+        msg = "sample_stride must be at least 1."
+        raise ValueError(msg)
+
     plot_count = 0
 
-    for scenario_key, _, user_key, trial_key, entries in iter_selected_file_groups(files, location_key, esp_keys):
+    for scenario_key, _, user_key, trial_key, entries in iter_selected_file_groups(
+        files,
+        location_key,
+        esp_keys,
+    ):
         row_count, column_count = make_subplot_grid(len(entries), column_count)
-        fig, axes = plt.subplots(row_count, column_count, figsize=(5 * column_count, max(4.5, 4.0 * row_count)), squeeze=False, constrained_layout=True)
+        fig, axes = plt.subplots(
+            row_count,
+            column_count,
+            figsize=(5.5 * column_count, max(4.5, 4.0 * row_count)),
+            squeeze=False,
+            constrained_layout=True,
+        )
         title = f"{scenario_key} / {location_key} / {user_key} / {trial_key}"
-
-        # default single subcarrier 0
-        if sc_indices is None:
-            sc_indices_local = [0]
-        else:
-            sc_indices_local = list(sc_indices)
 
         for ax, (esp_key, file_path) in zip(axes.ravel(), entries):
             try:
                 esp_id = int(esp_key.removeprefix("esp_"))
-            except Exception:
+            except ValueError:
                 esp_id = None
-            its5ghz = esp_id is not None and 11 <= esp_id <= 20
-            cplx = extract_complex_csi_from_file(file_path, its5ghz)
+            its5ghz = (
+                esp_id is not None and FIVE_GHZ_MIN_ESP_ID <= esp_id <= FIVE_GHZ_MAX_ESP_ID
+            )
+            cplx = extract_complex_csi_from_file(file_path, its5ghz=its5ghz)
             if cplx.size == 0:
                 ax.text(0.5, 0.5, "No data", ha="center", va="center")
                 ax.set_title(f"{esp_key} | no samples")
                 ax.set_axis_off()
                 continue
 
-            # plot multiple subcarriers with color cycle and legend
-            colors = plt.rcParams.get("axes.prop_cycle").by_key().get("color", plt.cm.tab10.colors)
-            for idx, sc in enumerate(sc_indices_local):
-                if sc < 0 or sc >= cplx.shape[1]:
-                    continue
+            selected_subcarriers = iq_subcarrier_indices(sc_indices, cplx.shape[1])
+            if not selected_subcarriers:
+                ax.text(0.5, 0.5, "No selected subcarriers", ha="center", va="center")
+                ax.set_title(f"{esp_key} | no selected subcarriers")
+                ax.set_axis_off()
+                continue
+
+            color_values = np.linspace(0, 1, len(selected_subcarriers))
+            colors = plt.cm.viridis(color_values)
+            show_legend = len(selected_subcarriers) <= MAX_IQ_LEGEND_ITEMS
+            point_size = 6 if show_legend else 4
+            point_alpha = 0.7 if show_legend else 0.35
+
+            for color, sc in zip(colors, selected_subcarriers):
                 samples = cplx[:, sc][::sample_stride]
-                ax.scatter(samples.real, samples.imag, s=6, alpha=0.7, color=colors[idx % len(colors)], label=f"SC {sc}")
+                ax.scatter(
+                    samples.real,
+                    samples.imag,
+                    s=point_size,
+                    alpha=point_alpha,
+                    color=color,
+                    label=f"SC {sc}" if show_legend else None,
+                )
 
             ax.axhline(0, color="k", lw=0.5)
             ax.axvline(0, color="k", lw=0.5)
-            ax.set_title(f"{esp_key} | {trial_key}")
+            ax.set_title(f"{esp_key} | {trial_key} | {len(selected_subcarriers)} SCs")
             ax.set_xlabel("I (Real)")
             ax.set_ylabel("Q (Imag)")
             ax.set_aspect("equal", adjustable="box")
-            ax.legend(fontsize=6)
+            ax.grid(alpha=0.2)
+
+            if show_legend:
+                ax.legend(fontsize=6)
+            else:
+                norm = plt.Normalize(
+                    vmin=min(selected_subcarriers),
+                    vmax=max(selected_subcarriers),
+                )
+                colorbar_source = plt.cm.ScalarMappable(norm=norm, cmap="viridis")
+                colorbar_source.set_array([])
+                colorbar = fig.colorbar(
+                    colorbar_source,
+                    ax=ax,
+                    fraction=0.046,
+                    pad=0.04,
+                )
+                colorbar.set_label("Subcarrier index")
 
         hide_unused_axes(axes, len(entries))
         fig.suptitle(f"I/Q Constellations | {title}")
@@ -1269,18 +1350,53 @@ def plot_selected_iq_constellations(
 
 
 def get_available_location_keys_from_files(files: FileMap) -> list[str]:
-    return sorted_location_keys({location_key for locations_map in files.values() for location_key in locations_map})
+    return sorted_location_keys(
+        {location_key for locations_map in files.values() for location_key in locations_map},
+    )
 
 
 def get_available_esp_keys_for_location_files(files: FileMap, location_key: str) -> list[str]:
     esp_keys: set[str] = set()
+
     for locations_map in files.values():
         users_map = locations_map.get(location_key)
         if users_map is None:
             continue
+
         for esps_map in users_map.values():
             esp_keys.update(esps_map)
+
     return sorted_esp_keys(esp_keys)
+
+
+def prompt_esp_keys_from_files(files: FileMap, location_key: str) -> list[str]:
+    available_esps = get_available_esp_keys_for_location_files(files, location_key)
+    if not available_esps:
+        print(f"No ESPs are available for {format_location_key(location_key)}.")
+        return []
+
+    esp_text = ", ".join(format_esp_key(esp_key) for esp_key in available_esps)
+    print(f"Available ESPs for {format_location_key(location_key)}: {esp_text}")
+    print("Type ESP IDs separated by spaces or commas, or type all.")
+
+    while True:
+        answer = input("Which ESPs do you want to analyse? ").strip()
+        if answer.lower() == "all":
+            return paired_esp_keys(available_esps)
+
+        esp_keys = [
+            esp_key
+            for raw_esp in re.split(r"[\s,;]+", answer)
+            if raw_esp
+            for esp_key in [normalize_esp_input(raw_esp)]
+            if esp_key is not None
+        ]
+        invalid_esps = [esp_key for esp_key in esp_keys if esp_key not in available_esps]
+
+        if esp_keys and not invalid_esps:
+            return list(dict.fromkeys(esp_keys))
+
+        print("Invalid ESP selection. Use available ESP IDs, e.g. 08 18 or all.")
 
 
 def plot_iq_interactive(files: FileMap, column_count: int = 2) -> None:
@@ -1293,7 +1409,9 @@ def plot_iq_interactive(files: FileMap, column_count: int = 2) -> None:
         print("No locations available in files.")
         return
 
-    location_text = ", ".join(format_location_key(l) for l in available_locations)
+    location_text = ", ".join(
+        format_location_key(location_key) for location_key in available_locations
+    )
     print(f"Available locations: {location_text}")
     while True:
         answer = input("Which position/location do you want to analyse? ").strip()
@@ -1302,15 +1420,25 @@ def plot_iq_interactive(files: FileMap, column_count: int = 2) -> None:
             break
         print("Invalid location. Use one of the available locations, e.g. A1 or A-1.")
 
-    esp_keys = prompt_esp_keys(files, location_key) if callable(globals().get("prompt_esp_keys")) else get_available_esp_keys_for_location_files(files, location_key)
+    esp_keys = prompt_esp_keys_from_files(files, location_key)
     if not esp_keys:
         return
 
-    sc_text = input("Subcarrier indices to plot (comma-separated, e.g. 0 or 0,1,2). Default 0: ").strip()
+    sc_text = input(
+        "Subcarrier indices to plot (comma-separated, e.g. 0 or 0,1,2, or all). Default 0: ",
+    ).strip()
     if not sc_text:
         sc_indices = [0]
+    elif sc_text.lower() == "all":
+        sc_indices = "all"
     else:
         nums = re.findall(r"-?\d+", sc_text)
         sc_indices = [int(n) for n in nums] if nums else [0]
 
-    plot_selected_iq_constellations(files, location_key, esp_keys, sc_indices=sc_indices, column_count=column_count)
+    plot_selected_iq_constellations(
+        files,
+        location_key,
+        esp_keys,
+        sc_indices=sc_indices,
+        column_count=column_count,
+    )
