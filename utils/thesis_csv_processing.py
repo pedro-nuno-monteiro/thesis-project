@@ -21,10 +21,11 @@ CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 AgcGainMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 
 REPO_CACHE_DIR = Path(".cache") / "csi_processing"
-STANDARD_PROCESSOR_VERSION = "standard-v1"
-FIVE_GHZ_228_PROCESSOR_VERSION = "five-ghz-228-v1"
+PROCESSOR_VERSION = "standard-v1"
 FIVE_GHZ_MIN_ESP_ID = 11
 FIVE_GHZ_MAX_ESP_ID = 20
+TWO_GHZ_RAW_LENGTH = 128
+FIVE_GHZ_RAW_LENGTH = 114
 
 
 @dataclass(frozen=True)
@@ -144,24 +145,7 @@ def _process_standard_cached(
     job: _ProcessingJob,
     options: _RunOptions,
 ) -> _CachedResult:
-    return _process_cached(
-        job,
-        _process_standard_file,
-        STANDARD_PROCESSOR_VERSION,
-        options,
-    )
-
-
-def _process_228_cached(
-    job: _ProcessingJob,
-    options: _RunOptions,
-) -> _CachedResult:
-    return _process_cached(
-        job,
-        _process_228_file,
-        FIVE_GHZ_228_PROCESSOR_VERSION,
-        options,
-    )
+    return _process_cached(job, _process_standard_file, PROCESSOR_VERSION, options)
 
 
 def _run_jobs(
@@ -176,33 +160,22 @@ def _run_jobs(
     worker_count = max(1, min(worker_count, len(jobs)))
 
     if worker_count == 1:
-        results = [
-            worker(job, options)
-            for job in jobs
-        ]
+        results = [worker(job, options) for job in jobs]
     else:
         with ProcessPoolExecutor(max_workers=worker_count) as executor:
-            results = list(
-                executor.map(
-                    worker,
-                    jobs,
-                    [options] * len(jobs),
-                ),
-            )
+            results = list(executor.map(worker, jobs, [options] * len(jobs)))
 
     cached = sum(1 for result in results if result.from_cache)
     return results, CacheStats(processed=len(results) - cached, cached=cached)
 
 
-def _iter_jobs(data_files: FileMap, *, only_5ghz: bool = False) -> Iterable[_ProcessingJob]:
+def _iter_jobs(data_files: FileMap) -> Iterable[_ProcessingJob]:
     for scenario_key, locations_map in data_files.items():
         for location_key, users_map in locations_map.items():
             for user_key, esps_map in users_map.items():
                 for esp_key, trials_map in esps_map.items():
                     esp_id = int(esp_key.removeprefix("esp_"))
                     its5ghz = FIVE_GHZ_MIN_ESP_ID <= esp_id <= FIVE_GHZ_MAX_ESP_ID
-                    if only_5ghz and not its5ghz:
-                        continue
 
                     for trial_key, file_path in trials_map.items():
                         if file_path is None:
@@ -255,11 +228,11 @@ def _process_standard_file(
         file_csv = pd.read_csv(job.file_path, header=None, usecols=[7, 14])
         csi_raw = file_csv.iloc[:, 1]
         agc_raw = file_csv.iloc[:, 0]
-        expected_length = 114
+        expected_length = FIVE_GHZ_RAW_LENGTH
     else:
         file_csv = pd.read_csv(job.file_path, header=None, usecols=[24])
         csi_raw = file_csv.iloc[:, 0]
-        expected_length = 128
+        expected_length = TWO_GHZ_RAW_LENGTH
 
     valid_csi: list[list[float]] = []
     no_match_count = 0
@@ -304,7 +277,7 @@ def _process_standard_file(
     return mag, agc_gains, no_match_count, no_complete_count, len(csi_raw)
 
 
-def _initialize_standard_maps(data_files: FileMap) -> tuple[CsiMap, AgcGainMap]:
+def _initialize_maps(data_files: FileMap) -> tuple[CsiMap, AgcGainMap]:
     magnitudes: CsiMap = {}
     agc_gain_data: AgcGainMap = {}
 
@@ -326,7 +299,7 @@ def _initialize_standard_maps(data_files: FileMap) -> tuple[CsiMap, AgcGainMap]:
     return magnitudes, agc_gain_data
 
 
-def process_standard_files(  # noqa: PLR0913
+def process_csv_files(  # noqa: PLR0913
     data_files: FileMap,
     *,
     max_workers: int | None = None,
@@ -335,7 +308,7 @@ def process_standard_files(  # noqa: PLR0913
     force_reprocess: bool = False,
     return_stats: bool = False,
 ) -> tuple[CsiMap, AgcGainMap] | tuple[CsiMap, AgcGainMap, CacheStats]:
-    magnitudes, agc_gain_data = _initialize_standard_maps(data_files)
+    magnitudes, agc_gain_data = _initialize_maps(data_files)
     jobs = list(_iter_jobs(data_files))
     options = _RunOptions(
         max_workers=max_workers,
@@ -343,11 +316,7 @@ def process_standard_files(  # noqa: PLR0913
         use_cache=use_cache,
         force_reprocess=force_reprocess,
     )
-    results, stats = _run_jobs(
-        jobs,
-        _process_standard_cached,
-        options,
-    )
+    results, stats = _run_jobs(jobs, _process_standard_cached, options)
 
     for result in results:
         mag, agc_gains, _no_match, _no_complete, _total = result.payload
@@ -364,259 +333,3 @@ def process_standard_files(  # noqa: PLR0913
     if return_stats:
         return magnitudes, agc_gain_data, stats
     return magnitudes, agc_gain_data
-
-
-FIVE_GHZ_RAW_LENGTH_114 = 114
-FIVE_GHZ_RAW_LENGTH_228 = 228
-FIVE_GHZ_ZERO_SUBCARRIER_INDEXES = {
-    FIVE_GHZ_RAW_LENGTH_114: [28],
-    FIVE_GHZ_RAW_LENGTH_228: [28, 85],
-}
-FIVE_GHZ_228_SPIKE_THRESHOLD = 50.0
-
-
-def empty_magnitude(raw_length: int) -> np.ndarray:
-    subcarrier_count = raw_length // 2
-    removed_subcarriers = len(FIVE_GHZ_ZERO_SUBCARRIER_INDEXES[raw_length])
-    return np.empty((0, subcarrier_count - removed_subcarriers), dtype=float)
-
-
-def csi_values_to_magnitude(csi_values: np.ndarray, raw_length: int) -> np.ndarray:
-    if csi_values.size == 0:
-        return empty_magnitude(raw_length)
-
-    imag = csi_values[:, ::2]
-    real = csi_values[:, 1::2]
-    complex_csi = real + 1j * imag
-    mag = np.abs(complex_csi)
-
-    return np.delete(mag, FIVE_GHZ_ZERO_SUBCARRIER_INDEXES[raw_length], axis=1)
-
-
-def remove_228_spike_subcarriers(
-    mag_228: np.ndarray,
-    mag_228_first_half: np.ndarray,
-    mag_228_second_half: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if mag_228.shape[0] == 0:
-        return mag_228, mag_228_first_half, mag_228_second_half
-
-    spike_subcarriers = np.flatnonzero(
-        mag_228.mean(axis=0) > FIVE_GHZ_228_SPIKE_THRESHOLD,
-    )
-    if spike_subcarriers.size == 0:
-        return mag_228, mag_228_first_half, mag_228_second_half
-
-    first_half_width = mag_228_first_half.shape[1]
-    first_half_spikes = spike_subcarriers[spike_subcarriers < first_half_width]
-    second_half_spikes = spike_subcarriers[spike_subcarriers >= first_half_width] - first_half_width
-
-    mag_228 = np.delete(mag_228, spike_subcarriers, axis=1)
-    mag_228_first_half = np.delete(mag_228_first_half, first_half_spikes, axis=1)
-    mag_228_second_half = np.delete(mag_228_second_half, second_half_spikes, axis=1)
-
-    return mag_228, mag_228_first_half, mag_228_second_half
-
-
-def remove_shared_spike_subcarriers(
-    first_magnitude: np.ndarray,
-    second_magnitude: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    if first_magnitude.shape[0] == 0 and second_magnitude.shape[0] == 0:
-        return first_magnitude, second_magnitude
-
-    first_spikes = (
-        np.flatnonzero(first_magnitude.mean(axis=0) > FIVE_GHZ_228_SPIKE_THRESHOLD)
-        if first_magnitude.shape[0]
-        else np.array([], dtype=int)
-    )
-    second_spikes = (
-        np.flatnonzero(second_magnitude.mean(axis=0) > FIVE_GHZ_228_SPIKE_THRESHOLD)
-        if second_magnitude.shape[0]
-        else np.array([], dtype=int)
-    )
-    spike_subcarriers = np.union1d(first_spikes, second_spikes).astype(int)
-
-    if spike_subcarriers.size == 0:
-        return first_magnitude, second_magnitude
-
-    return (
-        np.delete(first_magnitude, spike_subcarriers, axis=1),
-        np.delete(second_magnitude, spike_subcarriers, axis=1),
-    )
-
-
-def split_228_interleaved_parts(csi_228: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    if csi_228.size == 0:
-        empty_csi = np.empty((0, FIVE_GHZ_RAW_LENGTH_114), dtype=float)
-        return empty_csi, empty_csi.copy()
-
-    grouped_csi = csi_228.reshape(csi_228.shape[0], -1, 4)
-    first_part = grouped_csi[:, :, :2].reshape(csi_228.shape[0], -1)
-    second_part = grouped_csi[:, :, 2:].reshape(csi_228.shape[0], -1)
-
-    return first_part, second_part
-
-
-def _process_228_file(
-    job: _ProcessingJob,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, int, int]:
-    file_csv = pd.read_csv(job.file_path, header=None, usecols=[14])
-    csi_raw = file_csv.iloc[:, 0]
-
-    valid_csi_114: list[list[float]] = []
-    valid_csi_228: list[list[float]] = []
-    no_match_count = 0
-    no_complete_count = 0
-
-    for entry in csi_raw:
-        nums = _extract_csi_numbers(entry)
-        if nums is None:
-            no_match_count += 1
-            continue
-
-        if len(nums) == FIVE_GHZ_RAW_LENGTH_114:
-            valid_csi_114.append(nums)
-        elif len(nums) == FIVE_GHZ_RAW_LENGTH_228:
-            valid_csi_228.append(nums)
-        else:
-            no_complete_count += 1
-
-    csi_114 = np.array(valid_csi_114, dtype=float)
-    csi_228 = np.array(valid_csi_228, dtype=float)
-
-    mag_114 = csi_values_to_magnitude(csi_114, FIVE_GHZ_RAW_LENGTH_114)
-    mag_228 = csi_values_to_magnitude(csi_228, FIVE_GHZ_RAW_LENGTH_228)
-
-    if csi_228.size == 0:
-        mag_228_first_half = empty_magnitude(FIVE_GHZ_RAW_LENGTH_114)
-        mag_228_second_half = empty_magnitude(FIVE_GHZ_RAW_LENGTH_114)
-        mag_228_interleaved_first = empty_magnitude(FIVE_GHZ_RAW_LENGTH_114)
-        mag_228_interleaved_second = empty_magnitude(FIVE_GHZ_RAW_LENGTH_114)
-    else:
-        mag_228_first_half = csi_values_to_magnitude(
-            csi_228[:, :FIVE_GHZ_RAW_LENGTH_114],
-            FIVE_GHZ_RAW_LENGTH_114,
-        )
-        mag_228_second_half = csi_values_to_magnitude(
-            csi_228[:, FIVE_GHZ_RAW_LENGTH_114:],
-            FIVE_GHZ_RAW_LENGTH_114,
-        )
-        mag_228, mag_228_first_half, mag_228_second_half = remove_228_spike_subcarriers(
-            mag_228,
-            mag_228_first_half,
-            mag_228_second_half,
-        )
-
-        csi_228_interleaved_first, csi_228_interleaved_second = split_228_interleaved_parts(csi_228)
-        mag_228_interleaved_first = csi_values_to_magnitude(
-            csi_228_interleaved_first,
-            FIVE_GHZ_RAW_LENGTH_114,
-        )
-        mag_228_interleaved_second = csi_values_to_magnitude(
-            csi_228_interleaved_second,
-            FIVE_GHZ_RAW_LENGTH_114,
-        )
-        mag_228_interleaved_first, mag_228_interleaved_second = remove_shared_spike_subcarriers(
-            mag_228_interleaved_first,
-            mag_228_interleaved_second,
-        )
-
-    return (
-        mag_114,
-        mag_228,
-        mag_228_first_half,
-        mag_228_second_half,
-        mag_228_interleaved_first,
-        mag_228_interleaved_second,
-        no_match_count,
-        no_complete_count,
-        len(csi_raw),
-    )
-
-
-def _empty_magnitude_maps() -> tuple[CsiMap, CsiMap, CsiMap, CsiMap, CsiMap, CsiMap]:
-    return {}, {}, {}, {}, {}, {}
-
-
-def process_228_files(  # noqa: PLR0913
-    data_files: FileMap,
-    *,
-    max_workers: int | None = None,
-    cache_dir: str | Path | None = None,
-    use_cache: bool = True,
-    force_reprocess: bool = False,
-    return_stats: bool = False,
-) -> (
-    tuple[CsiMap, CsiMap, CsiMap, CsiMap, CsiMap, CsiMap]
-    | tuple[CsiMap, CsiMap, CsiMap, CsiMap, CsiMap, CsiMap, CacheStats]
-):
-    (
-        magnitudes_114,
-        magnitudes_228,
-        magnitudes_228_first_half,
-        magnitudes_228_second_half,
-        magnitudes_228_interleaved_first,
-        magnitudes_228_interleaved_second,
-    ) = _empty_magnitude_maps()
-
-    jobs = list(_iter_jobs(data_files, only_5ghz=True))
-    options = _RunOptions(
-        max_workers=max_workers,
-        cache_dir=cache_dir,
-        use_cache=use_cache,
-        force_reprocess=force_reprocess,
-    )
-    results, stats = _run_jobs(
-        jobs,
-        _process_228_cached,
-        options,
-    )
-
-    for result in results:
-        (
-            mag_114,
-            mag_228,
-            mag_228_first_half,
-            mag_228_second_half,
-            mag_228_interleaved_first,
-            mag_228_interleaved_second,
-            _no_match,
-            _no_complete,
-            _total,
-        ) = result.payload
-
-        _set_magnitude_entry(magnitudes_114, result.job, mag_114)
-        _set_magnitude_entry(magnitudes_228, result.job, mag_228)
-        _set_magnitude_entry(magnitudes_228_first_half, result.job, mag_228_first_half)
-        _set_magnitude_entry(magnitudes_228_second_half, result.job, mag_228_second_half)
-        _set_magnitude_entry(
-            magnitudes_228_interleaved_first,
-            result.job,
-            mag_228_interleaved_first,
-        )
-        _set_magnitude_entry(
-            magnitudes_228_interleaved_second,
-            result.job,
-            mag_228_interleaved_second,
-        )
-
-    if return_stats:
-        return (
-            magnitudes_114,
-            magnitudes_228,
-            magnitudes_228_first_half,
-            magnitudes_228_second_half,
-            magnitudes_228_interleaved_first,
-            magnitudes_228_interleaved_second,
-            stats,
-        )
-
-    return (
-        magnitudes_114,
-        magnitudes_228,
-        magnitudes_228_first_half,
-        magnitudes_228_second_half,
-        magnitudes_228_interleaved_first,
-        magnitudes_228_interleaved_second,
-    )

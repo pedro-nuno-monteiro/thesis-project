@@ -11,10 +11,11 @@ Contains the **current CSI datasets used in the thesis** (raw collection CSV fil
 Reserved for graphs and figures generated from notebook analysis (when exported).
 
 ### `/utils/`
-Supporting Python modules used by `thesis.ipynb`:
+Supporting Python modules used by the notebooks:
 - `utils/__init__.py` — package marker for importing utilities.
 - `utils/import_data.py` — scans CSV files, validates filename metadata, builds the nested file map used by the notebooks, and prints user/location coverage tables.
-- `utils/csi_processing.py` — core CSI processing pipeline: parses raw CSV CSI payloads, builds CSI magnitudes for 2.4 GHz and 5 GHz devices, supports parallel processing, and caches processed outputs.
+- `utils/thesis_csv_processing.py` ? thesis CSI CSV processing pipeline: parses raw 2.4 GHz and 5 GHz CSI payloads, builds CSI magnitudes, preserves 5 GHz AGC gain data, supports parallel processing, and caches processed outputs.
+- `utils/csi_228_csv_processing.py` ? 228-notebook CSI CSV processing pipeline: parses 5 GHz CSI payloads, separates 114-length and 228-length vectors, builds the 228 comparison magnitude maps, supports parallel processing, and caches processed outputs.
 - `utils/feature_pipeline.py` — feature-engineering layer: applies windowing/overlap logic, computes statistical features, assigns room labels, and builds model-ready dataframes for 2.4 GHz, 5 GHz, and fusion scenarios.
 - `utils/graphs.py` — plotting and visualization toolkit: CSI profile/surface plots, interactive trial/location selection, Random Forest metric + confusion matrix plots, and I/Q constellation visualization helpers.
 
