@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping as MappingABC
 from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
@@ -18,7 +19,7 @@ CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 MagnitudeSetMap = dict[str, CsiMap]
 PairEntry = tuple[str, str, np.ndarray, np.ndarray]
 TrialPairGroup = tuple[str, str, str, str, list[PairEntry]]
-SelectedEntry = tuple[str, np.ndarray]
+SelectedEntry = tuple[str, np.ndarray | None]
 SelectedTrialGroup = tuple[str, str, str, str, list[SelectedEntry]]
 SelectedFileEntry = tuple[str, str]
 SelectedFileGroup = tuple[str, str, str, str, list[SelectedFileEntry]]
@@ -38,10 +39,32 @@ RF_METRIC_COLUMNS = (
 )
 RF_SPLIT_ORDER = ("random", "group")
 RF_DATASET_ORDER = ("2.4 GHz", "5 GHz", "Fusion")
+RF_FEATURE_STATISTIC_ORDER = ("mean", "std", "variance", "max", "min", "energy")
+RF_BAND_ORDER = ("2.4 GHz", "5 GHz")
+FEATURE_IMPORTANCE_TOP_N = 20
+FEATURE_IMPORTANCE_COLUMN_PATTERN = re.compile(
+    r"^(?P<esp>esp_\d{2})_(?P<statistic>.+)_sc_(?P<subcarrier>\d+)$",
+)
+FEATURE_METADATA_COLUMNS = (
+    "frequency_scenario",
+    "scenario",
+    "location",
+    "user",
+    "trial",
+    "group_id",
+    "window_idx",
+    "label",
+)
 CONFUSION_MATRIX_DIMS = 2
 LOW_FREQUENCY_ESP_IDS = range(1, 11)
 HIGH_FREQUENCY_ESP_OFFSET = 10
 SPARSE_3D_SUBCARRIER_TICK_COUNT = 8
+DB_EPSILON = 1e-12
+EMPTY_ROOM_LOCATION_KEY = "location_Z-0"
+MAGNITUDE_DIMS = 2
+VISUALIZATION_MIN_DB = -80.0
+INVALID_AXIS_MESSAGE = "axis must be 'x' or 'y'."
+INVALID_STRIDE_MESSAGE = "Strides must be at least 1."
 TWO_GHZ_CSI_COLUMN = 24
 FIVE_GHZ_CSI_COLUMN = 14
 TWO_GHZ_RAW_LENGTH = 128
@@ -71,9 +94,10 @@ def infer_esp_pairs(esps_map: dict[str, dict[str, np.ndarray]]) -> list[tuple[st
         esp_by_id[esp_id] = esp_key
 
     return [
-        (esp_by_id[esp_id], esp_by_id[esp_id + 10])
+        (esp_by_id[esp_id], esp_by_id[esp_id + HIGH_FREQUENCY_ESP_OFFSET])
         for esp_id in sorted(esp_by_id)
-        if 1 <= esp_id <= 10 and esp_id + 10 in esp_by_id
+        if esp_id in LOW_FREQUENCY_ESP_IDS
+        and esp_id + HIGH_FREQUENCY_ESP_OFFSET in esp_by_id
     ]
 
 
@@ -84,10 +108,7 @@ def iter_magnitude_pair_groups(
     for scenario_key, locations_map in magnitudes.items():
         for location_key, users_map in locations_map.items():
             for user_key, esps_map in users_map.items():
-                if esp_pairs is None:
-                    current_pairs = infer_esp_pairs(esps_map)
-                else:
-                    current_pairs = esp_pairs
+                current_pairs = infer_esp_pairs(esps_map) if esp_pairs is None else esp_pairs
                 trial_keys = sorted(
                     {
                         trial_key
@@ -120,13 +141,13 @@ def iter_magnitude_pair_groups(
                         yield scenario_key, location_key, user_key, trial_key, pair_entries
 
 
-def set_all_subcarrier_ticks(ax, subcarrier_count: int) -> None:
+def set_all_subcarrier_ticks(ax: Axes, subcarrier_count: int) -> None:
     subcarrier_index = np.arange(subcarrier_count)
     ax.set_xticks(subcarrier_index)
     ax.set_xticklabels(subcarrier_index, rotation=90, fontsize=6)
 
 
-def set_sparse_subcarrier_ticks(ax, subcarrier_count: int) -> None:
+def set_sparse_subcarrier_ticks(ax: Axes, subcarrier_count: int) -> None:
     if subcarrier_count <= 0:
         return
 
@@ -135,6 +156,72 @@ def set_sparse_subcarrier_ticks(ax, subcarrier_count: int) -> None:
     tick_positions = np.unique(tick_positions)
     ax.set_xticks(tick_positions)
     ax.set_xticklabels(tick_positions)
+
+
+def set_sparse_index_ticks(ax: Axes, values: np.ndarray, axis: str) -> None:
+    if values.size == 0:
+        return
+
+    tick_count = min(SPARSE_3D_SUBCARRIER_TICK_COUNT, values.size)
+    tick_positions = np.linspace(0, values.size - 1, tick_count, dtype=int)
+    tick_positions = np.unique(tick_positions)
+
+    if axis == "x":
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(values[tick_positions])
+        return
+    if axis == "y":
+        ax.set_yticks(tick_positions)
+        ax.set_yticklabels(values[tick_positions])
+        return
+
+    raise ValueError(INVALID_AXIS_MESSAGE)
+
+
+def magnitude_to_db(magnitude: np.ndarray, epsilon: float = DB_EPSILON) -> np.ndarray:
+    magnitude_array = np.asarray(magnitude, dtype=float)
+    return 20.0 * np.log10(np.clip(magnitude_array, epsilon, None))
+
+
+def visualization_magnitude_db(
+    magnitude: np.ndarray,
+    min_db: float = VISUALIZATION_MIN_DB,
+) -> tuple[np.ndarray, np.ndarray]:
+    magnitude_db = magnitude_to_db(magnitude)
+    if magnitude_db.ndim != MAGNITUDE_DIMS or magnitude_db.size == 0:
+        return magnitude_db, np.empty(0, dtype=int)
+
+    visible_sample_mask = np.all(magnitude_db >= min_db, axis=1)
+    return magnitude_db[visible_sample_mask], np.flatnonzero(visible_sample_mask)
+
+
+def mean_magnitude_profile_db(magnitude: np.ndarray) -> np.ndarray:
+    magnitude_db, _ = visualization_magnitude_db(magnitude)
+    if magnitude_db.size == 0:
+        return np.empty(magnitude_db.shape[1] if magnitude_db.ndim == MAGNITUDE_DIMS else 0)
+
+    return magnitude_db.mean(axis=0)
+
+
+def plot_no_visible_magnitude_data(
+    ax: Axes,
+    label: str,
+    min_db: float = VISUALIZATION_MIN_DB,
+) -> None:
+    ax.set_title(f"{label} | no samples >= {min_db:g} dB")
+    ax.text(
+        0.5,
+        0.5,
+        f"No samples >= {min_db:g} dB",
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+    )
+    ax.set_axis_off()
+
+
+def plot_blank_magnitude_slot(ax: Axes) -> None:
+    ax.set_axis_off()
 
 
 def plot_pair_magnitude_profiles(
@@ -165,23 +252,36 @@ def plot_pair_magnitude_profiles(
                 (magnitude_a, magnitude_b),
                 packet_colors,
             ):
+                magnitude_db, _ = visualization_magnitude_db(magnitude)
+                if magnitude_db.size == 0:
+                    plot_no_visible_magnitude_data(ax, esp_key)
+                    continue
+
                 subcarrier_index = np.arange(magnitude.shape[1])
-                ax.plot(subcarrier_index, magnitude.T, color=color, alpha=0.035, linewidth=0.45)
                 ax.plot(
                     subcarrier_index,
-                    magnitude.mean(axis=0),
+                    magnitude_db.T,
+                    color=color,
+                    alpha=0.035,
+                    linewidth=0.45,
+                )
+                ax.plot(
+                    subcarrier_index,
+                    magnitude_db.mean(axis=0),
                     color="black",
                     linewidth=3.0,
                     label="Mean",
                 )
-                ax.set_title(f"{esp_key} | {magnitude.shape[0]} packets")
+                ax.set_title(
+                    f"{esp_key} | {magnitude_db.shape[0]}/{magnitude.shape[0]} packets shown",
+                )
                 ax.set_xlabel("Subcarrier index")
-                ax.set_ylabel("CSI magnitude")
+                ax.set_ylabel("CSI magnitude (dB)")
                 set_all_subcarrier_ticks(ax, magnitude.shape[1])
                 ax.grid(alpha=0.25)
                 ax.legend()
 
-        fig.suptitle(f"CSI magnitude vs subcarrier | {title}")
+        fig.suptitle(f"CSI magnitude (dB) vs subcarrier | {title}")
         plt.show()
         plot_count += 1
 
@@ -196,7 +296,7 @@ def plot_pair_magnitude_surfaces_3d(
     subcarrier_stride: int = 1,
 ) -> None:
     if packet_stride < 1 or subcarrier_stride < 1:
-        raise ValueError("Strides must be at least 1.")
+        raise ValueError(INVALID_STRIDE_MESSAGE)
 
     plot_count = 0
 
@@ -245,6 +345,64 @@ def plot_pair_magnitude_surfaces_3d(
         print("No paired ESP magnitude trials found.")
 
 
+def plot_pair_magnitude_heatmaps(
+    magnitudes: CsiMap,
+    esp_pairs: list[tuple[str, str]] | None = None,
+    packet_stride: int = 1,
+    subcarrier_stride: int = 1,
+) -> None:
+    if packet_stride < 1 or subcarrier_stride < 1:
+        raise ValueError(INVALID_STRIDE_MESSAGE)
+
+    plot_count = 0
+
+    for scenario_key, location_key, user_key, trial_key, pair_entries in iter_magnitude_pair_groups(
+        magnitudes,
+        esp_pairs,
+    ):
+        row_count = len(pair_entries)
+        fig, axes = plt.subplots(
+            row_count,
+            2,
+            figsize=(18, max(5.0, 4.6 * row_count)),
+            constrained_layout=True,
+            squeeze=False,
+        )
+        title = f"{scenario_key} / {location_key} / {user_key} / {trial_key}"
+
+        for row_index, (esp_key_a, esp_key_b, magnitude_a, magnitude_b) in enumerate(pair_entries):
+            for ax, esp_key, magnitude in zip(
+                axes[row_index],
+                (esp_key_a, esp_key_b),
+                (magnitude_a, magnitude_b),
+            ):
+                magnitude_db, packet_index = visualization_magnitude_db(magnitude)
+                if magnitude_db.size == 0:
+                    plot_no_visible_magnitude_data(ax, esp_key)
+                    continue
+
+                magnitude_plot = magnitude_db[::packet_stride, ::subcarrier_stride]
+                packet_index = packet_index[::packet_stride]
+                subcarrier_index = np.arange(magnitude.shape[1])[::subcarrier_stride]
+
+                image = ax.imshow(magnitude_plot, aspect="auto", origin="lower", cmap="viridis")
+                ax.set_title(
+                    f"{esp_key} | {magnitude_db.shape[0]}/{magnitude.shape[0]} packets shown",
+                )
+                ax.set_xlabel("Subcarrier index")
+                ax.set_ylabel("Packet number")
+                set_sparse_index_ticks(ax, subcarrier_index, "x")
+                set_sparse_index_ticks(ax, packet_index, "y")
+                fig.colorbar(image, ax=ax, shrink=0.82, label="CSI magnitude (dB)")
+
+        fig.suptitle(f"CSI magnitude (dB) heatmap | {title}")
+        plt.show()
+        plot_count += 1
+
+    if plot_count == 0:
+        print("No paired ESP magnitude trials found.")
+
+
 def plot_magnitude_pair_analysis(
     magnitudes: CsiMap,
     esp_pairs: list[tuple[str, str]] | None = None,
@@ -252,7 +410,7 @@ def plot_magnitude_pair_analysis(
     subcarrier_stride_3d: int = 1,
 ) -> None:
     plot_pair_magnitude_profiles(magnitudes, esp_pairs)
-    plot_pair_magnitude_surfaces_3d(
+    plot_pair_magnitude_heatmaps(
         magnitudes,
         esp_pairs,
         packet_stride=packet_stride_3d,
@@ -442,18 +600,22 @@ def iter_selected_magnitude_groups(
 
             for trial_key in trial_keys:
                 entries: list[SelectedEntry] = []
+                has_visible_entry = False
 
                 for esp_key in esp_keys:
                     if trial_key not in esps_map.get(esp_key, {}):
+                        entries.append((esp_key, None))
                         continue
 
                     magnitude = np.asarray(esps_map[esp_key][trial_key])
                     if magnitude.size == 0:
+                        entries.append((esp_key, None))
                         continue
 
+                    has_visible_entry = True
                     entries.append((esp_key, magnitude))
 
-                if entries:
+                if has_visible_entry:
                     yield scenario_key, location_key, user_key, trial_key, entries
 
 
@@ -701,6 +863,259 @@ def _plot_empty_confusion_matrix(ax: Axes, dataset_name: str, split_name: str) -
     ax.set_axis_off()
 
 
+def feature_columns_for_importance(dataframe: pd.DataFrame) -> list[str]:
+    return [
+        str(column)
+        for column in dataframe.columns
+        if column not in FEATURE_METADATA_COLUMNS
+        and FEATURE_IMPORTANCE_COLUMN_PATTERN.fullmatch(str(column)) is not None
+    ]
+
+
+def random_forest_feature_importance_frame(
+    models: Mapping[tuple[str, str], object],
+    feature_dataframes: Mapping[str, pd.DataFrame],
+) -> pd.DataFrame:
+    rows = []
+
+    for (dataset_name, split_name), model in models.items():
+        dataframe = feature_dataframes.get(dataset_name)
+        if dataframe is None or dataframe.empty:
+            continue
+
+        feature_columns = feature_columns_for_importance(dataframe)
+        importances = _model_feature_importances(model)
+        if importances is None:
+            print(f"No feature_importances_ found for {dataset_name} / {split_name}.")
+            continue
+        if len(feature_columns) != len(importances):
+            print(
+                "Skipping feature importance for "
+                f"{dataset_name} / {split_name}: "
+                f"{len(feature_columns)} feature columns but {len(importances)} importances.",
+            )
+            continue
+
+        for feature_column, importance in zip(feature_columns, importances):
+            parsed_feature = parse_feature_importance_column(feature_column)
+            if parsed_feature is None:
+                continue
+
+            rows.append(
+                {
+                    "dataset": dataset_name,
+                    "split": split_name,
+                    "feature": feature_column,
+                    "importance": float(importance),
+                    **parsed_feature,
+                },
+            )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "dataset",
+                "split",
+                "feature",
+                "importance",
+                "esp",
+                "esp_id",
+                "band",
+                "statistic",
+                "subcarrier",
+            ],
+        )
+
+    return pd.DataFrame(rows)
+
+
+def _model_feature_importances(model: object) -> np.ndarray | None:
+    if hasattr(model, "feature_importances_"):
+        return np.asarray(model.feature_importances_, dtype=float)
+
+    named_steps = getattr(model, "named_steps", {})
+    if not isinstance(named_steps, MappingABC):
+        return None
+
+    for step in reversed(tuple(named_steps.values())):
+        if hasattr(step, "feature_importances_"):
+            return np.asarray(step.feature_importances_, dtype=float)
+
+    return None
+
+
+def parse_feature_importance_column(feature_column: str) -> dict[str, object] | None:
+    match = FEATURE_IMPORTANCE_COLUMN_PATTERN.fullmatch(feature_column)
+    if match is None:
+        return None
+
+    esp_key = match.group("esp")
+    esp_id = int(format_esp_key(esp_key))
+    return {
+        "esp": esp_key,
+        "esp_id": esp_id,
+        "band": band_for_esp_key(esp_key),
+        "statistic": match.group("statistic"),
+        "subcarrier": int(match.group("subcarrier")),
+    }
+
+
+def band_for_esp_key(esp_key: str) -> str:
+    try:
+        esp_id = int(format_esp_key(esp_key))
+    except ValueError:
+        return "Unknown"
+
+    if esp_id in LOW_FREQUENCY_ESP_IDS:
+        return "2.4 GHz"
+    if FIVE_GHZ_MIN_ESP_ID <= esp_id <= FIVE_GHZ_MAX_ESP_ID:
+        return "5 GHz"
+
+    return "Unknown"
+
+
+def plot_random_forest_feature_importances(  # noqa: PLR0913
+    models: Mapping[tuple[str, str], object],
+    feature_dataframes: Mapping[str, pd.DataFrame],
+    *,
+    top_n: int = FEATURE_IMPORTANCE_TOP_N,
+    dataset_order: Sequence[str] = RF_DATASET_ORDER,
+    split_order: Sequence[str] = RF_SPLIT_ORDER,
+) -> pd.DataFrame:
+    importances = random_forest_feature_importance_frame(models, feature_dataframes)
+    if importances.empty:
+        print("No Random Forest feature importances to plot.")
+        return importances
+
+    datasets = order_existing_values(importances["dataset"].astype(str).unique(), dataset_order)
+    splits = order_existing_values(importances["split"].astype(str).unique(), split_order)
+
+    for dataset_name in datasets:
+        for split_name in splits:
+            model_importances = importances[
+                (importances["dataset"].astype(str) == dataset_name)
+                & (importances["split"].astype(str) == split_name)
+            ]
+            if model_importances.empty:
+                continue
+
+            fig, axes = plt.subplots(
+                3,
+                2,
+                figsize=(18, 15),
+                constrained_layout=True,
+                squeeze=False,
+            )
+            _plot_top_feature_importances(axes[0, 0], model_importances, top_n)
+            _plot_grouped_feature_importance(
+                axes[0, 1],
+                model_importances,
+                "esp",
+                "By ESP",
+                order=_esp_importance_order(model_importances),
+            )
+            _plot_grouped_feature_importance(
+                axes[1, 0],
+                model_importances,
+                "band",
+                "By Band",
+                order=RF_BAND_ORDER,
+            )
+            _plot_subcarrier_feature_importance(axes[1, 1], model_importances)
+            _plot_grouped_feature_importance(
+                axes[2, 0],
+                model_importances,
+                "statistic",
+                "By Statistic",
+                order=RF_FEATURE_STATISTIC_ORDER,
+            )
+            axes[2, 1].set_axis_off()
+
+            fig.suptitle(f"Random Forest Feature Importance | {dataset_name} / {split_name}")
+            plt.show()
+
+    return importances
+
+
+def _plot_top_feature_importances(
+    ax: Axes,
+    importances: pd.DataFrame,
+    top_n: int,
+) -> None:
+    top_features = importances.nlargest(top_n, "importance").sort_values("importance")
+    ax.barh(top_features["feature"], top_features["importance"], color="tab:blue")
+    ax.set_title(f"Top {min(top_n, len(importances))} Columns")
+    ax.set_xlabel("Importance")
+    ax.grid(axis="x", alpha=0.25)
+    ax.tick_params(axis="y", labelsize=8)
+
+
+def _plot_grouped_feature_importance(
+    ax: Axes,
+    importances: pd.DataFrame,
+    group_column: str,
+    title: str,
+    *,
+    order: Sequence[str] | None = None,
+) -> None:
+    grouped = _group_feature_importance(importances, group_column, order)
+    if grouped.empty:
+        ax.set_title(title)
+        ax.set_axis_off()
+        return
+
+    x_positions = np.arange(len(grouped))
+    ax.bar(x_positions, grouped["importance"], color="tab:green")
+    ax.set_title(title)
+    ax.set_ylabel("Importance")
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(grouped[group_column], rotation=45, ha="right")
+    ax.grid(axis="y", alpha=0.25)
+
+
+def _plot_subcarrier_feature_importance(ax: Axes, importances: pd.DataFrame) -> None:
+    grouped = (
+        importances.groupby("subcarrier", as_index=False)["importance"]
+        .sum()
+        .sort_values("subcarrier")
+    )
+    if grouped.empty:
+        ax.set_title("By Subcarrier")
+        ax.set_axis_off()
+        return
+
+    x_positions = np.arange(len(grouped))
+    ax.bar(x_positions, grouped["importance"], color="tab:orange")
+    ax.set_title("By Subcarrier")
+    ax.set_xlabel("Subcarrier index")
+    ax.set_ylabel("Importance")
+    set_sparse_index_ticks(ax, grouped["subcarrier"].to_numpy(dtype=int), "x")
+    ax.grid(axis="y", alpha=0.25)
+
+
+def _group_feature_importance(
+    importances: pd.DataFrame,
+    group_column: str,
+    order: Sequence[str] | None,
+) -> pd.DataFrame:
+    grouped = importances.groupby(group_column, as_index=False)["importance"].sum()
+    if order is None:
+        return grouped.sort_values("importance", ascending=False)
+
+    ordered_values = order_existing_values(grouped[group_column].astype(str).unique(), order)
+    grouped = grouped.assign(
+        _order=grouped[group_column].astype(str).map(
+            {value: idx for idx, value in enumerate(ordered_values)},
+        ),
+    )
+    return grouped.sort_values("_order").drop(columns="_order")
+
+
+def _esp_importance_order(importances: pd.DataFrame) -> list[str]:
+    esp_keys = importances["esp"].astype(str).unique()
+    return sorted_esp_keys(set(esp_keys))
+
+
 def plot_selected_magnitude_profiles(
     magnitudes: CsiMap,
     location_key: str,
@@ -725,24 +1140,41 @@ def plot_selected_magnitude_profiles(
         title = f"{scenario_key} / {location_key} / {user_key} / {trial_key}"
 
         for ax, (esp_key, magnitude) in zip(axes.ravel(), entries):
+            if magnitude is None:
+                plot_blank_magnitude_slot(ax)
+                continue
+
+            magnitude_db, _ = visualization_magnitude_db(magnitude)
+            if magnitude_db.size == 0:
+                plot_no_visible_magnitude_data(ax, esp_key)
+                continue
+
             subcarrier_index = np.arange(magnitude.shape[1])
-            ax.plot(subcarrier_index, magnitude.T, color="tab:blue", alpha=0.035, linewidth=0.45)
             ax.plot(
                 subcarrier_index,
-                magnitude.mean(axis=0),
+                magnitude_db.T,
+                color="tab:blue",
+                alpha=0.035,
+                linewidth=0.45,
+            )
+            ax.plot(
+                subcarrier_index,
+                magnitude_db.mean(axis=0),
                 color="black",
                 linewidth=3.0,
                 label="Mean",
             )
-            ax.set_title(f"{esp_key} | {magnitude.shape[0]} packets")
+            ax.set_title(
+                f"{esp_key} | {magnitude_db.shape[0]}/{magnitude.shape[0]} packets shown",
+            )
             ax.set_xlabel("Subcarrier index")
-            ax.set_ylabel("CSI magnitude")
+            ax.set_ylabel("CSI magnitude (dB)")
             set_all_subcarrier_ticks(ax, magnitude.shape[1])
             ax.grid(alpha=0.25)
             ax.legend()
 
         hide_unused_axes(axes, len(entries))
-        fig.suptitle(f"CSI magnitude vs subcarrier | {title}")
+        fig.suptitle(f"CSI magnitude (dB) vs subcarrier | {title}")
         plt.show()
         plot_count += 1
 
@@ -750,7 +1182,7 @@ def plot_selected_magnitude_profiles(
         print("No magnitude data found for the selected location/ESPs.")
 
 
-def plot_selected_magnitude_surfaces_3d(
+def plot_selected_magnitude_surfaces_3d(  # noqa: PLR0913
     magnitudes: CsiMap,
     location_key: str,
     esp_keys: list[str],
@@ -759,7 +1191,7 @@ def plot_selected_magnitude_surfaces_3d(
     column_count: int = 2,
 ) -> None:
     if packet_stride < 1 or subcarrier_stride < 1:
-        raise ValueError("Strides must be at least 1.")
+        raise ValueError(INVALID_STRIDE_MESSAGE)
 
     plot_count = 0
 
@@ -776,12 +1208,16 @@ def plot_selected_magnitude_surfaces_3d(
         title = f"{scenario_key} / {location_key} / {user_key} / {trial_key}"
 
         for index, (esp_key, magnitude) in enumerate(entries, start=1):
+            ax = fig.add_subplot(row_count, column_count, index, projection="3d")
+            if magnitude is None:
+                plot_blank_magnitude_slot(ax)
+                continue
+
             magnitude_plot = magnitude[::packet_stride, ::subcarrier_stride]
             packet_index = np.arange(magnitude.shape[0])[::packet_stride]
             subcarrier_index = np.arange(magnitude.shape[1])[::subcarrier_stride]
             subcarrier_grid, packet_grid = np.meshgrid(subcarrier_index, packet_index)
 
-            ax = fig.add_subplot(row_count, column_count, index, projection="3d")
             ax.plot_surface(
                 subcarrier_grid,
                 packet_grid,
@@ -804,10 +1240,253 @@ def plot_selected_magnitude_surfaces_3d(
         print("No magnitude data found for the selected location/ESPs.")
 
 
+def plot_selected_magnitude_heatmaps(  # noqa: PLR0913
+    magnitudes: CsiMap,
+    location_key: str,
+    esp_keys: list[str],
+    packet_stride: int = 1,
+    subcarrier_stride: int = 1,
+    column_count: int = 2,
+) -> None:
+    if packet_stride < 1 or subcarrier_stride < 1:
+        raise ValueError(INVALID_STRIDE_MESSAGE)
+
+    plot_count = 0
+
+    for scenario_key, _, user_key, trial_key, entries in iter_selected_magnitude_groups(
+        magnitudes,
+        location_key,
+        esp_keys,
+    ):
+        row_count, column_count = make_subplot_grid(len(entries), column_count)
+        fig, axes = plt.subplots(
+            row_count,
+            column_count,
+            figsize=(9 * column_count, max(4.8, 4.5 * row_count)),
+            constrained_layout=True,
+            squeeze=False,
+        )
+        title = f"{scenario_key} / {location_key} / {user_key} / {trial_key}"
+
+        for ax, (esp_key, magnitude) in zip(axes.ravel(), entries):
+            if magnitude is None:
+                plot_blank_magnitude_slot(ax)
+                continue
+
+            magnitude_db, packet_index = visualization_magnitude_db(magnitude)
+            if magnitude_db.size == 0:
+                plot_no_visible_magnitude_data(ax, esp_key)
+                continue
+
+            magnitude_plot = magnitude_db[::packet_stride, ::subcarrier_stride]
+            packet_index = packet_index[::packet_stride]
+            subcarrier_index = np.arange(magnitude.shape[1])[::subcarrier_stride]
+
+            image = ax.imshow(magnitude_plot, aspect="auto", origin="lower", cmap="viridis")
+            ax.set_title(
+                f"{esp_key} | {magnitude_db.shape[0]}/{magnitude.shape[0]} packets shown",
+            )
+            ax.set_xlabel("Subcarrier index")
+            ax.set_ylabel("Packet number")
+            set_sparse_index_ticks(ax, subcarrier_index, "x")
+            set_sparse_index_ticks(ax, packet_index, "y")
+            fig.colorbar(image, ax=ax, shrink=0.82, label="CSI magnitude (dB)")
+
+        hide_unused_axes(axes, len(entries))
+        fig.suptitle(f"CSI magnitude (dB) heatmap | {title}")
+        plt.show()
+        plot_count += 1
+
+    if plot_count == 0:
+        print("No magnitude data found for the selected location/ESPs.")
+
+
+def stack_same_width_profiles(profiles: list[np.ndarray]) -> np.ndarray:
+    if not profiles:
+        return np.empty((0, 0), dtype=float)
+
+    width_counts: dict[int, int] = {}
+    for profile in profiles:
+        width_counts[profile.shape[0]] = width_counts.get(profile.shape[0], 0) + 1
+
+    target_width = max(width_counts, key=width_counts.get)
+    matching_profiles = [profile for profile in profiles if profile.shape[0] == target_width]
+    return np.vstack(matching_profiles)
+
+
+def collect_user_mean_profiles_db(
+    magnitudes: CsiMap,
+    scenario_key: str,
+    location_key: str,
+    esp_key: str,
+) -> dict[str, np.ndarray]:
+    users_map = magnitudes.get(scenario_key, {}).get(location_key, {})
+    user_profiles: dict[str, np.ndarray] = {}
+
+    for user_key, esps_map in users_map.items():
+        trial_profiles = []
+
+        for magnitude in esps_map.get(esp_key, {}).values():
+            magnitude_array = np.asarray(magnitude)
+            if (
+                magnitude_array.ndim != MAGNITUDE_DIMS
+                or magnitude_array.size == 0
+                or magnitude_array.shape[0] == 0
+            ):
+                continue
+
+            magnitude_db, _ = visualization_magnitude_db(magnitude_array)
+            if magnitude_db.size == 0:
+                continue
+
+            trial_profiles.append(magnitude_db.mean(axis=0))
+
+        stacked_trials = stack_same_width_profiles(trial_profiles)
+        if stacked_trials.size:
+            user_profiles[user_key] = stacked_trials.mean(axis=0)
+
+    return user_profiles
+
+
+def empty_room_mean_profile_db(
+    magnitudes: CsiMap,
+    scenario_key: str,
+    esp_key: str,
+    target_shape: tuple[int, ...],
+    empty_room_location_key: str = EMPTY_ROOM_LOCATION_KEY,
+) -> np.ndarray | None:
+    empty_user_profiles = collect_user_mean_profiles_db(
+        magnitudes,
+        scenario_key,
+        empty_room_location_key,
+        esp_key,
+    )
+    matching_profiles = [
+        profile
+        for profile in empty_user_profiles.values()
+        if profile.shape == target_shape
+    ]
+    if not matching_profiles:
+        return None
+
+    return np.vstack(matching_profiles).mean(axis=0)
+
+
+def plot_average_magnitude_profiles_across_users(
+    magnitudes: CsiMap,
+    location_key: str,
+    esp_keys: list[str],
+    empty_room_location_key: str = EMPTY_ROOM_LOCATION_KEY,
+    column_count: int = 2,
+) -> None:
+    plot_count = 0
+
+    for scenario_key in sorted(magnitudes):
+        entries = []
+        has_average_entry = False
+
+        for esp_key in esp_keys:
+            user_profiles = collect_user_mean_profiles_db(
+                magnitudes,
+                scenario_key,
+                location_key,
+                esp_key,
+            )
+            stacked_users = stack_same_width_profiles(list(user_profiles.values()))
+            if stacked_users.size == 0:
+                entries.append((esp_key, None, None, None, None))
+                continue
+
+            mean_profile = stacked_users.mean(axis=0)
+            std_profile = stacked_users.std(axis=0)
+            empty_profile = empty_room_mean_profile_db(
+                magnitudes,
+                scenario_key,
+                esp_key,
+                mean_profile.shape,
+                empty_room_location_key=empty_room_location_key,
+            )
+            entries.append(
+                (
+                    esp_key,
+                    stacked_users.shape[0],
+                    mean_profile,
+                    std_profile,
+                    empty_profile,
+                ),
+            )
+            has_average_entry = True
+
+        if not has_average_entry:
+            continue
+
+        row_count, grid_column_count = make_subplot_grid(len(entries), column_count)
+        fig, axes = plt.subplots(
+            row_count,
+            grid_column_count,
+            figsize=(9 * grid_column_count, max(4.6, 4.2 * row_count)),
+            constrained_layout=True,
+            squeeze=False,
+        )
+
+        for ax, (esp_key, user_count, mean_profile, std_profile, empty_profile) in zip(
+            axes.ravel(),
+            entries,
+        ):
+            if mean_profile is None or std_profile is None:
+                plot_blank_magnitude_slot(ax)
+                continue
+
+            subcarrier_index = np.arange(mean_profile.shape[0])
+            ax.plot(
+                subcarrier_index,
+                mean_profile,
+                color="black",
+                linewidth=2.5,
+                label="Mean across users",
+            )
+            ax.fill_between(
+                subcarrier_index,
+                mean_profile - std_profile,
+                mean_profile + std_profile,
+                color="tab:blue",
+                alpha=0.22,
+                label="+/-1 sigma across users",
+            )
+            if empty_profile is not None:
+                ax.plot(
+                    subcarrier_index,
+                    empty_profile,
+                    color="tab:red",
+                    linestyle="--",
+                    linewidth=2.0,
+                    label="Empty-room mean",
+                )
+
+            ax.set_title(f"{esp_key} | {user_count} users")
+            ax.set_xlabel("Subcarrier index")
+            ax.set_ylabel("CSI magnitude (dB)")
+            set_all_subcarrier_ticks(ax, mean_profile.shape[0])
+            ax.grid(alpha=0.25)
+            ax.legend()
+
+        hide_unused_axes(axes, len(entries))
+        fig.suptitle(
+            "Average CSI magnitude (dB) across users | "
+            f"{scenario_key} / {location_key}",
+        )
+        plt.show()
+        plot_count += 1
+
+    if plot_count == 0:
+        print("No user-average magnitude profiles found for the selected location/ESPs.")
+
+
 def plot_magnitude_analysis_interactive(
     magnitudes: CsiMap,
     packet_stride_3d: int = 1,
     subcarrier_stride_3d: int = 1,
+    empty_room_location_key: str = EMPTY_ROOM_LOCATION_KEY,
     column_count: int = 2,
 ) -> None:
     if not prompt_yes_no("Do you want to show graphs? [yes/no] "):
@@ -828,12 +1507,19 @@ def plot_magnitude_analysis_interactive(
         esp_keys,
         column_count=column_count,
     )
-    plot_selected_magnitude_surfaces_3d(
+    plot_selected_magnitude_heatmaps(
         magnitudes,
         location_key,
         esp_keys,
         packet_stride=packet_stride_3d,
         subcarrier_stride=subcarrier_stride_3d,
+        column_count=column_count,
+    )
+    plot_average_magnitude_profiles_across_users(
+        magnitudes,
+        location_key,
+        esp_keys,
+        empty_room_location_key=empty_room_location_key,
         column_count=column_count,
     )
 
@@ -921,7 +1607,7 @@ def prompt_esp_keys_for_magnitude_sets(
         print("Invalid ESP selection. Use available ESP IDs, e.g. 08 18 or all.")
 
 
-def get_magnitude_entry(
+def get_magnitude_entry(  # noqa: PLR0913
     magnitudes: CsiMap,
     scenario_key: str,
     location_key: str,
@@ -1000,7 +1686,7 @@ def iter_selected_magnitude_set_groups(
                         yield scenario_key, location_key, user_key, trial_key, esp_key, entries
 
 
-def plot_no_magnitude_data(ax, label: str) -> None:
+def plot_no_magnitude_data(ax: Axes, label: str) -> None:
     ax.set_title(f"{label} | no data")
     ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
     ax.set_axis_off()
@@ -1037,24 +1723,37 @@ def plot_selected_magnitude_set_profiles(
                 plot_no_magnitude_data(ax, label)
                 continue
 
+            magnitude_db, _ = visualization_magnitude_db(magnitude)
+            if magnitude_db.size == 0:
+                plot_no_visible_magnitude_data(ax, label)
+                continue
+
             subcarrier_index = np.arange(magnitude.shape[1])
-            ax.plot(subcarrier_index, magnitude.T, color="tab:blue", alpha=0.035, linewidth=0.45)
             ax.plot(
                 subcarrier_index,
-                magnitude.mean(axis=0),
+                magnitude_db.T,
+                color="tab:blue",
+                alpha=0.035,
+                linewidth=0.45,
+            )
+            ax.plot(
+                subcarrier_index,
+                magnitude_db.mean(axis=0),
                 color="black",
                 linewidth=3.0,
                 label="Mean",
             )
-            ax.set_title(f"{label} | {magnitude.shape[0]} packets")
+            ax.set_title(
+                f"{label} | {magnitude_db.shape[0]}/{magnitude.shape[0]} packets shown",
+            )
             ax.set_xlabel("Subcarrier index")
-            ax.set_ylabel("CSI magnitude")
+            ax.set_ylabel("CSI magnitude (dB)")
             set_all_subcarrier_ticks(ax, magnitude.shape[1])
             ax.grid(alpha=0.25)
             ax.legend()
 
         hide_unused_axes(axes, len(entries))
-        fig.suptitle(f"CSI magnitude vs subcarrier | {title}")
+        fig.suptitle(f"CSI magnitude (dB) vs subcarrier | {title}")
         plt.show()
         plot_count += 1
 
@@ -1062,7 +1761,7 @@ def plot_selected_magnitude_set_profiles(
         print("No magnitude data found for the selected location/ESPs.")
 
 
-def plot_selected_magnitude_set_surfaces_3d(
+def plot_selected_magnitude_set_surfaces_3d(  # noqa: PLR0913
     magnitude_sets: MagnitudeSetMap,
     location_key: str,
     esp_keys: list[str],
@@ -1071,7 +1770,7 @@ def plot_selected_magnitude_set_surfaces_3d(
     column_count: int = 2,
 ) -> None:
     if packet_stride < 1 or subcarrier_stride < 1:
-        raise ValueError("Strides must be at least 1.")
+        raise ValueError(INVALID_STRIDE_MESSAGE)
 
     plot_count = 0
 
@@ -1126,6 +1825,70 @@ def plot_selected_magnitude_set_surfaces_3d(
         print("No magnitude data found for the selected location/ESPs.")
 
 
+def plot_selected_magnitude_set_heatmaps(  # noqa: PLR0913
+    magnitude_sets: MagnitudeSetMap,
+    location_key: str,
+    esp_keys: list[str],
+    packet_stride: int = 1,
+    subcarrier_stride: int = 1,
+    column_count: int = 2,
+) -> None:
+    if packet_stride < 1 or subcarrier_stride < 1:
+        raise ValueError(INVALID_STRIDE_MESSAGE)
+
+    plot_count = 0
+
+    for (
+        scenario_key,
+        _,
+        user_key,
+        trial_key,
+        esp_key,
+        entries,
+    ) in iter_selected_magnitude_set_groups(magnitude_sets, location_key, esp_keys):
+        row_count, column_count = make_subplot_grid(len(entries), column_count)
+        fig, axes = plt.subplots(
+            row_count,
+            column_count,
+            figsize=(9 * column_count, max(4.8, 4.5 * row_count)),
+            constrained_layout=True,
+            squeeze=False,
+        )
+        title = f"{scenario_key} / {location_key} / {user_key} / {trial_key} / {esp_key}"
+
+        for ax, (label, magnitude) in zip(axes.ravel(), entries):
+            if magnitude is None or magnitude.size == 0:
+                plot_no_magnitude_data(ax, label)
+                continue
+
+            magnitude_db, packet_index = visualization_magnitude_db(magnitude)
+            if magnitude_db.size == 0:
+                plot_no_visible_magnitude_data(ax, label)
+                continue
+
+            magnitude_plot = magnitude_db[::packet_stride, ::subcarrier_stride]
+            packet_index = packet_index[::packet_stride]
+            subcarrier_index = np.arange(magnitude.shape[1])[::subcarrier_stride]
+
+            image = ax.imshow(magnitude_plot, aspect="auto", origin="lower", cmap="viridis")
+            ax.set_title(
+                f"{label} | {magnitude_db.shape[0]}/{magnitude.shape[0]} packets shown",
+            )
+            ax.set_xlabel("Subcarrier index")
+            ax.set_ylabel("Packet number")
+            set_sparse_index_ticks(ax, subcarrier_index, "x")
+            set_sparse_index_ticks(ax, packet_index, "y")
+            fig.colorbar(image, ax=ax, shrink=0.82, label="CSI magnitude (dB)")
+
+        hide_unused_axes(axes, len(entries))
+        fig.suptitle(f"CSI magnitude (dB) heatmap | {title}")
+        plt.show()
+        plot_count += 1
+
+    if plot_count == 0:
+        print("No magnitude data found for the selected location/ESPs.")
+
+
 def plot_magnitude_sets_analysis_interactive(
     magnitude_sets: MagnitudeSetMap,
     packet_stride_3d: int = 1,
@@ -1150,7 +1913,7 @@ def plot_magnitude_sets_analysis_interactive(
         esp_keys,
         column_count=column_count,
     )
-    plot_selected_magnitude_set_surfaces_3d(
+    plot_selected_magnitude_set_heatmaps(
         magnitude_sets,
         location_key,
         esp_keys,
@@ -1167,7 +1930,7 @@ def extract_complex_csi_from_file(file_path: str | Path, *, its5ghz: bool) -> np
     csi_raw = file_csv.iloc[:, 0]
     valid_csi: list[list[float]] = []
 
-    for entry in csi_raw.values:
+    for entry in csi_raw.to_numpy():
         match = re.search(r"\[(.*?)\]", str(entry))
         if not match:
             continue
