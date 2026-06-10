@@ -7,12 +7,15 @@ from typing import TYPE_CHECKING
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
     from pathlib import Path
 
     from matplotlib.axes import Axes
+
+    from hierarchical_position_classifier import HierarchicalPositionClassifier
 
 FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, str]]]]]
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
@@ -55,6 +58,19 @@ FEATURE_METADATA_COLUMNS = (
     "window_idx",
     "label",
 )
+EMPTY_ROOM_LABEL = 0
+MIN_ROOM_LOCATION_CLASSES = 2
+ROOM_FEATURE_IMPORTANCE_COLUMNS = [
+    "dataset",
+    "room",
+    "feature",
+    "importance",
+    "esp",
+    "esp_id",
+    "band",
+    "statistic",
+    "subcarrier",
+]
 CONFUSION_MATRIX_DIMS = 2
 LOW_FREQUENCY_ESP_IDS = range(1, 11)
 HIGH_FREQUENCY_ESP_OFFSET = 10
@@ -974,7 +990,7 @@ def band_for_esp_key(esp_key: str) -> str:
     return "Unknown"
 
 
-def plot_random_forest_feature_importances(  # noqa: PLR0913
+def plot_random_forest_feature_importances(
     models: Mapping[tuple[str, str], object],
     feature_dataframes: Mapping[str, pd.DataFrame],
     *,
@@ -1035,6 +1051,299 @@ def plot_random_forest_feature_importances(  # noqa: PLR0913
             plt.show()
 
     return importances
+
+
+def train_room_feature_importance_models(
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    random_state: int = 42,
+) -> dict[tuple[str, int], RandomForestClassifier]:
+    room_models: dict[tuple[str, int], RandomForestClassifier] = {}
+
+    for dataset_name, dataframe in feature_dataframes.items():
+        if dataframe.empty:
+            continue
+        _validate_room_feature_importance_columns(dataframe, dataset_name)
+
+        columns = feature_columns_for_importance(dataframe)
+        if not columns:
+            print(f"Skipping room feature importance for {dataset_name}: no RF feature columns.")
+            continue
+
+        room_labels = pd.to_numeric(dataframe["label"], errors="coerce")
+        for room_label in _room_feature_importance_labels(room_labels):
+            if room_label == EMPTY_ROOM_LABEL:
+                continue
+
+            room_df = dataframe.loc[room_labels == room_label]
+            location_labels = room_df["location"].astype(str)
+            if location_labels.nunique() < MIN_ROOM_LOCATION_CLASSES:
+                print(
+                    "Skipping room feature importance for "
+                    f"{dataset_name} room {room_label}: fewer than "
+                    f"{MIN_ROOM_LOCATION_CLASSES} unique locations.",
+                )
+                continue
+
+            model = RandomForestClassifier(
+                n_estimators=300,
+                random_state=random_state,
+                n_jobs=-1,
+                class_weight="balanced",
+            )
+            model.fit(room_df[columns], location_labels)
+            room_models[(dataset_name, room_label)] = model
+
+    return room_models
+
+
+def room_feature_importance_frame(
+    room_models: dict[tuple[str, int], RandomForestClassifier],
+    feature_dataframes: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+
+    for (dataset_name, room_label), model in room_models.items():
+        dataframe = feature_dataframes.get(dataset_name)
+        if dataframe is None or dataframe.empty:
+            continue
+
+        feature_columns = feature_columns_for_importance(dataframe)
+        importances = _model_feature_importances(model)
+        if importances is None:
+            print(f"No feature_importances_ found for {dataset_name} room {room_label}.")
+            continue
+        if len(feature_columns) != len(importances):
+            print(
+                "Skipping room feature importance for "
+                f"{dataset_name} room {room_label}: "
+                f"{len(feature_columns)} feature columns but {len(importances)} importances.",
+            )
+            continue
+
+        for feature_column, importance in zip(feature_columns, importances):
+            parsed_feature = parse_feature_importance_column(feature_column)
+            if parsed_feature is None:
+                continue
+
+            rows.append(
+                {
+                    "dataset": dataset_name,
+                    "room": room_label,
+                    "feature": feature_column,
+                    "importance": float(importance),
+                    **parsed_feature,
+                },
+            )
+
+    return pd.DataFrame(rows, columns=ROOM_FEATURE_IMPORTANCE_COLUMNS)
+
+
+def plot_room_feature_importances(
+    room_importances: pd.DataFrame,
+    *,
+    top_n: int = FEATURE_IMPORTANCE_TOP_N,
+) -> None:
+    if room_importances.empty:
+        print("No room-specific Random Forest feature importances to plot.")
+        return
+
+    for dataset_name in order_existing_values(
+        room_importances["dataset"].astype(str).unique(),
+        RF_DATASET_ORDER,
+    ):
+        dataset_importances = room_importances[
+            room_importances["dataset"].astype(str) == dataset_name
+        ]
+
+        for room_label in sorted(dataset_importances["room"].unique()):
+            model_importances = dataset_importances[
+                dataset_importances["room"] == room_label
+            ]
+            if model_importances.empty:
+                continue
+
+            fig, axes = plt.subplots(
+                3,
+                2,
+                figsize=(18, 15),
+                constrained_layout=True,
+                squeeze=False,
+            )
+            _plot_top_feature_importances(axes[0, 0], model_importances, top_n)
+            _plot_grouped_feature_importance(
+                axes[0, 1],
+                model_importances,
+                "esp",
+                "By ESP",
+                order=_esp_importance_order(model_importances),
+            )
+            _plot_grouped_feature_importance(
+                axes[1, 0],
+                model_importances,
+                "band",
+                "By Band",
+                order=RF_BAND_ORDER,
+            )
+            _plot_subcarrier_feature_importance(axes[1, 1], model_importances)
+            _plot_grouped_feature_importance(
+                axes[2, 0],
+                model_importances,
+                "statistic",
+                "By Statistic",
+                order=RF_FEATURE_STATISTIC_ORDER,
+            )
+            axes[2, 1].set_axis_off()
+
+            fig.suptitle(f"Random Forest Feature Importance | {dataset_name} | Room {room_label}")
+            plt.show()
+
+
+def plot_feature_importance_by_room(
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    random_state: int = 42,
+    top_n: int = FEATURE_IMPORTANCE_TOP_N,
+) -> pd.DataFrame:
+    room_models = train_room_feature_importance_models(
+        feature_dataframes,
+        random_state=random_state,
+    )
+    room_importances = room_feature_importance_frame(room_models, feature_dataframes)
+    plot_room_feature_importances(room_importances, top_n=top_n)
+    return room_importances
+
+
+def hierarchical_position_feature_importance_frame(
+    models: dict[str, HierarchicalPositionClassifier],
+    feature_dataframes: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+
+    for dataset_name, hierarchical_model in models.items():
+        dataframe = feature_dataframes.get(dataset_name)
+        if dataframe is None or dataframe.empty:
+            continue
+
+        feature_columns = list(
+            getattr(
+                hierarchical_model,
+                "feature_columns",
+                feature_columns_for_importance(dataframe),
+            ),
+        )
+        position_models = getattr(hierarchical_model, "position_models", {})
+
+        for room_label, position_model in sorted(position_models.items()):
+            importances = _model_feature_importances(position_model)
+            if importances is None:
+                print(
+                    "No feature_importances_ found for hierarchical position model "
+                    f"{dataset_name} room {room_label}.",
+                )
+                continue
+            if len(feature_columns) != len(importances):
+                print(
+                    "Skipping hierarchical position feature importance for "
+                    f"{dataset_name} room {room_label}: "
+                    f"{len(feature_columns)} feature columns but {len(importances)} importances.",
+                )
+                continue
+
+            for feature_column, importance in zip(feature_columns, importances):
+                parsed_feature = parse_feature_importance_column(str(feature_column))
+                if parsed_feature is None:
+                    continue
+
+                rows.append(
+                    {
+                        "dataset": dataset_name,
+                        "room": int(room_label),
+                        "feature": str(feature_column),
+                        "importance": float(importance),
+                        **parsed_feature,
+                    },
+                )
+
+    return pd.DataFrame(rows, columns=ROOM_FEATURE_IMPORTANCE_COLUMNS)
+
+
+def plot_hierarchical_position_feature_importances(
+    importances: pd.DataFrame,
+    *,
+    top_n: int = FEATURE_IMPORTANCE_TOP_N,
+) -> None:
+    if importances.empty:
+        print("No hierarchical position feature importances to plot.")
+        return
+
+    for dataset_name in order_existing_values(
+        importances["dataset"].astype(str).unique(),
+        RF_DATASET_ORDER,
+    ):
+        dataset_importances = importances[importances["dataset"].astype(str) == dataset_name]
+
+        for room_label in sorted(dataset_importances["room"].unique()):
+            model_importances = dataset_importances[
+                dataset_importances["room"] == room_label
+            ]
+            if model_importances.empty:
+                continue
+
+            fig, axes = plt.subplots(
+                3,
+                2,
+                figsize=(18, 15),
+                constrained_layout=True,
+                squeeze=False,
+            )
+            _plot_top_feature_importances(axes[0, 0], model_importances, top_n)
+            _plot_grouped_feature_importance(
+                axes[0, 1],
+                model_importances,
+                "esp",
+                "By ESP",
+                order=_esp_importance_order(model_importances),
+            )
+            _plot_grouped_feature_importance(
+                axes[1, 0],
+                model_importances,
+                "band",
+                "By Band",
+                order=RF_BAND_ORDER,
+            )
+            _plot_subcarrier_feature_importance(axes[1, 1], model_importances)
+            _plot_grouped_feature_importance(
+                axes[2, 0],
+                model_importances,
+                "statistic",
+                "By Statistic",
+                order=RF_FEATURE_STATISTIC_ORDER,
+            )
+            axes[2, 1].set_axis_off()
+
+            fig.suptitle(
+                "Hierarchical Position Feature Importance | "
+                f"{dataset_name} | Room {room_label}",
+            )
+            plt.show()
+
+
+def _validate_room_feature_importance_columns(
+    dataframe: pd.DataFrame,
+    dataset_name: str,
+) -> None:
+    missing_columns = {"label", "location"} - set(dataframe.columns)
+    if missing_columns:
+        msg = (
+            f"Cannot train room feature-importance models for {dataset_name}: "
+            f"missing columns {', '.join(sorted(missing_columns))}."
+        )
+        raise ValueError(msg)
+
+
+def _room_feature_importance_labels(room_labels: pd.Series) -> list[int]:
+    return sorted(room_labels.dropna().astype(int).unique())
 
 
 def _plot_top_feature_importances(
