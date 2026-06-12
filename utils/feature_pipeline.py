@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from typing import Literal
 
 import numpy as np
@@ -29,6 +30,8 @@ ESP_IDS_BY_SCENARIO: dict[FeatureScenario, tuple[int, ...]] = {
     "5ghz": tuple(range(11, 21)),
     "fusion": tuple(range(1, 21)),
 }
+
+FEATURE_DATAFRAME_METADATA_COLUMNS = set(METADATA_COLUMNS)
 
 
 # This function maps a location key to a room label (0, 1, 2, or 3)
@@ -66,28 +69,21 @@ def compute_window_features(
     overlap_size: int,
     calibrate: bool = False,
 ) -> np.ndarray:
-    if window_size <= 0:
-        msg = "window_size must be greater than zero"
-        raise ValueError(msg)
-    if overlap_size < 0:
-        msg = "overlap_size cannot be negative"
-        raise ValueError(msg)
-    if overlap_size >= window_size:
-        msg = "overlap_size must be smaller than window_size"
-        raise ValueError(msg)
-    if magnitude.ndim != EXPECTED_MAGNITUDE_DIMS:
-        msg = "magnitude must be a 2D array: samples x subcarriers"
-        raise ValueError(msg)
+    _validate_window_parameters(magnitude, window_size=window_size, overlap_size=overlap_size)
 
     subcarrier_count = magnitude.shape[1]
-    if magnitude.shape[0] < window_size or magnitude.shape[1] == 0:
+    window_count = window_count_for_magnitude(
+        magnitude,
+        window_size=window_size,
+        overlap_size=overlap_size,
+    )
+    if window_count == 0:
         return np.empty((0, subcarrier_count * len(FEATURE_NAMES)), dtype=float)
 
     if calibrate:
         magnitude = magnitude - np.mean(magnitude, axis=0, keepdims=True)
 
     step = window_size - overlap_size
-    window_count = 1 + (magnitude.shape[0] - window_size) // step
     features = np.empty((window_count, subcarrier_count * len(FEATURE_NAMES)), dtype=float)
 
     for window_idx, start in enumerate(range(0, magnitude.shape[0] - window_size + 1, step)):
@@ -104,6 +100,20 @@ def compute_window_features(
         )
 
     return features
+
+
+def window_count_for_magnitude(
+    magnitude: np.ndarray,
+    *,
+    window_size: int,
+    overlap_size: int,
+) -> int:
+    _validate_window_parameters(magnitude, window_size=window_size, overlap_size=overlap_size)
+    if magnitude.shape[0] < window_size or magnitude.shape[1] == 0:
+        return 0
+
+    step = window_size - overlap_size
+    return 1 + (magnitude.shape[0] - window_size) // step
 
 
 # This function builds a feature dataframe for a given
@@ -187,6 +197,224 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
                     )
 
     return pd.DataFrame(rows, columns=[*METADATA_COLUMNS, *feature_columns])
+
+
+def feature_window_bottleneck_report(
+    magnitude_data: CsiMap,
+    frequency_scenario: FeatureScenario,
+    *,
+    window_size: int = 60,
+    overlap_size: int = 30,
+    require_all_esps: bool = False,
+) -> pd.DataFrame:
+    esp_keys = _esp_keys_for_scenario(frequency_scenario)
+    rows: list[dict[str, object]] = []
+
+    for scenario_key, locations_map in magnitude_data.items():
+        for location_key, users_map in locations_map.items():
+            label = room_label_for_location(location_key)
+            if label is None:
+                continue
+
+            for user_key, esps_map in users_map.items():
+                selected_esp_keys = [esp_key for esp_key in esp_keys if esp_key in esps_map]
+                if require_all_esps and len(selected_esp_keys) != len(esp_keys):
+                    continue
+                if not selected_esp_keys:
+                    continue
+
+                trial_sets = [
+                    {
+                        trial_key
+                        for trial_key, magnitude in esps_map[esp_key].items()
+                        if magnitude is not None
+                    }
+                    for esp_key in selected_esp_keys
+                ]
+                common_trials = sorted(set.intersection(*trial_sets))
+
+                for trial_key in common_trials:
+                    esp_packet_counts: dict[str, int] = {}
+                    esp_window_counts: dict[str, int] = {}
+                    for esp_key in selected_esp_keys:
+                        magnitude = esps_map[esp_key].get(trial_key)
+                        packet_count = int(magnitude.shape[0]) if magnitude is not None else 0
+                        esp_packet_counts[esp_key] = packet_count
+                        esp_window_counts[esp_key] = (
+                            window_count_for_magnitude(
+                                magnitude,
+                                window_size=window_size,
+                                overlap_size=overlap_size,
+                            )
+                            if magnitude is not None
+                            else 0
+                        )
+
+                    usable_window_counts = {
+                        esp_key: window_count
+                        for esp_key, window_count in esp_window_counts.items()
+                        if window_count > 0
+                    }
+                    if require_all_esps and len(usable_window_counts) != len(selected_esp_keys):
+                        continue
+                    if not usable_window_counts:
+                        continue
+
+                    min_windows = min(usable_window_counts.values())
+                    bottleneck_esps = [
+                        esp_key
+                        for esp_key, window_count in usable_window_counts.items()
+                        if window_count == min_windows
+                    ]
+                    window_values = list(usable_window_counts.values())
+
+                    rows.append(
+                        {
+                            "frequency_scenario": frequency_scenario,
+                            "scenario": scenario_key.removeprefix("scenario_"),
+                            "location": location_key.removeprefix("location_"),
+                            "user": user_key.removeprefix("user_"),
+                            "trial": trial_key.removeprefix("trial_"),
+                            "selected_esp_count": len(usable_window_counts),
+                            "selected_esps": ", ".join(usable_window_counts.keys()),
+                            "min_windows": min_windows,
+                            "max_windows": max(window_values),
+                            "mean_windows": float(np.mean(window_values)),
+                            "bottleneck_esps": ", ".join(bottleneck_esps),
+                            "esp_window_counts": esp_window_counts,
+                            "esp_packet_counts": esp_packet_counts,
+                        },
+                    )
+
+    return pd.DataFrame(rows)
+
+
+def summarize_window_bottlenecks(report: pd.DataFrame) -> pd.DataFrame:
+    if report.empty:
+        return pd.DataFrame(
+            columns=[
+                "frequency_scenario",
+                "groups",
+                "mean_min_windows",
+                "median_min_windows",
+                "min_min_windows",
+                "max_min_windows",
+            ],
+        )
+
+    _validate_report_columns(
+        report,
+        {
+            "frequency_scenario",
+            "min_windows",
+        },
+    )
+    summary_rows: list[dict[str, object]] = []
+
+    for frequency_scenario, scenario_report in report.groupby("frequency_scenario", sort=False):
+        min_windows = pd.to_numeric(scenario_report["min_windows"], errors="coerce").dropna()
+        summary_rows.append(
+            {
+                "frequency_scenario": frequency_scenario,
+                "groups": int(len(scenario_report)),
+                "mean_min_windows": float(min_windows.mean()) if not min_windows.empty else np.nan,
+                "median_min_windows": float(min_windows.median()) if not min_windows.empty else np.nan,
+                "min_min_windows": float(min_windows.min()) if not min_windows.empty else np.nan,
+                "max_min_windows": float(min_windows.max()) if not min_windows.empty else np.nan,
+            },
+        )
+
+    return pd.DataFrame(summary_rows)
+
+
+def bottleneck_esp_counts(report: pd.DataFrame) -> pd.DataFrame:
+    if report.empty:
+        return pd.DataFrame(columns=["frequency_scenario", "esp", "bottleneck_count"])
+
+    _validate_report_columns(
+        report,
+        {
+            "frequency_scenario",
+            "bottleneck_esps",
+        },
+    )
+    counter: Counter[tuple[str, str]] = Counter()
+
+    for _, row in report.iterrows():
+        frequency_scenario = str(row["frequency_scenario"])
+        bottleneck_esps = str(row["bottleneck_esps"]).strip()
+        if not bottleneck_esps:
+            continue
+
+        for esp in [part.strip() for part in bottleneck_esps.split(",") if part.strip()]:
+            counter[(frequency_scenario, esp)] += 1
+
+    rows = [
+        {
+            "frequency_scenario": frequency_scenario,
+            "esp": esp,
+            "bottleneck_count": count,
+        }
+        for (frequency_scenario, esp), count in counter.items()
+    ]
+    return pd.DataFrame(rows).sort_values(
+        ["frequency_scenario", "bottleneck_count", "esp"],
+        ascending=[True, False, True],
+    ).reset_index(drop=True)
+
+
+def feature_dataframe_nan_report(
+    feature_dataframes: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+
+    for dataset_name, dataframe in feature_dataframes.items():
+        feature_columns = [column for column in dataframe.columns if column not in FEATURE_DATAFRAME_METADATA_COLUMNS]
+        nan_counts = dataframe.isna().sum() if not dataframe.empty else pd.Series(dtype=int)
+        rows_with_nan = int(dataframe.isna().any(axis=1).sum()) if not dataframe.empty else 0
+        columns_with_nan = int((nan_counts > 0).sum()) if not dataframe.empty else 0
+        total_nan = int(nan_counts.sum()) if not dataframe.empty else 0
+        max_nan_in_column = int(nan_counts.max()) if not dataframe.empty and not nan_counts.empty else 0
+        rows.append(
+            {
+                "dataset": dataset_name,
+                "rows": int(dataframe.shape[0]),
+                "columns": int(dataframe.shape[1]),
+                "feature_columns": int(len(feature_columns)),
+                "total_nan": total_nan,
+                "columns_with_nan": columns_with_nan,
+                "rows_with_nan": rows_with_nan,
+                "max_nan_in_column": max_nan_in_column,
+            },
+        )
+
+    return pd.DataFrame(rows)
+
+
+def top_nan_columns(
+    df: pd.DataFrame,
+    *,
+    top_n: int = 20,
+) -> pd.DataFrame:
+    nan_counts = df.isna().sum()
+    if nan_counts.empty:
+        return pd.DataFrame(columns=["column", "nan_count", "nan_fraction"])
+
+    rows = [
+        {
+            "column": column,
+            "nan_count": int(nan_count),
+            "nan_fraction": float(nan_count / len(df)) if len(df) else np.nan,
+        }
+        for column, nan_count in nan_counts.items()
+        if int(nan_count) > 0
+    ]
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["nan_count", "column"], ascending=[False, True])
+        .head(top_n)
+        .reset_index(drop=True)
+    )
 
 
 # function that is called by the main script
@@ -273,6 +501,33 @@ def _subcarrier_count_from_features(features: np.ndarray) -> int:
         msg = "feature width must be divisible by the number of feature names"
         raise ValueError(msg)
     return features.shape[1] // feature_count
+
+
+def _validate_window_parameters(
+    magnitude: np.ndarray,
+    *,
+    window_size: int,
+    overlap_size: int,
+) -> None:
+    if window_size <= 0:
+        msg = "window_size must be greater than zero"
+        raise ValueError(msg)
+    if overlap_size < 0:
+        msg = "overlap_size cannot be negative"
+        raise ValueError(msg)
+    if overlap_size >= window_size:
+        msg = "overlap_size must be smaller than window_size"
+        raise ValueError(msg)
+    if magnitude.ndim != EXPECTED_MAGNITUDE_DIMS:
+        msg = "magnitude must be a 2D array: samples x subcarriers"
+        raise ValueError(msg)
+
+
+def _validate_report_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
+    missing_columns = sorted(required_columns - set(df.columns))
+    if missing_columns:
+        msg = f"Missing required columns: {', '.join(missing_columns)}"
+        raise ValueError(msg)
 
 
 # This function extracts features for each ESP in the given trial and returns a dictionary

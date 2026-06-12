@@ -34,6 +34,40 @@ FIVE_GHZ_CSI_COLUMN = 14
 FIVE_GHZ_RSSI_COLUMN = 3
 VALID_CALIBRATION_MODES: tuple[CalibrationMode, ...] = ("none", "packet_norm", "rssi")
 
+PROCESSING_DIAGNOSTIC_COLUMNS = [
+    "scenario",
+    "location",
+    "user",
+    "esp",
+    "trial",
+    "band",
+    "file_path",
+    "raw_rows",
+    "no_match_count",
+    "no_complete_count",
+    "valid_csi_rows_before_filter",
+    "invalid_packets_removed",
+    "valid_magnitude_rows",
+    "subcarriers",
+    "calibration_mode",
+    "calibration_applied",
+    "from_cache",
+]
+
+PROCESSING_SUMMARY_COLUMNS = [
+    "band",
+    "files",
+    "raw_rows_mean",
+    "raw_rows_median",
+    "valid_csi_rows_mean",
+    "valid_magnitude_rows_mean",
+    "valid_magnitude_rows_median",
+    "no_match_total",
+    "no_complete_total",
+    "invalid_packets_removed_total",
+    "mean_packet_retention",
+]
+
 
 @dataclass(frozen=True)
 class _ProcessingJob:
@@ -202,6 +236,99 @@ def _run_jobs(
         processed=len(results) - cached,
         cached=cached,
         calibration_mode=options.calibration_mode,
+    )
+
+
+def _normalized_key(value: str) -> str:
+    normalized = value
+    for prefix in ("scenario_", "location_", "user_", "trial_"):
+        normalized = normalized.removeprefix(prefix)
+    return normalized
+
+
+def _esp_band(esp_key: str) -> str:
+    esp_id = int(esp_key.removeprefix("esp_"))
+    return "5 GHz" if FIVE_GHZ_MIN_ESP_ID <= esp_id <= FIVE_GHZ_MAX_ESP_ID else "2.4 GHz"
+
+
+def processing_diagnostics_frame(
+    results: list[_CachedResult],
+    options: _RunOptions,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+
+    for result in results:
+        file_result = result.payload
+        valid_csi_rows_before_filter = int(
+            file_result.total_rows - file_result.no_match_count - file_result.no_complete_count,
+        )
+        rows.append(
+            {
+                "scenario": _normalized_key(result.job.scenario_key),
+                "location": _normalized_key(result.job.location_key),
+                "user": _normalized_key(result.job.user_key),
+                "esp": result.job.esp_key,
+                "trial": _normalized_key(result.job.trial_key),
+                "band": _esp_band(result.job.esp_key),
+                "file_path": result.job.file_path,
+                "raw_rows": int(file_result.total_rows),
+                "no_match_count": int(file_result.no_match_count),
+                "no_complete_count": int(file_result.no_complete_count),
+                "valid_csi_rows_before_filter": max(valid_csi_rows_before_filter, 0),
+                "invalid_packets_removed": int(file_result.invalid_packets_removed),
+                "valid_magnitude_rows": int(file_result.magnitude.shape[0]),
+                "subcarriers": int(file_result.magnitude.shape[1]) if file_result.magnitude.ndim >= 2 else 0,
+                "calibration_mode": options.calibration_mode,
+                "calibration_applied": bool(file_result.calibration_applied),
+                "from_cache": bool(result.from_cache),
+            },
+        )
+
+    return pd.DataFrame(rows, columns=PROCESSING_DIAGNOSTIC_COLUMNS)
+
+
+def summarize_processing_diagnostics(diagnostics: pd.DataFrame) -> pd.DataFrame:
+    _validate_required_columns(diagnostics, set(PROCESSING_DIAGNOSTIC_COLUMNS))
+    summary_rows: list[dict[str, object]] = []
+
+    for band, band_diagnostics in diagnostics.groupby("band", sort=False):
+        raw_rows_mean = float(band_diagnostics["raw_rows"].mean())
+        summary_rows.append(
+            {
+                "band": band,
+                "files": int(len(band_diagnostics)),
+                "raw_rows_mean": raw_rows_mean,
+                "raw_rows_median": float(band_diagnostics["raw_rows"].median()),
+                "valid_csi_rows_mean": float(band_diagnostics["valid_csi_rows_before_filter"].mean()),
+                "valid_magnitude_rows_mean": float(band_diagnostics["valid_magnitude_rows"].mean()),
+                "valid_magnitude_rows_median": float(band_diagnostics["valid_magnitude_rows"].median()),
+                "no_match_total": int(band_diagnostics["no_match_count"].sum()),
+                "no_complete_total": int(band_diagnostics["no_complete_count"].sum()),
+                "invalid_packets_removed_total": int(band_diagnostics["invalid_packets_removed"].sum()),
+                "mean_packet_retention": (
+                    float(band_diagnostics["valid_magnitude_rows"].mean() / raw_rows_mean)
+                    if raw_rows_mean
+                    else np.nan
+                ),
+            },
+        )
+
+    return pd.DataFrame(summary_rows, columns=PROCESSING_SUMMARY_COLUMNS)
+
+
+def lowest_packet_count_files(
+    diagnostics: pd.DataFrame,
+    *,
+    top_n: int = 20,
+) -> pd.DataFrame:
+    _validate_required_columns(diagnostics, set(PROCESSING_DIAGNOSTIC_COLUMNS))
+    return (
+        diagnostics.sort_values(
+            ["valid_magnitude_rows", "raw_rows", "file_path"],
+            ascending=[True, True, True],
+        )
+        .head(top_n)
+        .reset_index(drop=True)
     )
 
 
@@ -544,6 +671,13 @@ def _initialize_maps(data_files: FileMap) -> tuple[CsiMap, AgcGainMap]:
     return magnitudes, agc_gain_data
 
 
+def _validate_required_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
+    missing_columns = sorted(required_columns - set(df.columns))
+    if missing_columns:
+        msg = f"Missing required columns: {', '.join(missing_columns)}"
+        raise ValueError(msg)
+
+
 def process_csv_files(  # noqa: PLR0913
     data_files: FileMap,
     *,
@@ -552,10 +686,16 @@ def process_csv_files(  # noqa: PLR0913
     use_cache: bool = True,
     force_reprocess: bool = False,
     return_stats: bool = False,
+    return_diagnostics: bool = False,
     calibration_mode: CalibrationMode = "none",
     min_rssi_dbm: float = -95.0,
     calibration_eps: float = 1e-12,
-) -> tuple[CsiMap, AgcGainMap] | tuple[CsiMap, AgcGainMap, CacheStats]:
+) -> (
+    tuple[CsiMap, AgcGainMap]
+    | tuple[CsiMap, AgcGainMap, CacheStats]
+    | tuple[CsiMap, AgcGainMap, pd.DataFrame]
+    | tuple[CsiMap, AgcGainMap, CacheStats, pd.DataFrame]
+):
     if calibration_mode not in VALID_CALIBRATION_MODES:
         raise _calibration_mode_error()
     if not np.isfinite(min_rssi_dbm):
@@ -607,6 +747,8 @@ def process_csv_files(  # noqa: PLR0913
                 result.job.esp_key
             ][result.job.trial_key] = file_result.agc_gains
 
+    diagnostics = processing_diagnostics_frame(results, options) if return_diagnostics else None
+
     # guarda em cache
     stats = CacheStats(
         processed=cache_stats.processed,
@@ -616,6 +758,14 @@ def process_csv_files(  # noqa: PLR0913
         calibration_applied_files=calibration_applied_files,
     )
 
+    if return_stats and return_diagnostics:
+        return magnitudes, agc_gain_data, stats, diagnostics if diagnostics is not None else pd.DataFrame(
+            columns=PROCESSING_DIAGNOSTIC_COLUMNS,
+        )
     if return_stats:
         return magnitudes, agc_gain_data, stats
+    if return_diagnostics:
+        return magnitudes, agc_gain_data, diagnostics if diagnostics is not None else pd.DataFrame(
+            columns=PROCESSING_DIAGNOSTIC_COLUMNS,
+        )
     return magnitudes, agc_gain_data
