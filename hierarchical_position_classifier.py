@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import re
-import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
-from sklearn.model_selection import GroupShuffleSplit
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
 
 METADATA_COLUMNS = {
     "frequency_scenario",
@@ -36,9 +34,21 @@ ROOM_2_BC_COLUMNS = range(10, 15)
 ROOM_3_EF_COLUMNS = range(10, 14)
 HIERARCHICAL_MODEL_NAME = "hierarchical_rf"
 GLOBAL_POSITION_MODEL_NAME = "global_position_rf"
+ROOM_SPECIFIC_MODEL_NAME = "room_specific_position_rf"
+
+ROOM_LOCAL_ESPS: dict[int, tuple[str, ...]] = {
+    1: (
+        "esp_06", "esp_07", "esp_08", "esp_09", "esp_10",
+        "esp_16", "esp_17", "esp_18", "esp_19", "esp_20",
+    ),
+    2: ("esp_01", "esp_02", "esp_03", "esp_11", "esp_12", "esp_13"),
+    3: ("esp_04", "esp_05", "esp_14", "esp_15"),
+}
 
 PREDICTION_COLUMNS = [
     "dataset",
+    "model",
+    "split",
     "true_room",
     "pred_room",
     "true_location",
@@ -49,6 +59,30 @@ PREDICTION_COLUMNS = [
     "trial",
     "group_id",
     "window_idx",
+]
+
+POSITION_SPLIT_DIAGNOSTIC_COLUMNS = [
+    "dataset",
+    "location",
+    "room_label",
+    "train_groups",
+    "test_groups",
+    "train_samples",
+    "test_samples",
+    "in_train",
+    "in_test",
+    "test_location_missing_from_train",
+]
+
+POSITION_SPLIT_SUMMARY_COLUMNS = [
+    "dataset",
+    "locations_total",
+    "locations_in_train",
+    "locations_in_test",
+    "test_locations_missing_from_train",
+    "test_samples_with_unseen_location",
+    "total_test_samples",
+    "fraction_test_samples_with_unseen_location",
 ]
 
 DISTANCE_SUMMARY_COLUMNS = [
@@ -76,6 +110,7 @@ PER_ROOM_SUMMARY_COLUMNS = [
 GLOBAL_PREDICTION_COLUMNS = [
     "dataset",
     "model",
+    "split",
     "true_room",
     "pred_room",
     "true_location",
@@ -88,9 +123,77 @@ GLOBAL_PREDICTION_COLUMNS = [
     "window_idx",
 ]
 
+HIERARCHICAL_SUMMARY_COLUMNS = [
+    "dataset",
+    "split",
+    "esp_mode",
+    "room_accuracy",
+    "position_accuracy",
+    "mean_distance_error",
+    "median_distance_error",
+    "rmse_distance_error",
+    "distance_error_samples",
+    "localization_samples",
+    "samples",
+]
+
+GLOBAL_SUMMARY_COLUMNS = [
+    "dataset",
+    "split",
+    "position_accuracy",
+    "mean_distance_error",
+    "median_distance_error",
+    "rmse_distance_error",
+    "samples",
+]
+
+ROOM_SPECIFIC_PREDICTION_COLUMNS = [
+    "dataset",
+    "model",
+    "split",
+    "room",
+    "esp_mode",
+    "true_location",
+    "pred_location",
+    "distance_error",
+    "scenario",
+    "user",
+    "trial",
+    "group_id",
+    "window_idx",
+]
+
+ROOM_SPECIFIC_SUMMARY_COLUMNS = [
+    "dataset",
+    "model",
+    "split",
+    "room",
+    "esp_mode",
+    "position_accuracy",
+    "mean_distance_error",
+    "median_distance_error",
+    "rmse_distance_error",
+    "samples",
+]
+
+COMBINED_SUMMARY_COLUMNS = [
+    "dataset",
+    "model",
+    "split",
+    "room",
+    "esp_mode",
+    "position_accuracy",
+    "room_accuracy",
+    "mean_distance_error",
+    "median_distance_error",
+    "rmse_distance_error",
+    "samples",
+]
+
 LOCALIZATION_SUMMARY_COLUMNS = [
     "dataset",
     "model",
+    "split",
     "samples",
     "position_accuracy",
     "mean_distance_error",
@@ -108,6 +211,7 @@ class GridDistanceOptions:
 
 
 def feature_columns(df: pd.DataFrame) -> list[str]:
+    """Return feature column names by excluding metadata columns."""
     return [col for col in df.columns if col not in METADATA_COLUMNS]
 
 
@@ -163,26 +267,195 @@ def split_dataframe(
     *,
     test_size: float = 0.3,
     random_state: int = 42,
+    split_mode: Literal["group", "random"] = "group",
+    stratify_column: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split by group_id so windows from the same trial do not leak across sets."""
-    _validate_required_columns(df, {"group_id", "label"})
+    """Split a dataframe for train/test evaluation.
+
+    split_mode='group' (default, realistic): keeps all sliding windows from the
+    same acquisition group together via GroupShuffleSplit.
+
+    split_mode='random' (optimistic sanity-check): random row-level split that
+    may leak similar windows from the same acquisition across boundaries.
+    """
+    _validate_required_columns(df, {"group_id"})
     if df.empty:
         msg = "Cannot split an empty dataframe."
         raise ValueError(msg)
     if not 0 < test_size < 1:
         msg = "test_size must be between 0 and 1."
         raise ValueError(msg)
-    if df["group_id"].nunique() < MIN_GROUP_SPLIT_COUNT:
-        msg = "Group split requires at least two unique group_id values."
-        raise ValueError(msg)
 
-    splitter = GroupShuffleSplit(
-        n_splits=1,
+    if split_mode == "group":
+        _validate_required_columns(df, {"label"})
+        if df["group_id"].nunique() < MIN_GROUP_SPLIT_COUNT:
+            msg = "Group split requires at least two unique group_id values."
+            raise ValueError(msg)
+        splitter = GroupShuffleSplit(
+            n_splits=1,
+            test_size=test_size,
+            random_state=random_state,
+        )
+        train_idx, test_idx = next(splitter.split(df, df["label"], groups=df["group_id"]))
+        return df.iloc[train_idx].copy(), df.iloc[test_idx].copy()
+
+    if split_mode == "random":
+        stratify = None
+        if stratify_column is not None and stratify_column in df.columns:
+            col = df[stratify_column]
+            if col.nunique() >= 2 and col.value_counts().min() >= 2:
+                stratify = col
+        row_indices = list(range(len(df)))
+        train_idx, test_idx = train_test_split(
+            row_indices,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=stratify,
+        )
+        return df.iloc[train_idx].copy(), df.iloc[test_idx].copy()
+
+    msg = f"Unknown split_mode {split_mode!r}. Must be 'group' or 'random'."
+    raise ValueError(msg)
+
+
+def position_split_diagnostics(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    dataset_name: str = "",
+) -> pd.DataFrame:
+    """Report whether each test location was also present in the training split."""
+    _validate_required_columns(train_df, {"group_id", "location", "label"})
+    _validate_required_columns(test_df, {"group_id", "location", "label"})
+
+    train_locations = train_df.loc[
+        train_df["location"].notna(), ["location", "group_id", "label"]
+    ].copy()
+    test_locations = test_df.loc[
+        test_df["location"].notna(), ["location", "group_id", "label"]
+    ].copy()
+
+    train_locations["location"] = train_locations["location"].map(_normalize_location_label)
+    test_locations["location"] = test_locations["location"].map(_normalize_location_label)
+
+    all_locations = sorted(
+        set(train_locations["location"].unique()).union(test_locations["location"].unique()),
+        key=_location_sort_key,
+    )
+
+    def _room_label_for_location(location: str) -> object:
+        combined = pd.concat(
+            [
+                train_locations.loc[train_locations["location"] == location, "label"],
+                test_locations.loc[test_locations["location"] == location, "label"],
+            ],
+            ignore_index=True,
+        )
+        numeric_labels = pd.to_numeric(combined, errors="coerce").dropna()
+        if numeric_labels.empty:
+            return np.nan
+        return int(numeric_labels.mode().iat[0])
+
+    diagnostics_rows: list[dict[str, object]] = []
+    for location in all_locations:
+        train_rows = train_locations.loc[train_locations["location"] == location]
+        test_rows = test_locations.loc[test_locations["location"] == location]
+        train_samples = int(len(train_rows))
+        test_samples = int(len(test_rows))
+        diagnostics_rows.append(
+            {
+                "dataset": dataset_name,
+                "location": location,
+                "room_label": _room_label_for_location(location),
+                "train_groups": int(train_rows["group_id"].nunique()),
+                "test_groups": int(test_rows["group_id"].nunique()),
+                "train_samples": train_samples,
+                "test_samples": test_samples,
+                "in_train": train_samples > 0,
+                "in_test": test_samples > 0,
+                "test_location_missing_from_train": test_samples > 0 and train_samples == 0,
+            },
+        )
+
+    return pd.DataFrame(diagnostics_rows, columns=POSITION_SPLIT_DIAGNOSTIC_COLUMNS)
+
+
+def diagnose_position_split(
+    df: pd.DataFrame,
+    *,
+    dataset_name: str,
+    test_size: float = 0.3,
+    random_state: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split a dataframe and return the train/test partitions plus diagnostics."""
+    train_df, test_df = split_dataframe(
+        df,
         test_size=test_size,
         random_state=random_state,
     )
-    train_idx, test_idx = next(splitter.split(df, df["label"], groups=df["group_id"]))
-    return df.iloc[train_idx].copy(), df.iloc[test_idx].copy()
+    diagnostics = position_split_diagnostics(train_df, test_df, dataset_name=dataset_name)
+    return train_df, test_df, diagnostics
+
+
+def diagnose_position_splits(
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    test_size: float = 0.3,
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """Run split diagnostics for every named feature dataframe."""
+    diagnostics_frames: list[pd.DataFrame] = []
+
+    for dataset_name, dataframe in feature_dataframes.items():
+        if dataframe.empty:
+            diagnostics_frames.append(
+                pd.DataFrame(columns=POSITION_SPLIT_DIAGNOSTIC_COLUMNS),
+            )
+            continue
+
+        _, _, diagnostics = diagnose_position_split(
+            dataframe,
+            dataset_name=dataset_name,
+            test_size=test_size,
+            random_state=random_state,
+        )
+        diagnostics_frames.append(diagnostics)
+
+    if not diagnostics_frames:
+        return pd.DataFrame(columns=POSITION_SPLIT_DIAGNOSTIC_COLUMNS)
+
+    return pd.concat(diagnostics_frames, ignore_index=True)
+
+
+def summarize_position_split_diagnostics(diagnostics: pd.DataFrame) -> pd.DataFrame:
+    """Summarize which datasets and samples contain unseen test locations."""
+    _validate_required_columns(diagnostics, set(POSITION_SPLIT_DIAGNOSTIC_COLUMNS))
+    summary_rows: list[dict[str, object]] = []
+
+    for dataset_name, dataset_diagnostics in diagnostics.groupby("dataset", sort=False):
+        unseen_mask = dataset_diagnostics["test_location_missing_from_train"].astype(bool)
+        test_samples_with_unseen_location = int(
+            dataset_diagnostics.loc[unseen_mask, "test_samples"].sum()
+        )
+        total_test_samples = int(dataset_diagnostics["test_samples"].sum())
+        summary_rows.append(
+            {
+                "dataset": dataset_name,
+                "locations_total": int(len(dataset_diagnostics)),
+                "locations_in_train": int(dataset_diagnostics["in_train"].astype(bool).sum()),
+                "locations_in_test": int(dataset_diagnostics["in_test"].astype(bool).sum()),
+                "test_locations_missing_from_train": int(unseen_mask.sum()),
+                "test_samples_with_unseen_location": test_samples_with_unseen_location,
+                "total_test_samples": total_test_samples,
+                "fraction_test_samples_with_unseen_location": (
+                    float(test_samples_with_unseen_location / total_test_samples)
+                    if total_test_samples
+                    else np.nan
+                ),
+            },
+        )
+
+    return pd.DataFrame(summary_rows, columns=POSITION_SPLIT_SUMMARY_COLUMNS)
 
 
 @dataclass
@@ -193,6 +466,9 @@ class HierarchicalPositionClassifier:
     position_models: dict[int, object]
     feature_columns: list[str]
     fallback_locations: dict[int, str]
+    esp_mode: Literal["all", "local"] = "all"
+    # Maps room label → feature columns used by that room's position model.
+    room_feature_columns: dict[int, list[str]] = field(default_factory=dict)
 
     def predict(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         """Predict room labels and reference point labels for a feature dataframe."""
@@ -216,8 +492,12 @@ class HierarchicalPositionClassifier:
                 )
                 continue
 
+            # In local mode, restrict to this room's ESP feature columns.
+            room_feat_cols = self.room_feature_columns.get(room_label, self.feature_columns)
             room_indices = np.flatnonzero(room_mask)
-            pred_locations[room_mask] = position_model.predict(features.iloc[room_indices])
+            pred_locations[room_mask] = position_model.predict(
+                df[room_feat_cols].iloc[room_indices]
+            )
 
         return pred_rooms, pred_locations
 
@@ -226,17 +506,27 @@ def train_hierarchical_position_classifier(
     train_df: pd.DataFrame,
     *,
     random_state: int = 42,
+    esp_mode: Literal["all", "local"] = "all",
+    room_local_esps: dict[int, tuple[str, ...]] | None = None,
 ) -> HierarchicalPositionClassifier:
-    """Train one room classifier and one position classifier per non-empty room."""
+    """Train one room classifier and one position classifier per non-empty room.
+
+    When esp_mode='local', each room's position model trains only on feature columns
+    for the ESPs assigned to that room in room_local_esps (defaults to ROOM_LOCAL_ESPS).
+    The room classifier always uses all feature columns regardless of esp_mode.
+    """
     _validate_training_dataframe(train_df)
     columns = feature_columns(train_df)
     room_labels = train_df["label"].astype(int)
 
+    # Stage 1: room classifier always sees all ESP features.
     room_model = _random_forest_classifier(random_state=random_state)
     room_model.fit(train_df[columns], room_labels)
 
     fallback_locations = _fallback_locations(train_df, room_labels)
     position_models: dict[int, object] = {}
+    room_feature_columns: dict[int, list[str]] = {}
+    resolved_esps = room_local_esps if room_local_esps is not None else ROOM_LOCAL_ESPS
 
     for raw_room_label in sorted(room_labels.unique()):
         room_label = int(raw_room_label)
@@ -244,8 +534,19 @@ def train_hierarchical_position_classifier(
             continue
 
         room_df = train_df.loc[room_labels == room_label]
+
+        # Stage 2: position classifier uses local ESPs when esp_mode="local".
+        if esp_mode == "local":
+            esp_keys = resolved_esps.get(room_label, ())
+            room_feat_cols = (
+                feature_columns_for_esps(room_df, esp_keys) if esp_keys else columns
+            )
+        else:
+            room_feat_cols = columns
+
+        room_feature_columns[room_label] = room_feat_cols
         position_model = _random_forest_classifier(random_state=random_state)
-        position_model.fit(room_df[columns], room_df["location"].astype(str))
+        position_model.fit(room_df[room_feat_cols], room_df["location"].astype(str))
         position_models[room_label] = position_model
 
     return HierarchicalPositionClassifier(
@@ -253,6 +554,8 @@ def train_hierarchical_position_classifier(
         position_models=position_models,
         feature_columns=columns,
         fallback_locations=fallback_locations,
+        esp_mode=esp_mode,
+        room_feature_columns=room_feature_columns,
     )
 
 
@@ -260,9 +563,12 @@ def run_hierarchical_position_experiment(
     df: pd.DataFrame,
     *,
     dataset_name: str,
+    split_mode: Literal["group", "random"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
     distance_options: GridDistanceOptions | None = None,
+    esp_mode: Literal["all", "local"] = "all",
+    room_local_esps: dict[int, tuple[str, ...]] | None = None,
 ) -> tuple[HierarchicalPositionClassifier, pd.DataFrame, dict[str, float]]:
     """Train and evaluate the hierarchical classifier for one feature dataframe."""
     distance_options = _resolve_distance_options(distance_options)
@@ -270,8 +576,15 @@ def run_hierarchical_position_experiment(
         df,
         test_size=test_size,
         random_state=random_state,
+        split_mode=split_mode,
+        stratify_column="location",
     )
-    model = train_hierarchical_position_classifier(train_df, random_state=random_state)
+    model = train_hierarchical_position_classifier(
+        train_df,
+        random_state=random_state,
+        esp_mode=esp_mode,
+        room_local_esps=room_local_esps,
+    )
     pred_rooms, pred_locations = model.predict(test_df)
     distance_errors = _distance_errors(
         test_df["location"],
@@ -283,6 +596,8 @@ def run_hierarchical_position_experiment(
     predictions = pd.DataFrame(
         {
             "dataset": dataset_name,
+            "model": HIERARCHICAL_MODEL_NAME,
+            "split": split_mode,
             "true_room": test_df["label"].astype(int).to_numpy(),
             "pred_room": pred_rooms,
             "true_location": test_df["location"].astype(str).to_numpy(),
@@ -304,10 +619,13 @@ def run_hierarchical_position_experiment(
 def run_hierarchical_position_experiments(
     feature_dataframes: dict[str, pd.DataFrame],
     *,
+    split_mode: Literal["group", "random"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
+    esp_mode: Literal["all", "local"] = "all",
+    room_local_esps: dict[int, tuple[str, ...]] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, HierarchicalPositionClassifier]]:
     """Run the hierarchical classifier for every named feature dataframe."""
     distance_options = GridDistanceOptions(
@@ -328,6 +646,8 @@ def run_hierarchical_position_experiments(
             summary_rows.append(
                 {
                     "dataset": dataset_name,
+                    "split": split_mode,
+                    "esp_mode": esp_mode,
                     "room_accuracy": np.nan,
                     "position_accuracy": np.nan,
                     "mean_distance_error": np.nan,
@@ -343,21 +663,31 @@ def run_hierarchical_position_experiments(
         model, predictions, metrics = run_hierarchical_position_experiment(
             dataframe,
             dataset_name=dataset_name,
+            split_mode=split_mode,
             test_size=test_size,
             random_state=random_state,
             distance_options=distance_options,
+            esp_mode=esp_mode,
+            room_local_esps=room_local_esps,
         )
         models[dataset_name] = model
         predictions_by_dataset[dataset_name] = predictions
-        summary_rows.append({"dataset": dataset_name, **metrics})
+        summary_rows.append(
+            {"dataset": dataset_name, "split": split_mode, "esp_mode": esp_mode, **metrics}
+        )
 
-    return pd.DataFrame(summary_rows), predictions_by_dataset, models
+    return (
+        pd.DataFrame(summary_rows, columns=HIERARCHICAL_SUMMARY_COLUMNS),
+        predictions_by_dataset,
+        models,
+    )
 
 
 def run_global_position_experiment(  # noqa: PLR0913
     df: pd.DataFrame,
     *,
     dataset_name: str,
+    split_mode: Literal["group", "random"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
     row_spacing: float = DEFAULT_ROW_SPACING,
@@ -372,6 +702,8 @@ def run_global_position_experiment(  # noqa: PLR0913
         df,
         test_size=test_size,
         random_state=random_state,
+        split_mode=split_mode,
+        stratify_column="location",
     )
     columns = feature_columns(train_df)
     model = _random_forest_classifier(random_state=random_state)
@@ -393,6 +725,7 @@ def run_global_position_experiment(  # noqa: PLR0913
         {
             "dataset": dataset_name,
             "model": GLOBAL_POSITION_MODEL_NAME,
+            "split": split_mode,
             "true_room": test_df["label"].astype(int).to_numpy(),
             "pred_room": pred_rooms,
             "true_location": test_df["location"].astype(str).to_numpy(),
@@ -414,6 +747,7 @@ def run_global_position_experiment(  # noqa: PLR0913
 def run_global_position_experiments(
     feature_dataframes: dict[str, pd.DataFrame],
     *,
+    split_mode: Literal["group", "random"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
     row_spacing: float = DEFAULT_ROW_SPACING,
@@ -433,6 +767,7 @@ def run_global_position_experiments(
             summary_rows.append(
                 {
                     "dataset": dataset_name,
+                    "split": split_mode,
                     "position_accuracy": np.nan,
                     "mean_distance_error": np.nan,
                     "median_distance_error": np.nan,
@@ -445,6 +780,7 @@ def run_global_position_experiments(
         model, predictions, metrics = run_global_position_experiment(
             dataframe,
             dataset_name=dataset_name,
+            split_mode=split_mode,
             test_size=test_size,
             random_state=random_state,
             row_spacing=row_spacing,
@@ -452,9 +788,352 @@ def run_global_position_experiments(
         )
         models[dataset_name] = model
         predictions_by_dataset[dataset_name] = predictions
-        summary_rows.append({"dataset": dataset_name, **metrics})
+        summary_rows.append({"dataset": dataset_name, "split": split_mode, **metrics})
 
-    return pd.DataFrame(summary_rows), predictions_by_dataset, models
+    return (
+        pd.DataFrame(summary_rows, columns=GLOBAL_SUMMARY_COLUMNS),
+        predictions_by_dataset,
+        models,
+    )
+
+
+def run_hierarchical_position_experiments_by_split(
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    split_modes: tuple[str, ...] = ("group", "random"),
+    test_size: float = 0.3,
+    random_state: int = 42,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+    esp_mode: Literal["all", "local"] = "all",
+    room_local_esps: dict[int, tuple[str, ...]] | None = None,
+) -> tuple[
+    pd.DataFrame,
+    dict[tuple[str, str], pd.DataFrame],
+    dict[tuple[str, str], HierarchicalPositionClassifier],
+]:
+    """Run hierarchical experiments for every dataset × split mode combination."""
+    all_summary_frames: list[pd.DataFrame] = []
+    all_predictions: dict[tuple[str, str], pd.DataFrame] = {}
+    all_models: dict[tuple[str, str], HierarchicalPositionClassifier] = {}
+
+    for split_mode in split_modes:
+        summary, predictions, models = run_hierarchical_position_experiments(
+            feature_dataframes,
+            split_mode=split_mode,  # type: ignore[arg-type]
+            test_size=test_size,
+            random_state=random_state,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+            esp_mode=esp_mode,
+            room_local_esps=room_local_esps,
+        )
+        all_summary_frames.append(summary)
+        for dataset_name, preds in predictions.items():
+            all_predictions[(dataset_name, split_mode)] = preds
+        for dataset_name, model in models.items():
+            all_models[(dataset_name, split_mode)] = model
+
+    combined_summary = (
+        pd.concat(all_summary_frames, ignore_index=True)
+        if all_summary_frames
+        else pd.DataFrame(columns=HIERARCHICAL_SUMMARY_COLUMNS)
+    )
+    return combined_summary, all_predictions, all_models
+
+
+def run_global_position_experiments_by_split(
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    split_modes: tuple[str, ...] = ("group", "random"),
+    test_size: float = 0.3,
+    random_state: int = 42,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+) -> tuple[
+    pd.DataFrame,
+    dict[tuple[str, str], pd.DataFrame],
+    dict[tuple[str, str], RandomForestClassifier],
+]:
+    """Run global position experiments for every dataset × split mode combination."""
+    all_summary_frames: list[pd.DataFrame] = []
+    all_predictions: dict[tuple[str, str], pd.DataFrame] = {}
+    all_models: dict[tuple[str, str], RandomForestClassifier] = {}
+
+    for split_mode in split_modes:
+        summary, predictions, models = run_global_position_experiments(
+            feature_dataframes,
+            split_mode=split_mode,  # type: ignore[arg-type]
+            test_size=test_size,
+            random_state=random_state,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
+        all_summary_frames.append(summary)
+        for dataset_name, preds in predictions.items():
+            all_predictions[(dataset_name, split_mode)] = preds
+        for dataset_name, model in models.items():
+            all_models[(dataset_name, split_mode)] = model
+
+    combined_summary = (
+        pd.concat(all_summary_frames, ignore_index=True)
+        if all_summary_frames
+        else pd.DataFrame(columns=GLOBAL_SUMMARY_COLUMNS)
+    )
+    return combined_summary, all_predictions, all_models
+
+
+def feature_columns_for_esps(
+    df: pd.DataFrame,
+    esp_keys: tuple[str, ...] | list[str],
+) -> list[str]:
+    """Return feature columns whose names start with one of the given ESP prefixes."""
+    prefixes = tuple(f"{esp}_" for esp in esp_keys)
+    return [col for col in df.columns if col not in METADATA_COLUMNS and col.startswith(prefixes)]
+
+
+def room_specific_feature_dataframe(
+    df: pd.DataFrame,
+    *,
+    room_label: int,
+    esp_keys: tuple[str, ...] | list[str] | None = None,
+) -> pd.DataFrame:
+    """Filter to one room and optionally restrict to the given ESP feature columns."""
+    room_df = df.loc[df["label"] == room_label]
+    if esp_keys is None:
+        return room_df.copy()
+    metadata_cols = [col for col in df.columns if col in METADATA_COLUMNS]
+    selected_feature_cols = feature_columns_for_esps(room_df, esp_keys)
+    return room_df[metadata_cols + selected_feature_cols].copy()
+
+
+def run_room_specific_position_experiment(  # noqa: PLR0913
+    df: pd.DataFrame,
+    *,
+    dataset_name: str,
+    room_label: int,
+    esp_mode: Literal["all", "local"] = "all",
+    room_local_esps: dict[int, tuple[str, ...]] | None = None,
+    split_mode: Literal["group", "random"] = "group",
+    test_size: float = 0.3,
+    random_state: int = 42,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+) -> tuple[RandomForestClassifier, pd.DataFrame, dict[str, object]]:
+    """Train a position classifier for samples inside one room.
+
+    esp_mode='all': uses every ESP feature column present in the dataframe.
+    esp_mode='local': uses only the ESPs listed in room_local_esps[room_label].
+
+    This experiment assumes the room is already known (oracle-room scenario).
+    """
+    _validate_grid_spacing(row_spacing=row_spacing, column_spacing=column_spacing)
+
+    esp_keys: tuple[str, ...] | None = None
+    if esp_mode == "local":
+        esp_keys = (room_local_esps if room_local_esps is not None else ROOM_LOCAL_ESPS).get(
+            room_label,
+        )
+
+    room_df = room_specific_feature_dataframe(df, room_label=room_label, esp_keys=esp_keys)
+    _validate_training_dataframe(room_df)
+    _validate_required_columns(room_df, {"location", "group_id"})
+
+    train_df, test_df = split_dataframe(
+        room_df,
+        test_size=test_size,
+        random_state=random_state,
+        split_mode=split_mode,
+        stratify_column="location",
+    )
+
+    columns = feature_columns(train_df)
+    model = _random_forest_classifier(random_state=random_state)
+    model.fit(train_df[columns], train_df["location"].astype(str))
+
+    pred_locations = model.predict(test_df[columns])
+    distance_errors = _distance_errors(
+        test_df["location"],
+        pred_locations,
+        row_spacing=row_spacing,
+        column_spacing=column_spacing,
+    )
+
+    predictions = pd.DataFrame(
+        {
+            "dataset": dataset_name,
+            "model": ROOM_SPECIFIC_MODEL_NAME,
+            "split": split_mode,
+            "room": room_label,
+            "esp_mode": esp_mode,
+            "true_location": test_df["location"].astype(str).to_numpy(),
+            "pred_location": pred_locations,
+            "distance_error": distance_errors,
+            "scenario": test_df["scenario"].to_numpy(),
+            "user": test_df["user"].to_numpy(),
+            "trial": test_df["trial"].to_numpy(),
+            "group_id": test_df["group_id"].to_numpy(),
+            "window_idx": test_df["window_idx"].to_numpy(),
+        },
+        columns=ROOM_SPECIFIC_PREDICTION_COLUMNS,
+    )
+    metrics = _room_specific_metrics(predictions, dataset_name, room_label, esp_mode, split_mode)
+    return model, predictions, metrics
+
+
+def run_room_specific_position_experiments(  # noqa: PLR0913
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    rooms: tuple[int, ...] = (1, 2, 3),
+    esp_modes: tuple[str, ...] = ("all", "local"),
+    split_modes: tuple[str, ...] = ("group", "random"),
+    room_local_esps: dict[int, tuple[str, ...]] | None = None,
+    test_size: float = 0.3,
+    random_state: int = 42,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+) -> tuple[
+    pd.DataFrame,
+    dict[tuple[str, int, str, str], pd.DataFrame],
+    dict[tuple[str, int, str, str], RandomForestClassifier],
+]:
+    """Run room-specific position classifiers over all combinations of dataset/room/ESP/split."""
+    all_summary_rows: list[dict[str, object]] = []
+    all_predictions: dict[tuple[str, int, str, str], pd.DataFrame] = {}
+    all_models: dict[tuple[str, int, str, str], RandomForestClassifier] = {}
+    resolved_esps = room_local_esps if room_local_esps is not None else ROOM_LOCAL_ESPS
+
+    for dataset_name, dataframe in feature_dataframes.items():
+        for room_label in rooms:
+            for esp_mode in esp_modes:
+                esp_keys: tuple[str, ...] | None = None
+                if esp_mode == "local":
+                    esp_keys = resolved_esps.get(room_label)
+
+                room_df = room_specific_feature_dataframe(
+                    dataframe,
+                    room_label=room_label,
+                    esp_keys=esp_keys,
+                )
+
+                if room_df.empty:
+                    print(
+                        f"[room-specific] Skipping {dataset_name} room {room_label} "
+                        f"esp_mode={esp_mode!r}: empty dataframe.",
+                    )
+                    continue
+
+                if room_df["location"].nunique() < 2:
+                    print(
+                        f"[room-specific] Skipping {dataset_name} room {room_label} "
+                        f"esp_mode={esp_mode!r}: fewer than 2 unique locations.",
+                    )
+                    continue
+
+                for split_mode in split_modes:
+                    if (
+                        split_mode == "group"
+                        and room_df["group_id"].nunique() < MIN_GROUP_SPLIT_COUNT
+                    ):
+                        print(
+                            f"[room-specific] Skipping {dataset_name} room {room_label} "
+                            f"esp_mode={esp_mode!r} split={split_mode!r}: "
+                            f"too few groups ({room_df['group_id'].nunique()}).",
+                        )
+                        continue
+
+                    try:
+                        model, predictions, metrics = run_room_specific_position_experiment(
+                            dataframe,
+                            dataset_name=dataset_name,
+                            room_label=room_label,
+                            esp_mode=esp_mode,  # type: ignore[arg-type]
+                            room_local_esps=room_local_esps,
+                            split_mode=split_mode,  # type: ignore[arg-type]
+                            test_size=test_size,
+                            random_state=random_state,
+                            row_spacing=row_spacing,
+                            column_spacing=column_spacing,
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[room-specific] Skipping {dataset_name} room {room_label} "
+                            f"esp_mode={esp_mode!r} split={split_mode!r}: {exc}",
+                        )
+                        continue
+
+                    key: tuple[str, int, str, str] = (
+                        dataset_name,
+                        room_label,
+                        esp_mode,
+                        split_mode,
+                    )
+                    all_models[key] = model
+                    all_predictions[key] = predictions
+                    all_summary_rows.append(metrics)
+
+    if not all_summary_rows:
+        return (
+            pd.DataFrame(columns=ROOM_SPECIFIC_SUMMARY_COLUMNS),
+            all_predictions,
+            all_models,
+        )
+
+    return (
+        pd.DataFrame(all_summary_rows, columns=ROOM_SPECIFIC_SUMMARY_COLUMNS),
+        all_predictions,
+        all_models,
+    )
+
+
+def combine_position_experiment_summaries(
+    global_summary: pd.DataFrame,
+    hierarchical_summary: pd.DataFrame,
+    room_specific_summary: pd.DataFrame,
+) -> pd.DataFrame:
+    """Merge global, hierarchical, and room-specific summaries into one table.
+
+    Global and hierarchical rows get room='all'. Only the hierarchical summary has
+    a meaningful room_accuracy; global gets NaN. Hierarchical rows preserve their
+    esp_mode column values rather than being overwritten.
+    """
+    frames: list[pd.DataFrame] = []
+
+    if not global_summary.empty:
+        global_frame = global_summary.copy()
+        if "model" not in global_frame.columns:
+            global_frame["model"] = GLOBAL_POSITION_MODEL_NAME
+        global_frame["room"] = "all"
+        global_frame["esp_mode"] = "all"
+        global_frame["room_accuracy"] = np.nan
+        frames.append(global_frame)
+
+    if not hierarchical_summary.empty:
+        hier_frame = hierarchical_summary.copy()
+        if "model" not in hier_frame.columns:
+            hier_frame["model"] = HIERARCHICAL_MODEL_NAME
+        hier_frame["room"] = "all"
+        # Preserve the esp_mode column already set by the experiment runner.
+        if "esp_mode" not in hier_frame.columns:
+            hier_frame["esp_mode"] = "all"
+        if "room_accuracy" not in hier_frame.columns:
+            hier_frame["room_accuracy"] = np.nan
+        frames.append(hier_frame)
+
+    if not room_specific_summary.empty:
+        room_frame = room_specific_summary.copy()
+        if "room_accuracy" not in room_frame.columns:
+            room_frame["room_accuracy"] = np.nan
+        frames.append(room_frame)
+
+    if not frames:
+        return pd.DataFrame(columns=COMBINED_SUMMARY_COLUMNS)
+
+    combined = pd.concat(frames, ignore_index=True)
+    for col in COMBINED_SUMMARY_COLUMNS:
+        if col not in combined.columns:
+            combined[col] = np.nan
+    return combined[COMBINED_SUMMARY_COLUMNS]
 
 
 def combine_localization_predictions(
@@ -487,24 +1166,22 @@ def combine_localization_predictions(
 
 
 def localization_model_summary(predictions: pd.DataFrame) -> pd.DataFrame:
-    """Summarize localization quality by dataset and model."""
+    """Summarize localization quality by dataset, model, and split (if present)."""
     _validate_required_columns(
         predictions,
         {"dataset", "model", "true_location", "pred_location", "distance_error"},
     )
+    group_cols = ["dataset", "model"]
+    if "split" in predictions.columns:
+        group_cols.append("split")
+
     summary_rows: list[dict[str, object]] = []
 
-    for (dataset_name, model_name), model_predictions in predictions.groupby(
-        ["dataset", "model"],
-        sort=False,
-    ):
-        summary_rows.append(
-            {
-                "dataset": dataset_name,
-                "model": model_name,
-                **_localization_metrics(model_predictions),
-            },
-        )
+    for group_keys, model_predictions in predictions.groupby(group_cols, sort=False):
+        if not isinstance(group_keys, tuple):
+            group_keys = (group_keys,)
+        row_base = dict(zip(group_cols, group_keys))
+        summary_rows.append({**row_base, **_localization_metrics(model_predictions)})
 
     return pd.DataFrame(summary_rows, columns=LOCALIZATION_SUMMARY_COLUMNS)
 
@@ -544,133 +1221,6 @@ def summarize_distance_errors(predictions: pd.DataFrame) -> pd.DataFrame:
         )
 
     return pd.DataFrame(summary_rows, columns=DISTANCE_SUMMARY_COLUMNS)
-
-
-def plot_distance_error_cdf(predictions: pd.DataFrame) -> None:
-    """Plot one empirical CDF curve per dataset using non-NaN distance errors."""
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    plotted_curve = False
-
-    for dataset_name, errors in _distance_error_groups(predictions):
-        if errors.empty:
-            continue
-
-        error_values = np.sort(errors.to_numpy(dtype=float))
-        cdf = np.arange(1, error_values.size + 1) / error_values.size
-        ax.plot(error_values, cdf, linewidth=2, label=str(dataset_name))
-        plotted_curve = True
-
-    if plotted_curve:
-        ax.legend(title="Dataset")
-    else:
-        ax.text(
-            0.5,
-            0.5,
-            "No valid distance errors to plot.",
-            ha="center",
-            va="center",
-            transform=ax.transAxes,
-        )
-
-    ax.set_title("Hierarchical localization error CDF")
-    ax.set_xlabel("Distance error (m)")
-    ax.set_ylabel("Cumulative probability")
-    ax.set_ylim(0, 1.02)
-    ax.grid(visible=True, alpha=0.3)
-    fig.tight_layout()
-    plt.show()
-
-
-def plot_distance_error_boxplot(predictions: pd.DataFrame) -> None:
-    """Plot localization distance-error distributions by dataset."""
-    groups = [
-        (dataset_name, errors)
-        for dataset_name, errors in _distance_error_groups(predictions)
-        if not errors.empty
-    ]
-
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    if groups:
-        dataset_names = [str(dataset_name) for dataset_name, _ in groups]
-        error_values = [errors.to_numpy(dtype=float) for _, errors in groups]
-        ax.boxplot(error_values, labels=dataset_names, showmeans=True)
-    else:
-        ax.text(
-            0.5,
-            0.5,
-            "No valid distance errors to plot.",
-            ha="center",
-            va="center",
-            transform=ax.transAxes,
-        )
-
-    ax.set_title("Hierarchical localization distance error")
-    ax.set_xlabel("Dataset")
-    ax.set_ylabel("Distance error (m)")
-    ax.grid(axis="y", alpha=0.3)
-    fig.tight_layout()
-    plt.show()
-
-
-def plot_global_position_confusion_matrix(
-    predictions: pd.DataFrame,
-    *,
-    dataset: str,
-    normalize: str | None = None,
-) -> None:
-    """Plot true vs predicted position labels for the direct global baseline."""
-    dataset_predictions = _dataset_predictions(predictions, dataset=dataset)
-    if dataset_predictions.empty:
-        return
-
-    _plot_position_confusion_matrix(
-        dataset_predictions,
-        title=f"{dataset} - global position confusion matrix",
-        normalize=normalize,
-    )
-
-
-def plot_localization_error_cdf_by_model(
-    predictions: pd.DataFrame,
-    *,
-    dataset: str,
-) -> None:
-    """Plot localization distance-error CDF curves by model for one dataset."""
-    _validate_required_columns(predictions, {"dataset", "model", "distance_error"})
-    dataset_predictions = predictions.loc[predictions["dataset"] == dataset]
-
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    plotted_curve = False
-
-    for model_name, model_predictions in dataset_predictions.groupby("model", sort=False):
-        errors = _numeric_distance_errors(model_predictions)
-        if errors.empty:
-            continue
-
-        error_values = np.sort(errors.to_numpy(dtype=float))
-        cdf = np.arange(1, error_values.size + 1) / error_values.size
-        ax.plot(error_values, cdf, linewidth=2, label=str(model_name))
-        plotted_curve = True
-
-    if plotted_curve:
-        ax.legend(title="Model")
-    else:
-        ax.text(
-            0.5,
-            0.5,
-            "No valid distance errors to plot.",
-            ha="center",
-            va="center",
-            transform=ax.transAxes,
-        )
-
-    ax.set_title(f"{dataset} - localization error CDF by model")
-    ax.set_xlabel("Distance error (m)")
-    ax.set_ylabel("Cumulative probability")
-    ax.set_ylim(0, 1.02)
-    ax.grid(visible=True, alpha=0.3)
-    fig.tight_layout()
-    plt.show()
 
 
 def per_room_hierarchical_summary(predictions: pd.DataFrame) -> pd.DataFrame:
@@ -722,52 +1272,8 @@ def per_room_hierarchical_summary(predictions: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(summary_rows, columns=PER_ROOM_SUMMARY_COLUMNS)
 
 
-def plot_position_confusion_by_true_room(
-    predictions: pd.DataFrame,
-    *,
-    dataset: str,
-    normalize: str | None = None,
-) -> None:
-    """Plot end-to-end position confusion matrices for each true room."""
-    dataset_predictions = _dataset_predictions(predictions, dataset=dataset)
-
-    for room in _room_values(dataset_predictions["true_room"]):
-        room_predictions = dataset_predictions.loc[dataset_predictions["true_room"] == room]
-        if room_predictions.empty:
-            continue
-
-        _plot_position_confusion_matrix(
-            room_predictions,
-            title=f"{dataset} - position confusion | true room {room}",
-            normalize=normalize,
-        )
-
-
-def plot_position_confusion_when_room_correct(
-    predictions: pd.DataFrame,
-    *,
-    dataset: str,
-    normalize: str | None = None,
-) -> None:
-    """Plot second-stage position confusion matrices after correct room routing."""
-    dataset_predictions = _dataset_predictions(predictions, dataset=dataset)
-
-    for room in _room_values(dataset_predictions["true_room"]):
-        room_predictions = dataset_predictions.loc[
-            (dataset_predictions["true_room"] == room)
-            & (dataset_predictions["pred_room"] == room)
-        ]
-        if room_predictions.empty:
-            continue
-
-        _plot_position_confusion_matrix(
-            room_predictions,
-            title=f"{dataset} - position confusion | correctly routed room {room}",
-            normalize=normalize,
-        )
-
-
 def _random_forest_classifier(*, random_state: int) -> RandomForestClassifier:
+    """Return a balanced Random Forest with fixed hyperparameters."""
     return RandomForestClassifier(
         n_estimators=300,
         random_state=random_state,
@@ -777,6 +1283,7 @@ def _random_forest_classifier(*, random_state: int) -> RandomForestClassifier:
 
 
 def _fallback_locations(df: pd.DataFrame, room_labels: pd.Series) -> dict[int, str]:
+    """Build a per-room fallback location (most-frequent) used when a position model is missing."""
     fallback_locations: dict[int, str] = {}
 
     for raw_room_label in sorted(room_labels.unique()):
@@ -798,6 +1305,7 @@ def _distance_errors(
     row_spacing: float,
     column_spacing: float,
 ) -> np.ndarray:
+    """Compute per-sample Euclidean distance errors between true and predicted locations."""
     return np.asarray(
         [
             location_distance_error(
@@ -813,6 +1321,7 @@ def _distance_errors(
 
 
 def _metrics(predictions: pd.DataFrame) -> dict[str, float]:
+    """Compute hierarchical classifier metrics from a predictions dataframe."""
     samples = float(len(predictions))
     localization_samples = float(
         (predictions["true_location"].map(_normalize_location_label) != EMPTY_ROOM_LOCATION).sum(),
@@ -854,6 +1363,7 @@ def _metrics(predictions: pd.DataFrame) -> dict[str, float]:
 
 
 def _localization_metrics(predictions: pd.DataFrame) -> dict[str, float]:
+    """Compute position accuracy and distance error statistics from predictions."""
     if predictions.empty:
         return {
             "position_accuracy": np.nan,
@@ -878,7 +1388,48 @@ def _localization_metrics(predictions: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def _room_specific_metrics(
+    predictions: pd.DataFrame,
+    dataset_name: str,
+    room_label: int,
+    esp_mode: str,
+    split_mode: str,
+) -> dict[str, object]:
+    """Compute room-specific position metrics and return as a summary dict."""
+    base: dict[str, object] = {
+        "dataset": dataset_name,
+        "model": ROOM_SPECIFIC_MODEL_NAME,
+        "split": split_mode,
+        "room": room_label,
+        "esp_mode": esp_mode,
+    }
+    if predictions.empty:
+        return {
+            **base,
+            "position_accuracy": np.nan,
+            "mean_distance_error": np.nan,
+            "median_distance_error": np.nan,
+            "rmse_distance_error": np.nan,
+            "samples": 0.0,
+        }
+    distance_errors = _numeric_distance_errors(predictions)
+    error_values = distance_errors.to_numpy(dtype=float)
+    return {
+        **base,
+        "position_accuracy": float(
+            (predictions["true_location"] == predictions["pred_location"]).mean(),
+        ),
+        "mean_distance_error": float(np.mean(error_values)) if error_values.size else np.nan,
+        "median_distance_error": float(np.median(error_values)) if error_values.size else np.nan,
+        "rmse_distance_error": (
+            float(np.sqrt(np.mean(np.square(error_values)))) if error_values.size else np.nan
+        ),
+        "samples": float(len(predictions)),
+    }
+
+
 def _distance_error_groups(predictions: pd.DataFrame) -> list[tuple[object, pd.Series]]:
+    """Group predictions by dataset and return (dataset_name, numeric_errors) pairs."""
     _validate_required_columns(predictions, {"dataset", "distance_error"})
     return [
         (dataset_name, _numeric_distance_errors(dataset_predictions))
@@ -887,62 +1438,12 @@ def _distance_error_groups(predictions: pd.DataFrame) -> list[tuple[object, pd.S
 
 
 def _numeric_distance_errors(predictions: pd.DataFrame) -> pd.Series:
+    """Extract non-NaN numeric distance errors from a predictions dataframe."""
     return pd.to_numeric(predictions["distance_error"], errors="coerce").dropna()
 
 
-def _dataset_predictions(predictions: pd.DataFrame, *, dataset: str) -> pd.DataFrame:
-    _validate_required_columns(
-        predictions,
-        {"dataset", "true_room", "pred_room", "true_location", "pred_location"},
-    )
-    dataset_predictions = predictions.loc[predictions["dataset"] == dataset].copy()
-    if dataset_predictions.empty:
-        print(f"No localization predictions found for dataset {dataset!r}.")
-    return dataset_predictions
-
-
-def _plot_position_confusion_matrix(
-    predictions: pd.DataFrame,
-    *,
-    title: str,
-    normalize: str | None,
-) -> None:
-    labels = _location_values(predictions["true_location"], predictions["pred_location"])
-    if not labels:
-        return
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message="A single label was found.*",
-            category=UserWarning,
-        )
-        matrix = confusion_matrix(
-            predictions["true_location"],
-            predictions["pred_location"],
-            labels=labels,
-            normalize=normalize,
-        )
-    display = ConfusionMatrixDisplay(confusion_matrix=matrix, display_labels=labels)
-    width = max(5, min(18, 0.45 * len(labels) + 3))
-    height = max(4, min(16, 0.45 * len(labels) + 2))
-    _, ax = plt.subplots(figsize=(width, height))
-    values_format = ".2f" if normalize is not None else "d"
-    display.plot(ax=ax, cmap="Blues", colorbar=True, values_format=values_format)
-    ax.set_title(title)
-    ax.tick_params(axis="x", labelrotation=45)
-    fig = ax.get_figure()
-    fig.tight_layout()
-    plt.show()
-
-
-def _accuracy(left: pd.Series, right: pd.Series) -> float:
-    if left.empty:
-        return np.nan
-    return float((left.to_numpy() == right.to_numpy()).mean())
-
-
 def _align_localization_prediction_columns(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Ensure predictions has exactly the GLOBAL_PREDICTION_COLUMNS, adding NaN for any missing."""
     aligned_predictions = predictions.copy()
     for column in GLOBAL_PREDICTION_COLUMNS:
         if column not in aligned_predictions.columns:
@@ -975,20 +1476,15 @@ def room_label_for_location(location: object) -> int | None:
     return None
 
 
-def _room_values(rooms: pd.Series) -> list[object]:
-    return sorted(rooms.dropna().unique(), key=lambda value: (str(type(value)), value))
-
-
-def _location_values(*location_series: pd.Series) -> list[str]:
-    locations = {
-        str(location)
-        for series in location_series
-        for location in series.dropna().unique()
-    }
-    return sorted(locations, key=_location_sort_key)
+def _accuracy(left: pd.Series, right: pd.Series) -> float:
+    """Compute element-wise accuracy between two series."""
+    if left.empty:
+        return np.nan
+    return float((left.to_numpy() == right.to_numpy()).mean())
 
 
 def _location_sort_key(location: str) -> tuple[int, str, int | str]:
+    """Sort key that orders locations by row letter then column number."""
     normalized = _normalize_location_label(location)
     if normalized == EMPTY_ROOM_LOCATION:
         return (1, "Z", 0)
@@ -1001,12 +1497,14 @@ def _location_sort_key(location: str) -> tuple[int, str, int | str]:
 
 
 def _normalize_location_label(location: object) -> str:
+    """Normalize a location label to uppercase without the LOCATION_ prefix."""
     return str(location).strip().upper().removeprefix("LOCATION_")
 
 
 def _resolve_distance_options(
     distance_options: GridDistanceOptions | None,
 ) -> GridDistanceOptions:
+    """Return distance_options, defaulting to GridDistanceOptions() if None."""
     if distance_options is None:
         distance_options = GridDistanceOptions()
     _validate_grid_spacing(
@@ -1017,6 +1515,7 @@ def _resolve_distance_options(
 
 
 def _validate_grid_spacing(*, row_spacing: float, column_spacing: float) -> None:
+    """Raise ValueError if either spacing is not a finite positive number."""
     if not np.isfinite(row_spacing) or row_spacing <= 0:
         msg = "row_spacing must be a finite positive value."
         raise ValueError(msg)
@@ -1026,6 +1525,7 @@ def _validate_grid_spacing(*, row_spacing: float, column_spacing: float) -> None
 
 
 def _validate_training_dataframe(df: pd.DataFrame) -> None:
+    """Raise ValueError if df is empty or has no feature columns."""
     _validate_required_columns(df, METADATA_COLUMNS)
     if df.empty:
         msg = "Cannot train on an empty dataframe."
@@ -1036,6 +1536,7 @@ def _validate_training_dataframe(df: pd.DataFrame) -> None:
 
 
 def _validate_required_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
+    """Raise ValueError listing any columns missing from df."""
     missing_columns = sorted(required_columns - set(df.columns))
     if missing_columns:
         msg = f"Missing required columns: {', '.join(missing_columns)}"

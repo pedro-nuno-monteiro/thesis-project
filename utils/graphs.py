@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import warnings
 from collections.abc import Mapping as MappingABC
 from typing import TYPE_CHECKING
 
@@ -2514,3 +2515,600 @@ def plot_iq_interactive(files: FileMap, column_count: int = 2) -> None:
         sc_indices=sc_indices,
         column_count=column_count,
     )
+
+
+# ── Localization plot functions (moved from hierarchical_position_classifier) ─
+
+_LOC_EMPTY_ROOM_LOCATION = "Z-0"
+_LOC_LOCATION_PATTERN = re.compile(r"^(?P<row>[A-Z])[-_ ]?(?P<column>\d+)$")
+
+
+def _loc_validate_columns(df: pd.DataFrame, required: set[str]) -> None:
+    """Raise ValueError if any required columns are missing from df."""
+    missing = sorted(required - set(df.columns))
+    if missing:
+        msg = f"Missing required columns: {', '.join(missing)}"
+        raise ValueError(msg)
+
+
+def _loc_normalize_location_label(location: object) -> str:
+    """Normalize a location label to uppercase without the LOCATION_ prefix."""
+    return str(location).strip().upper().removeprefix("LOCATION_")
+
+
+def _loc_location_sort_key(location: str) -> tuple[int, str, int | str]:
+    """Sort key ordering locations by row letter then column number."""
+    normalized = _loc_normalize_location_label(location)
+    if normalized == _LOC_EMPTY_ROOM_LOCATION:
+        return (1, "Z", 0)
+    match = _LOC_LOCATION_PATTERN.fullmatch(normalized)
+    if match is None:
+        return (2, normalized, normalized)
+    return (0, match.group("row"), int(match.group("column")))
+
+
+def _loc_location_values(*location_series: pd.Series) -> list[str]:
+    """Return sorted unique location labels from one or more series."""
+    locations = {
+        str(loc)
+        for series in location_series
+        for loc in series.dropna().unique()
+    }
+    return sorted(locations, key=_loc_location_sort_key)
+
+
+def _loc_room_values(rooms: pd.Series) -> list[object]:
+    """Return sorted unique non-NaN room labels."""
+    return sorted(rooms.dropna().unique(), key=lambda v: (str(type(v)), v))
+
+
+def _loc_numeric_distance_errors(predictions: pd.DataFrame) -> pd.Series:
+    """Extract non-NaN numeric distance errors from a predictions dataframe."""
+    return pd.to_numeric(predictions["distance_error"], errors="coerce").dropna()
+
+
+def _loc_distance_error_groups(
+    predictions: pd.DataFrame,
+) -> list[tuple[object, pd.Series]]:
+    """Group predictions by dataset and return (dataset_name, numeric_errors) pairs."""
+    _loc_validate_columns(predictions, {"dataset", "distance_error"})
+    return [
+        (dataset_name, _loc_numeric_distance_errors(dataset_preds))
+        for dataset_name, dataset_preds in predictions.groupby("dataset", sort=False)
+    ]
+
+
+def _loc_dataset_predictions(predictions: pd.DataFrame, *, dataset: str) -> pd.DataFrame:
+    """Filter predictions to a single dataset, printing a warning if empty."""
+    _loc_validate_columns(
+        predictions,
+        {"dataset", "true_room", "pred_room", "true_location", "pred_location"},
+    )
+    result = predictions.loc[predictions["dataset"] == dataset].copy()
+    if result.empty:
+        print(f"No localization predictions found for dataset {dataset!r}.")
+    return result
+
+
+def _plot_position_confusion_matrix(
+    predictions: pd.DataFrame,
+    *,
+    title: str,
+    normalize: str | None,
+) -> None:
+    """Render a sklearn ConfusionMatrixDisplay for location predictions."""
+    from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix  # noqa: PLC0415
+
+    labels = _loc_location_values(predictions["true_location"], predictions["pred_location"])
+    if not labels:
+        return
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="A single label was found.*",
+            category=UserWarning,
+        )
+        matrix = confusion_matrix(
+            predictions["true_location"],
+            predictions["pred_location"],
+            labels=labels,
+            normalize=normalize,
+        )
+    disp = ConfusionMatrixDisplay(confusion_matrix=matrix, display_labels=labels)
+    width = max(5, min(18, 0.45 * len(labels) + 3))
+    height = max(4, min(16, 0.45 * len(labels) + 2))
+    _, ax = plt.subplots(figsize=(width, height))
+    values_format = ".2f" if normalize is not None else "d"
+    disp.plot(ax=ax, cmap="Blues", colorbar=True, values_format=values_format)
+    ax.set_title(title)
+    ax.tick_params(axis="x", labelrotation=45)
+    fig = ax.get_figure()
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_distance_error_cdf(predictions: pd.DataFrame) -> None:
+    """Plot one empirical CDF curve per dataset using non-NaN distance errors."""
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    plotted_curve = False
+
+    for dataset_name, errors in _loc_distance_error_groups(predictions):
+        if errors.empty:
+            continue
+        error_values = np.sort(errors.to_numpy(dtype=float))
+        cdf = np.arange(1, error_values.size + 1) / error_values.size
+        ax.plot(error_values, cdf, linewidth=2, label=str(dataset_name))
+        plotted_curve = True
+
+    if plotted_curve:
+        ax.legend(title="Dataset")
+    else:
+        ax.text(0.5, 0.5, "No valid distance errors to plot.",
+                ha="center", va="center", transform=ax.transAxes)
+
+    ax.set_title("Hierarchical localization error CDF")
+    ax.set_xlabel("Distance error (m)")
+    ax.set_ylabel("Cumulative probability")
+    ax.set_ylim(0, 1.02)
+    ax.grid(visible=True, alpha=0.3)
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_distance_error_boxplot(predictions: pd.DataFrame) -> None:
+    """Plot localization distance-error distributions by dataset."""
+    groups = [
+        (dataset_name, errors)
+        for dataset_name, errors in _loc_distance_error_groups(predictions)
+        if not errors.empty
+    ]
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    if groups:
+        labels = [str(dataset_name) for dataset_name, _ in groups]
+        error_values = [errors.to_numpy(dtype=float) for _, errors in groups]
+        ax.boxplot(error_values, labels=labels, showmeans=True)
+    else:
+        ax.text(0.5, 0.5, "No valid distance errors to plot.",
+                ha="center", va="center", transform=ax.transAxes)
+
+    ax.set_title("Hierarchical localization distance error")
+    ax.set_xlabel("Dataset")
+    ax.set_ylabel("Distance error (m)")
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_global_position_confusion_matrix(
+    predictions: pd.DataFrame,
+    *,
+    dataset: str,
+    normalize: str | None = None,
+) -> None:
+    """Plot true vs predicted position labels for the direct global baseline."""
+    dataset_predictions = _loc_dataset_predictions(predictions, dataset=dataset)
+    if dataset_predictions.empty:
+        return
+    _plot_position_confusion_matrix(
+        dataset_predictions,
+        title=f"{dataset} - global position confusion matrix",
+        normalize=normalize,
+    )
+
+
+def plot_localization_error_cdf_by_model(
+    predictions: pd.DataFrame,
+    *,
+    dataset: str,
+) -> None:
+    """Plot localization distance-error CDF curves by model for one dataset."""
+    _loc_validate_columns(predictions, {"dataset", "model", "distance_error"})
+    dataset_predictions = predictions.loc[predictions["dataset"] == dataset]
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    plotted_curve = False
+
+    for model_name, model_predictions in dataset_predictions.groupby("model", sort=False):
+        errors = _loc_numeric_distance_errors(model_predictions)
+        if errors.empty:
+            continue
+        error_values = np.sort(errors.to_numpy(dtype=float))
+        cdf = np.arange(1, error_values.size + 1) / error_values.size
+        ax.plot(error_values, cdf, linewidth=2, label=str(model_name))
+        plotted_curve = True
+
+    if plotted_curve:
+        ax.legend(title="Model")
+    else:
+        ax.text(0.5, 0.5, "No valid distance errors to plot.",
+                ha="center", va="center", transform=ax.transAxes)
+
+    ax.set_title(f"{dataset} - localization error CDF by model")
+    ax.set_xlabel("Distance error (m)")
+    ax.set_ylabel("Cumulative probability")
+    ax.set_ylim(0, 1.02)
+    ax.grid(visible=True, alpha=0.3)
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_position_error_cdf_by_experiment(
+    predictions: pd.DataFrame,
+    *,
+    dataset: str,
+    split: str,
+) -> None:
+    """Plot one distance-error CDF curve per model/experiment for a given dataset and split."""
+    _loc_validate_columns(predictions, {"dataset", "model", "distance_error"})
+    mask = predictions["dataset"] == dataset
+    if "split" in predictions.columns:
+        mask &= predictions["split"] == split
+    filtered = predictions.loc[mask]
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    plotted_curve = False
+
+    for model_name, model_preds in filtered.groupby("model", sort=False):
+        errors = _loc_numeric_distance_errors(model_preds)
+        if errors.empty:
+            continue
+        error_values = np.sort(errors.to_numpy(dtype=float))
+        cdf = np.arange(1, error_values.size + 1) / error_values.size
+        ax.plot(error_values, cdf, linewidth=2, label=str(model_name))
+        plotted_curve = True
+
+    if plotted_curve:
+        ax.legend(title="Model")
+    else:
+        ax.text(0.5, 0.5, "No valid distance errors to plot.",
+                ha="center", va="center", transform=ax.transAxes)
+
+    ax.set_title(f"{dataset} — {split} split — position error CDF by experiment")
+    ax.set_xlabel("Distance error (m)")
+    ax.set_ylabel("Cumulative probability")
+    ax.set_ylim(0, 1.02)
+    ax.grid(visible=True, alpha=0.3)
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_room_specific_error_cdf(
+    predictions: pd.DataFrame,
+    *,
+    dataset: str,
+    room: int,
+    split: str,
+) -> None:
+    """Plot position error CDF for room-specific classifiers, one curve per esp_mode."""
+    _loc_validate_columns(predictions, {"dataset", "distance_error"})
+    mask = predictions["dataset"] == dataset
+    if "room" in predictions.columns:
+        mask &= predictions["room"] == room
+    if "split" in predictions.columns:
+        mask &= predictions["split"] == split
+    filtered = predictions.loc[mask]
+
+    group_col = "esp_mode" if "esp_mode" in filtered.columns else "model"
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    plotted_curve = False
+
+    for group_name, group_preds in filtered.groupby(group_col, sort=False):
+        errors = _loc_numeric_distance_errors(group_preds)
+        if errors.empty:
+            continue
+        error_values = np.sort(errors.to_numpy(dtype=float))
+        cdf = np.arange(1, error_values.size + 1) / error_values.size
+        ax.plot(error_values, cdf, linewidth=2, label=str(group_name))
+        plotted_curve = True
+
+    if plotted_curve:
+        ax.legend(title=group_col.replace("_", " ").title())
+    else:
+        ax.text(0.5, 0.5, "No valid distance errors to plot.",
+                ha="center", va="center", transform=ax.transAxes)
+
+    ax.set_title(f"{dataset} — room {room} — {split} split — position error CDF")
+    ax.set_xlabel("Distance error (m)")
+    ax.set_ylabel("Cumulative probability")
+    ax.set_ylim(0, 1.02)
+    ax.grid(visible=True, alpha=0.3)
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_room_specific_confusion_matrix(
+    predictions: pd.DataFrame,
+    *,
+    dataset: str,
+    room: int,
+    split: str,
+    esp_mode: str = "all",
+    normalize: str | None = None,
+) -> None:
+    """Plot position confusion matrix for a room-specific classifier."""
+    _loc_validate_columns(predictions, {"dataset", "true_location", "pred_location"})
+    mask = predictions["dataset"] == dataset
+    if "room" in predictions.columns:
+        mask &= predictions["room"] == room
+    if "split" in predictions.columns:
+        mask &= predictions["split"] == split
+    if "esp_mode" in predictions.columns:
+        mask &= predictions["esp_mode"] == esp_mode
+    filtered = predictions.loc[mask]
+
+    if filtered.empty:
+        print(
+            f"No predictions for dataset={dataset!r}, room={room}, "
+            f"split={split!r}, esp_mode={esp_mode!r}.",
+        )
+        return
+
+    _plot_position_confusion_matrix(
+        filtered,
+        title=f"{dataset} — room {room} — {split} split ({esp_mode} ESPs) — position confusion",
+        normalize=normalize,
+    )
+
+
+def plot_position_confusion_by_true_room(
+    predictions: pd.DataFrame,
+    *,
+    dataset: str,
+    normalize: str | None = None,
+) -> None:
+    """Plot end-to-end position confusion matrices for each true room."""
+    dataset_predictions = _loc_dataset_predictions(predictions, dataset=dataset)
+
+    for room in _loc_room_values(dataset_predictions["true_room"]):
+        room_predictions = dataset_predictions.loc[dataset_predictions["true_room"] == room]
+        if room_predictions.empty:
+            continue
+        _plot_position_confusion_matrix(
+            room_predictions,
+            title=f"{dataset} - position confusion | true room {room}",
+            normalize=normalize,
+        )
+
+
+def plot_position_confusion_when_room_correct(
+    predictions: pd.DataFrame,
+    *,
+    dataset: str,
+    normalize: str | None = None,
+) -> None:
+    """Plot second-stage position confusion matrices after correct room routing."""
+    dataset_predictions = _loc_dataset_predictions(predictions, dataset=dataset)
+
+    for room in _loc_room_values(dataset_predictions["true_room"]):
+        room_predictions = dataset_predictions.loc[
+            (dataset_predictions["true_room"] == room)
+            & (dataset_predictions["pred_room"] == room)
+        ]
+        if room_predictions.empty:
+            continue
+        _plot_position_confusion_matrix(
+            room_predictions,
+            title=f"{dataset} - position confusion | correctly routed room {room}",
+            normalize=normalize,
+        )
+
+
+# ── Band-comparison and floor-plan plots ──────────────────────────────────────
+
+_BAND_ORDER: tuple[str, ...] = ("2.4 GHz", "5 GHz", "Fusion")
+
+_ROOM_PATCH_COLORS: dict[int, str] = {
+    1: "#d6eaf8",
+    2: "#d5f5e3",
+    3: "#fef9e7",
+    0: "#f2f3f4",
+}
+
+
+def _loc_room_id(row_letter: str, col_num: int) -> int:
+    """Return room number (1/2/3) for a grid cell, or 0 if outside all rooms."""
+    if row_letter in "ABCDEF" and col_num in range(1, 10):
+        return 1
+    if (row_letter == "A" and col_num in {13, 14}) or (
+        row_letter in "BC" and col_num in range(10, 15)
+    ):
+        return 2
+    if row_letter in "EF" and col_num in range(10, 14):
+        return 3
+    return 0
+
+
+def plot_band_error_cdf(
+    predictions: pd.DataFrame,
+    *,
+    model_label: str,
+    split_modes: tuple[str, ...] = ("group", "random"),
+    band_order: Sequence[str] = _BAND_ORDER,
+) -> None:
+    """CDF of distance error per frequency band for one model, one subplot per split."""
+    _loc_validate_columns(predictions, {"distance_error", "split", "dataset"})
+
+    n = len(split_modes)
+    fig, axes = plt.subplots(1, n, figsize=(7 * n, 4.5), squeeze=False)
+
+    for ax, split in zip(axes[0], split_modes):
+        split_df = predictions.loc[predictions["split"] == split]
+        plotted = False
+
+        for band in [b for b in band_order if b in split_df["dataset"].values]:
+            errors = _loc_numeric_distance_errors(
+                split_df.loc[split_df["dataset"] == band]
+            )
+            if errors.empty:
+                continue
+            vals = np.sort(errors.to_numpy(dtype=float))
+            cdf = np.arange(1, vals.size + 1) / vals.size
+            ax.plot(vals, cdf, linewidth=2, label=band)
+            plotted = True
+
+        if plotted:
+            ax.legend(title="Band")
+        ax.set_title(f"{split} split")
+        ax.set_xlabel("Distance error (m)")
+        ax.set_ylabel("Cumulative probability")
+        ax.set_ylim(0.0, 1.02)
+        ax.grid(visible=True, alpha=0.3)
+
+    fig.suptitle(f"Position error CDF by frequency band — {model_label}")
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_band_error_boxplot(
+    predictions: pd.DataFrame,
+    *,
+    model_label: str,
+    split_modes: tuple[str, ...] = ("group", "random"),
+    band_order: Sequence[str] = _BAND_ORDER,
+) -> None:
+    """Boxplot of distance error per frequency band for one model, one subplot per split."""
+    _loc_validate_columns(predictions, {"distance_error", "split", "dataset"})
+
+    n = len(split_modes)
+    fig, axes = plt.subplots(1, n, figsize=(7 * n, 4.5), squeeze=False)
+
+    for ax, split in zip(axes[0], split_modes):
+        split_df = predictions.loc[predictions["split"] == split]
+        labels: list[str] = []
+        data: list[np.ndarray] = []
+
+        for band in [b for b in band_order if b in split_df["dataset"].values]:
+            errors = _loc_numeric_distance_errors(
+                split_df.loc[split_df["dataset"] == band]
+            )
+            if errors.empty:
+                continue
+            labels.append(band)
+            data.append(errors.to_numpy(dtype=float))
+
+        if data:
+            ax.boxplot(data, labels=labels, showmeans=True, meanline=True)
+        else:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+
+        ax.set_title(f"{split} split")
+        ax.set_xlabel("Frequency band")
+        ax.set_ylabel("Distance error (m)")
+        ax.grid(axis="y", alpha=0.3)
+
+    fig.suptitle(f"Distance error by frequency band — {model_label}")
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_floor_plan_heatmap(
+    predictions: pd.DataFrame,
+    *,
+    title: str = "",
+    annotate: bool = True,
+) -> None:
+    """Overlay per-grid-point accuracy and mean distance error on the room layout."""
+    import matplotlib.patches as mpatches
+    from matplotlib.colors import Normalize
+
+    _loc_validate_columns(predictions, {"true_location", "pred_location", "distance_error"})
+
+    loc_records: list[dict] = []
+    for loc, grp in predictions.groupby("true_location"):
+        norm_loc = _loc_normalize_location_label(str(loc))
+        match = _LOC_LOCATION_PATTERN.fullmatch(norm_loc)
+        if match is None:
+            continue
+        row_idx = ord(match.group("row")) - ord("A")
+        col_idx = int(match.group("column")) - 1
+
+        accuracy = float((grp["true_location"] == grp["pred_location"]).mean())
+        errors = pd.to_numeric(grp["distance_error"], errors="coerce").dropna()
+        mean_error = float(errors.mean()) if len(errors) > 0 else float("nan")
+
+        loc_records.append(
+            {
+                "row_idx": row_idx,
+                "col_idx": col_idx,
+                "accuracy": accuracy,
+                "mean_error": mean_error,
+            }
+        )
+
+    if not loc_records:
+        print("No valid location data for floor plan heatmap.")
+        return
+
+    max_row = max(r["row_idx"] for r in loc_records)
+    max_col = max(r["col_idx"] for r in loc_records)
+    n_rows = max_row + 1
+    n_cols = max_col + 1
+
+    all_errors = [r["mean_error"] for r in loc_records if not np.isnan(r["mean_error"])]
+    error_vmax = float(np.percentile(all_errors, 95)) if all_errors else 1.0
+
+    _metrics = [
+        ("accuracy", "RdYlGn", 0.0, 1.0, "Accuracy", lambda v: f"{v:.0%}"),
+        ("mean_error", "RdYlGn_r", 0.0, error_vmax, "Mean error (m)", lambda v: f"{v:.2f}"),
+    ]
+
+    fig, axes = plt.subplots(
+        1, 2,
+        figsize=(max(14, n_cols * 1.1 * 2 + 2), max(5, n_rows * 1.2 + 1)),
+    )
+
+    for ax, (metric_key, cmap_name, vmin, vmax, metric_label, fmt_fn) in zip(axes, _metrics):
+        norm = Normalize(vmin=vmin, vmax=vmax)
+        cmap = plt.cm.get_cmap(cmap_name)
+
+        ax.set_xlim(-0.5, max_col + 0.5)
+        ax.set_ylim(max_row + 0.5, -0.5)
+
+        for col_i in range(n_cols):
+            for row_i in range(n_rows):
+                room = _loc_room_id(chr(ord("A") + row_i), col_i + 1)
+                bg = _ROOM_PATCH_COLORS.get(room, "#f2f3f4")
+                ax.add_patch(mpatches.Rectangle(
+                    (col_i - 0.5, row_i - 0.5), 1.0, 1.0,
+                    linewidth=0, facecolor=bg, zorder=0,
+                ))
+
+        for r in loc_records:
+            ri, ci = r["row_idx"], r["col_idx"]
+            val = r[metric_key]
+            face_color = (0.8, 0.8, 0.8, 1.0) if np.isnan(val) else tuple(cmap(norm(val)))
+            ax.add_patch(mpatches.Rectangle(
+                (ci - 0.45, ri - 0.45), 0.9, 0.9,
+                linewidth=0.5, edgecolor="white", facecolor=face_color, zorder=1,
+            ))
+            if annotate and not np.isnan(val):
+                brightness = 0.299 * face_color[0] + 0.587 * face_color[1] + 0.114 * face_color[2]
+                ax.text(
+                    ci, ri, fmt_fn(val),
+                    ha="center", va="center", fontsize=7,
+                    color="black" if brightness > 0.5 else "white",
+                    zorder=2,
+                )
+
+        for i in range(n_rows + 1):
+            ax.axhline(i - 0.5, color="gray", linewidth=0.3, alpha=0.4, zorder=0)
+        for j in range(n_cols + 1):
+            ax.axvline(j - 0.5, color="gray", linewidth=0.3, alpha=0.4, zorder=0)
+
+        ax.set_xticks(range(n_cols))
+        ax.set_xticklabels([str(j + 1) for j in range(n_cols)])
+        ax.set_yticks(range(n_rows))
+        ax.set_yticklabels([chr(ord("A") + i) for i in range(n_rows)])
+        ax.set_xlabel("Column")
+        ax.set_ylabel("Row")
+        ax.set_title(metric_label)
+
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax, label=metric_label, shrink=0.8)
+
+    fig.suptitle(title or "Floor plan — per-position accuracy and mean distance error")
+    fig.tight_layout()
+    plt.show()
