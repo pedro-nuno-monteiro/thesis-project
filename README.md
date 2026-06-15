@@ -67,6 +67,28 @@ pip install -r requirements.txt
 3. Run `thesis.ipynb` for the complete current pipeline.
 4. Use `228.ipynb` only for the CSI vector-size experiment.
 
+## Running the experiments
+
+Before the first run, clear any stale cache and results:
+
+```powershell
+Remove-Item -Recurse -Force .cache, results -ErrorAction SilentlyContinue
+```
+
+Then open and run `paper.ipynb` top-to-bottom.
+
+- **First run**: feature dataframes are built and written to `.cache/dataframes/`, summary tables and plots are written to `results/`.
+- **Subsequent runs with the same options**: the slow build step is skipped (you will see `[cache hit]` log lines) and the notebook completes much faster.
+- **Changing an option** (e.g., `window_size` in `FEATURE_EXTRACTION_OPTIONS`): a `[cache miss]` is logged and a new folder with the updated key is created under `.cache/` and `results/`.
+
+To inspect or clean the cache:
+
+```powershell
+python scripts/manage_cache.py list
+python scripts/manage_cache.py clean --older-than 30   # remove entries older than 30 days
+python scripts/manage_cache.py clean --all              # wipe everything
+```
+
 ---
 
 *This README was updated by GitHub Copilot to reflect the current file organization.*
