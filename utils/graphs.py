@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import warnings
 from collections.abc import Mapping as MappingABC
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
@@ -12,7 +13,6 @@ from sklearn.ensemble import RandomForestClassifier
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
-    from pathlib import Path
 
     from matplotlib.axes import Axes
 
@@ -2595,6 +2595,7 @@ def _plot_position_confusion_matrix(
     *,
     title: str,
     normalize: str | None,
+    save_path: str | Path | None = None,
 ) -> None:
     """Render a sklearn ConfusionMatrixDisplay for location predictions."""
     from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix  # noqa: PLC0415
@@ -2625,6 +2626,8 @@ def _plot_position_confusion_matrix(
     ax.tick_params(axis="x", labelrotation=45)
     fig = ax.get_figure()
     fig.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()
 
 
@@ -2686,6 +2689,7 @@ def plot_global_position_confusion_matrix(
     *,
     dataset: str,
     normalize: str | None = None,
+    save_path: str | Path | None = None,
 ) -> None:
     """Plot true vs predicted position labels for the direct global baseline."""
     dataset_predictions = _loc_dataset_predictions(predictions, dataset=dataset)
@@ -2695,6 +2699,7 @@ def plot_global_position_confusion_matrix(
         dataset_predictions,
         title=f"{dataset} - global position confusion matrix",
         normalize=normalize,
+        save_path=save_path,
     )
 
 
@@ -2857,18 +2862,27 @@ def plot_position_confusion_by_true_room(
     *,
     dataset: str,
     normalize: str | None = None,
+    save_path: str | Path | None = None,
 ) -> None:
-    """Plot end-to-end position confusion matrices for each true room."""
+    """Plot end-to-end position confusion matrices for each true room.
+
+    If save_path is provided it is treated as a directory; one file per room
+    is saved as ``{save_path}/confusion_room_{room}.png``.
+    """
     dataset_predictions = _loc_dataset_predictions(predictions, dataset=dataset)
 
     for room in _loc_room_values(dataset_predictions["true_room"]):
         room_predictions = dataset_predictions.loc[dataset_predictions["true_room"] == room]
         if room_predictions.empty:
             continue
+        room_save = None
+        if save_path is not None:
+            room_save = Path(save_path) / f"confusion_room_{room}.png"
         _plot_position_confusion_matrix(
             room_predictions,
             title=f"{dataset} - position confusion | true room {room}",
             normalize=normalize,
+            save_path=room_save,
         )
 
 
@@ -2877,8 +2891,13 @@ def plot_position_confusion_when_room_correct(
     *,
     dataset: str,
     normalize: str | None = None,
+    save_path: str | Path | None = None,
 ) -> None:
-    """Plot second-stage position confusion matrices after correct room routing."""
+    """Plot second-stage position confusion matrices after correct room routing.
+
+    If save_path is provided it is treated as a directory; one file per room
+    is saved as ``{save_path}/confusion_routed_room_{room}.png``.
+    """
     dataset_predictions = _loc_dataset_predictions(predictions, dataset=dataset)
 
     for room in _loc_room_values(dataset_predictions["true_room"]):
@@ -2888,10 +2907,14 @@ def plot_position_confusion_when_room_correct(
         ]
         if room_predictions.empty:
             continue
+        room_save = None
+        if save_path is not None:
+            room_save = Path(save_path) / f"confusion_routed_room_{room}.png"
         _plot_position_confusion_matrix(
             room_predictions,
             title=f"{dataset} - position confusion | correctly routed room {room}",
             normalize=normalize,
+            save_path=room_save,
         )
 
 
@@ -2921,14 +2944,26 @@ def _loc_room_id(row_letter: str, col_num: int) -> int:
     return 0
 
 
+def _fname_slug(s: str) -> str:
+    """Sanitize a string for use in a filename (lowercase, no special chars)."""
+    return (
+        s.lower().replace(".", "-").replace(" ", "-").replace("(", "").replace(")", "").strip("-")
+    )
+
+
 def plot_band_error_cdf(
     predictions: pd.DataFrame,
     *,
     model_label: str,
     split_modes: tuple[str, ...] = ("group", "random"),
     band_order: Sequence[str] = _BAND_ORDER,
+    save_path: str | Path | None = None,
 ) -> None:
-    """CDF of distance error per frequency band for one model, one figure per split."""
+    """CDF of distance error per frequency band for one model, one figure per split.
+
+    If save_path is provided it is treated as a directory.  One file per split
+    is saved as ``{save_path}/cdf_{model_slug}_all-bands_{split}.png``.
+    """
     _loc_validate_columns(predictions, {"distance_error", "split", "dataset"})
 
     for split in split_modes:
@@ -2957,6 +2992,9 @@ def plot_band_error_cdf(
 
         fig.suptitle(f"Position error CDF by frequency band - {model_label}")
         fig.tight_layout()
+        if save_path is not None:
+            fname = f"cdf_{_fname_slug(model_label)}_all-bands_{split}.png"
+            fig.savefig(Path(save_path) / fname, dpi=150, bbox_inches="tight")
         plt.show()
 
 
@@ -2966,8 +3004,13 @@ def plot_band_error_boxplot(
     model_label: str,
     split_modes: tuple[str, ...] = ("group", "random"),
     band_order: Sequence[str] = _BAND_ORDER,
+    save_path: str | Path | None = None,
 ) -> None:
-    """Boxplot of distance error per frequency band for one model, one figure per split."""
+    """Boxplot of distance error per frequency band for one model, one figure per split.
+
+    If save_path is provided it is treated as a directory.  One file per split
+    is saved as ``{save_path}/boxplot_{model_slug}_all-bands_{split}.png``.
+    """
     _loc_validate_columns(predictions, {"distance_error", "split", "dataset"})
 
     for split in split_modes:
@@ -2997,6 +3040,9 @@ def plot_band_error_boxplot(
 
         fig.suptitle(f"Distance error by frequency band - {model_label}")
         fig.tight_layout()
+        if save_path is not None:
+            fname = f"boxplot_{_fname_slug(model_label)}_all-bands_{split}.png"
+            fig.savefig(Path(save_path) / fname, dpi=150, bbox_inches="tight")
         plt.show()
 
 
@@ -3005,6 +3051,7 @@ def plot_floor_plan_heatmap(
     *,
     title: str = "",
     annotate: bool = True,
+    save_path: str | Path | None = None,
 ) -> None:
     """Overlay per-grid-point accuracy and mean distance error on the room layout."""
     import matplotlib.patches as mpatches
@@ -3112,4 +3159,6 @@ def plot_floor_plan_heatmap(
 
     fig.suptitle(title or "Floor plan — per-position accuracy and mean distance error")
     fig.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()

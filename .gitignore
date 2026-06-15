@@ -208,3 +208,7 @@ __marimo__/
 No Combo.png
 No combo.svg
 Subcarrier Clustering.ipynb
+
+# Experiment cache and results (generated, not version-controlled)
+.cache/dataframes/
+results/

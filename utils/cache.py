@@ -1,0 +1,251 @@
+from __future__ import annotations
+
+import importlib.metadata
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+import pandas as pd
+
+PROJECT_ROOT = Path(__file__).parent.parent
+CACHE_DIR = PROJECT_ROOT / ".cache" / "dataframes"
+RESULTS_ROOT = PROJECT_ROOT / "results"
+
+_EXPECTED_METADATA_COLS = {"frequency_scenario", "scenario", "location", "user", "trial", "label"}
+
+
+# ── Key generation ────────────────────────────────────────────────────────────
+
+def make_preproc_key(opts: dict[str, Any]) -> str:
+    """Encode magnitude-processing options as a short, human-readable key."""
+    parts: list[str] = []
+    agc = opts.get("apply_agc_compensation", False)
+    parts.append(f"agc-{'on' if agc else 'off'}")
+    filt = str(opts.get("filter_method", "none")).lower()
+    if filt not in ("none", ""):
+        parts.append(f"filt-{filt}")
+    norm = str(opts.get("normalization", "none")).lower()
+    if norm not in ("none", ""):
+        parts.append(f"norm-{norm}")
+    return "_".join(sorted(parts))
+
+
+def make_feat_key(opts: dict[str, Any]) -> str:
+    """Encode feature-extraction options as a short, human-readable key."""
+    parts: list[str] = []
+    win = opts.get("window_size", 60)
+    step = opts.get("overlap_size", 30)
+    parts.append(f"win{win}-step{step}")
+    if opts.get("calibrate", False):
+        parts.append("cal-on")
+    if opts.get("require_all_esps", False):
+        parts.append("allesps-on")
+    return "_".join(sorted(parts))
+
+
+def get_cache_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> Path:
+    return CACHE_DIR / f"preproc={make_preproc_key(preproc_opts)}" / f"feat={make_feat_key(feat_opts)}"
+
+
+def get_results_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> Path:
+    return RESULTS_ROOT / f"preproc={make_preproc_key(preproc_opts)}" / f"feat={make_feat_key(feat_opts)}"
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _band_stem(band: str) -> str:
+    """'2.4 GHz' → '2_4ghz',  '5 GHz' → '5ghz',  'Fusion' → 'fusion'."""
+    return band.lower().replace(".", "_").replace(" ", "")
+
+
+def _check_schema(df: pd.DataFrame, path: Path) -> None:
+    missing = _EXPECTED_METADATA_COLS - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"Cache schema mismatch in {path} — missing columns: {sorted(missing)}.\n"
+            "Delete the cache folder and rerun to rebuild."
+        )
+
+
+# ── Feature dataframe cache ───────────────────────────────────────────────────
+
+def get_all_dataframes(
+    preproc_opts: dict[str, Any],
+    feat_opts: dict[str, Any],
+    builder: Callable[[], tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]],
+) -> dict[str, pd.DataFrame]:
+    """Return feature dataframes for all three bands, using the on-disk cache.
+
+    If all three parquet files exist under .cache/dataframes/<keys>/, loads and
+    returns them. Otherwise calls builder() — which must return (df_24ghz,
+    df_5ghz, df_fusion) — saves each file atomically, and returns the result.
+    """
+    cache_dir = get_cache_path(preproc_opts, feat_opts)
+    band_stems: dict[str, str] = {
+        "2.4 GHz": "2_4ghz",
+        "5 GHz": "5ghz",
+        "Fusion": "fusion",
+    }
+    paths = {name: cache_dir / f"{stem}.parquet" for name, stem in band_stems.items()}
+
+    if all(p.exists() for p in paths.values()):
+        result: dict[str, pd.DataFrame] = {}
+        for name, path in paths.items():
+            print(f"[cache hit] {path}")
+            df = pd.read_parquet(path)
+            _check_schema(df, path)
+            result[name] = df
+        return result
+
+    print(f"[cache miss] {cache_dir}, computing...")
+    df_24ghz, df_5ghz, df_fusion = builder()
+    dataframes: dict[str, pd.DataFrame] = {
+        "2.4 GHz": df_24ghz,
+        "5 GHz": df_5ghz,
+        "Fusion": df_fusion,
+    }
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for name, df in dataframes.items():
+        dest = paths[name]
+        tmp = dest.with_suffix(".parquet.tmp")
+        df.to_parquet(tmp, index=True)
+        tmp.replace(dest)
+
+    options_path = cache_dir / "options.json"
+    options_path.write_text(
+        json.dumps(
+            {"preprocessing": preproc_opts, "feature_extraction": feat_opts},
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+    return dataframes
+
+
+def get_dataframe(
+    band: str,
+    preproc_opts: dict[str, Any],
+    feat_opts: dict[str, Any],
+    builder: Callable[[], pd.DataFrame],
+) -> pd.DataFrame:
+    """Return the cached feature dataframe for a single band.
+
+    Loads from cache if the parquet file exists; otherwise calls builder(),
+    saves atomically, and returns the result.
+    """
+    cache_dir = get_cache_path(preproc_opts, feat_opts)
+    path = cache_dir / f"{_band_stem(band)}.parquet"
+
+    if path.exists():
+        print(f"[cache hit] {path}")
+        df = pd.read_parquet(path)
+        _check_schema(df, path)
+        return df
+
+    print(f"[cache miss] {path}, computing...")
+    df = builder()
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".parquet.tmp")
+    df.to_parquet(tmp, index=True)
+    tmp.replace(path)
+
+    options_path = cache_dir / "options.json"
+    if not options_path.exists():
+        options_path.write_text(
+            json.dumps(
+                {"preprocessing": preproc_opts, "feature_extraction": feat_opts},
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+    return df
+
+
+# ── Summary table saving ──────────────────────────────────────────────────────
+
+def save_summary(df: pd.DataFrame, results_dir: Path) -> None:
+    """Write the summary dataframe to CSV, Markdown, and LaTeX in results_dir."""
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    df.to_csv(results_dir / "summary.csv")
+
+    md = df.to_markdown(index=True)
+    (results_dir / "summary.md").write_text(md or "", encoding="utf-8")
+
+    tex = df.to_latex(
+        index=True,
+        escape=False,
+        float_format="%.4f",
+    )
+    (results_dir / "summary.tex").write_text(tex, encoding="utf-8")
+
+    print(f"[results] Summary saved to {results_dir}/")
+
+
+# ── Reproducibility manifest ──────────────────────────────────────────────────
+
+def _git_commit() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+            timeout=5,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _lib_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def write_manifest(
+    results_dir: Path,
+    preproc_opts: dict[str, Any],
+    feat_opts: dict[str, Any],
+    classifier_params: dict[str, Any],
+    splits: list[str],
+    test_size: float,
+    feature_dataframes: dict[str, pd.DataFrame],
+) -> None:
+    """Write a self-describing manifest.json to results_dir."""
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset_sizes = {
+        f"{_band_stem(band)}_windows": len(df)
+        for band, df in feature_dataframes.items()
+    }
+
+    manifest: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
+        "git_commit": _git_commit(),
+        "python_version": sys.version.split()[0],
+        "key_library_versions": {
+            "numpy": _lib_version("numpy"),
+            "pandas": _lib_version("pandas"),
+            "scikit-learn": _lib_version("scikit-learn"),
+        },
+        "preprocessing_options": preproc_opts,
+        "feature_extraction_options": feat_opts,
+        "classifier_hyperparameters": classifier_params,
+        "splits": splits,
+        "test_size": test_size,
+        "dataset_sizes": dataset_sizes,
+    }
+
+    manifest_path = results_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    print(f"[results] Manifest written to {manifest_path}")
