@@ -2905,6 +2905,7 @@ _ROOM_PATCH_COLORS: dict[int, str] = {
     3: "#fef9e7",
     0: "#f2f3f4",
 }
+_FLOOR_PLAN_HEATMAP_ROWS = "ABCDEF"
 
 
 def _loc_room_id(row_letter: str, col_num: int) -> int:
@@ -2927,13 +2928,11 @@ def plot_band_error_cdf(
     split_modes: tuple[str, ...] = ("group", "random"),
     band_order: Sequence[str] = _BAND_ORDER,
 ) -> None:
-    """CDF of distance error per frequency band for one model, one subplot per split."""
+    """CDF of distance error per frequency band for one model, one figure per split."""
     _loc_validate_columns(predictions, {"distance_error", "split", "dataset"})
 
-    n = len(split_modes)
-    fig, axes = plt.subplots(1, n, figsize=(7 * n, 4.5), squeeze=False)
-
-    for ax, split in zip(axes[0], split_modes):
+    for split in split_modes:
+        fig, ax = plt.subplots(figsize=(7, 4.5))
         split_df = predictions.loc[predictions["split"] == split]
         plotted = False
 
@@ -2956,9 +2955,9 @@ def plot_band_error_cdf(
         ax.set_ylim(0.0, 1.02)
         ax.grid(visible=True, alpha=0.3)
 
-    fig.suptitle(f"Position error CDF by frequency band — {model_label}")
-    fig.tight_layout()
-    plt.show()
+        fig.suptitle(f"Position error CDF by frequency band - {model_label}")
+        fig.tight_layout()
+        plt.show()
 
 
 def plot_band_error_boxplot(
@@ -2968,13 +2967,11 @@ def plot_band_error_boxplot(
     split_modes: tuple[str, ...] = ("group", "random"),
     band_order: Sequence[str] = _BAND_ORDER,
 ) -> None:
-    """Boxplot of distance error per frequency band for one model, one subplot per split."""
+    """Boxplot of distance error per frequency band for one model, one figure per split."""
     _loc_validate_columns(predictions, {"distance_error", "split", "dataset"})
 
-    n = len(split_modes)
-    fig, axes = plt.subplots(1, n, figsize=(7 * n, 4.5), squeeze=False)
-
-    for ax, split in zip(axes[0], split_modes):
+    for split in split_modes:
+        fig, ax = plt.subplots(figsize=(7, 4.5))
         split_df = predictions.loc[predictions["split"] == split]
         labels: list[str] = []
         data: list[np.ndarray] = []
@@ -2998,9 +2995,9 @@ def plot_band_error_boxplot(
         ax.set_ylabel("Distance error (m)")
         ax.grid(axis="y", alpha=0.3)
 
-    fig.suptitle(f"Distance error by frequency band — {model_label}")
-    fig.tight_layout()
-    plt.show()
+        fig.suptitle(f"Distance error by frequency band - {model_label}")
+        fig.tight_layout()
+        plt.show()
 
 
 def plot_floor_plan_heatmap(
@@ -3021,7 +3018,11 @@ def plot_floor_plan_heatmap(
         match = _LOC_LOCATION_PATTERN.fullmatch(norm_loc)
         if match is None:
             continue
-        row_idx = ord(match.group("row")) - ord("A")
+        row_letter = match.group("row")
+        if row_letter not in _FLOOR_PLAN_HEATMAP_ROWS:
+            continue
+
+        row_idx = _FLOOR_PLAN_HEATMAP_ROWS.index(row_letter)
         col_idx = int(match.group("column")) - 1
 
         accuracy = float((grp["true_location"] == grp["pred_location"]).mean())
@@ -3041,9 +3042,9 @@ def plot_floor_plan_heatmap(
         print("No valid location data for floor plan heatmap.")
         return
 
-    max_row = max(r["row_idx"] for r in loc_records)
     max_col = max(r["col_idx"] for r in loc_records)
-    n_rows = max_row + 1
+    max_row = len(_FLOOR_PLAN_HEATMAP_ROWS) - 1
+    n_rows = len(_FLOOR_PLAN_HEATMAP_ROWS)
     n_cols = max_col + 1
 
     all_errors = [r["mean_error"] for r in loc_records if not np.isnan(r["mean_error"])]
@@ -3100,7 +3101,7 @@ def plot_floor_plan_heatmap(
         ax.set_xticks(range(n_cols))
         ax.set_xticklabels([str(j + 1) for j in range(n_cols)])
         ax.set_yticks(range(n_rows))
-        ax.set_yticklabels([chr(ord("A") + i) for i in range(n_rows)])
+        ax.set_yticklabels(list(_FLOOR_PLAN_HEATMAP_ROWS))
         ax.set_xlabel("Column")
         ax.set_ylabel("Row")
         ax.set_title(metric_label)
