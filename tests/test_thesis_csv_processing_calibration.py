@@ -10,6 +10,7 @@ import numpy as np
 
 from utils.thesis_csv_processing import (
     FIVE_GHZ_RAW_LENGTH,
+    FIVE_GHZ_RAW_LENGTH_228,
     TWO_GHZ_RAW_LENGTH,
     _calibrate_complex_csi_with_rssi,
     _normalize_complex_csi_per_packet,
@@ -20,6 +21,7 @@ from utils.thesis_csv_processing import (
 
 EXPECTED_FILTERED_PACKETS = 2
 EXPECTED_CALIBRATED_FILES = 2
+EXPECTED_ACCEPTED_FIVE_GHZ_PACKET_ROWS = 2
 VISUALIZATION_FLOOR_MAGNITUDE = 1e-4
 LOW_VALID_RSSI_DBM = -90.0
 
@@ -27,6 +29,10 @@ LOW_VALID_RSSI_DBM = -90.0
 def _csi_payload(raw_length: int, *, zero: bool = False) -> str:
     values = ["0" if zero else value for value in ("1", "2") * (raw_length // 2)]
     return f"[{' '.join(values)}]"
+
+
+def _csi_payload_from_values(values: list[int]) -> str:
+    return f"[{' '.join(str(value) for value in values)}]"
 
 
 def _write_csv(path: Path, rows: list[list[str]]) -> None:
@@ -140,6 +146,71 @@ def test_process_csv_files_rssi_filters_packets_and_keeps_agc_aligned() -> None:
     assert stats.calibration_applied_files == EXPECTED_CALIBRATED_FILES
 
 
+def test_five_ghz_accepts_228_byte_packets_by_keeping_first_114_values() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        two_file = root / "two.csv"
+        five_file = root / "five.csv"
+        five_114_values = list(range(1, FIVE_GHZ_RAW_LENGTH + 1))
+        five_228_values = list(range(201, 201 + FIVE_GHZ_RAW_LENGTH_228))
+        invalid_5ghz_values = list(range(1, FIVE_GHZ_RAW_LENGTH + 2))
+
+        _write_csv(
+            two_file,
+            [
+                _two_ghz_row(-40.0, _csi_payload(TWO_GHZ_RAW_LENGTH)),
+                _two_ghz_row(-40.0, _csi_payload(FIVE_GHZ_RAW_LENGTH_228)),
+            ],
+        )
+        _write_csv(
+            five_file,
+            [
+                _five_ghz_row(-40.0, 11, _csi_payload_from_values(five_114_values)),
+                _five_ghz_row(-41.0, 12, _csi_payload_from_values(five_228_values)),
+                _five_ghz_row(-42.0, 13, _csi_payload_from_values(invalid_5ghz_values)),
+            ],
+        )
+        data_files = {
+            "scenario_1": {
+                "location_A-1": {
+                    "user_01": {
+                        "esp_01": {"trial_01": two_file},
+                        "esp_11": {"trial_01": five_file},
+                    },
+                },
+            },
+        }
+
+        magnitudes, agc_gain_data, diagnostics = process_csv_files(
+            data_files,
+            max_workers=1,
+            use_cache=False,
+            return_diagnostics=True,
+            calibration_mode="none",
+        )
+
+    mag_24 = magnitudes["scenario_1"]["location_A-1"]["user_01"]["esp_01"]["trial_01"]
+    mag_5 = magnitudes["scenario_1"]["location_A-1"]["user_01"]["esp_11"]["trial_01"]
+    agc_gains = agc_gain_data["scenario_1"]["location_A-1"]["user_01"]["esp_11"]["trial_01"]
+
+    first_114_complex = np.array(five_114_values[1::2]) + 1j * np.array(five_114_values[::2])
+    first_228_complex = np.array(five_228_values[1:FIVE_GHZ_RAW_LENGTH:2]) + 1j * np.array(
+        five_228_values[:FIVE_GHZ_RAW_LENGTH:2],
+    )
+    expected_5 = np.abs(np.delete(np.vstack([first_114_complex, first_228_complex]), [28], axis=1))
+    five_diagnostics = diagnostics.loc[diagnostics["esp"] == "esp_11"].iloc[0]
+    two_diagnostics = diagnostics.loc[diagnostics["esp"] == "esp_01"].iloc[0]
+
+    assert mag_24.shape == (1, 50)
+    assert mag_5.shape == (2, 56)
+    assert np.array_equal(agc_gains, np.array([11, 12]))
+    assert np.array_equal(mag_5, expected_5)
+    assert five_diagnostics["dropped_csi_length_count"] == 1
+    assert five_diagnostics["valid_magnitude_rows"] == EXPECTED_ACCEPTED_FIVE_GHZ_PACKET_ROWS
+    assert two_diagnostics["dropped_csi_length_count"] == 1
+    assert two_diagnostics["valid_magnitude_rows"] == 1
+
+
 def test_rssi_calibration_keeps_valid_packets_below_visualization_floor() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
@@ -229,6 +300,7 @@ def main() -> None:
     test_packet_norm_preserves_shape_and_unit_power()
     test_cache_identity_separates_calibration_modes()
     test_process_csv_files_rssi_filters_packets_and_keeps_agc_aligned()
+    test_five_ghz_accepts_228_byte_packets_by_keeping_first_114_values()
     test_rssi_calibration_keeps_valid_packets_below_visualization_floor()
     test_none_mode_keeps_zero_power_packets()
 
