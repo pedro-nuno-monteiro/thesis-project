@@ -22,11 +22,12 @@ AgcGainMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 CalibrationMode = Literal["none", "packet_norm", "rssi"]
 
 REPO_CACHE_DIR = Path(".cache") / "csi_processing"
-PROCESSOR_VERSION = "standard-v2"
+PROCESSOR_VERSION = "standard-v3"
 FIVE_GHZ_MIN_ESP_ID = 11
 FIVE_GHZ_MAX_ESP_ID = 20
 TWO_GHZ_RAW_LENGTH = 128
 FIVE_GHZ_RAW_LENGTH = 114
+FIVE_GHZ_RAW_LENGTH_228 = 228
 TWO_GHZ_CSI_COLUMN = 24
 TWO_GHZ_RSSI_COLUMN = 3
 FIVE_GHZ_AGC_COLUMN = 7
@@ -45,6 +46,7 @@ PROCESSING_DIAGNOSTIC_COLUMNS = [
     "raw_rows",
     "no_match_count",
     "no_complete_count",
+    "dropped_csi_length_count",
     "valid_csi_rows_before_filter",
     "invalid_packets_removed",
     "valid_magnitude_rows",
@@ -274,6 +276,7 @@ def processing_diagnostics_frame(
                 "raw_rows": int(file_result.total_rows),
                 "no_match_count": int(file_result.no_match_count),
                 "no_complete_count": int(file_result.no_complete_count),
+                "dropped_csi_length_count": int(file_result.no_complete_count),
                 "valid_csi_rows_before_filter": max(valid_csi_rows_before_filter, 0),
                 "invalid_packets_removed": int(file_result.invalid_packets_removed),
                 "valid_magnitude_rows": int(file_result.magnitude.shape[0]),
@@ -506,6 +509,8 @@ def _parse_valid_packet_rows(
     rssi_raw: pd.Series,
     agc_raw: pd.Series | None,
     expected_length: int,
+    *,
+    its5ghz: bool,
 ) -> tuple[list[list[float]], list[float], list[int], int, int]:
     valid_csi: list[list[float]] = []
     valid_rssi_dbm: list[float] = []
@@ -519,7 +524,9 @@ def _parse_valid_packet_rows(
             no_match_count += 1
             continue
 
-        if len(nums) != expected_length:
+        if its5ghz and len(nums) == FIVE_GHZ_RAW_LENGTH_228:
+            nums = nums[:expected_length]
+        elif len(nums) != expected_length:
             no_complete_count += 1
             continue
 
@@ -603,7 +610,13 @@ def _process_standard_file(
 
     # verifica len de cada vetor CSI
     valid_csi, valid_rssi_dbm, valid_agc_gains, no_match_count, no_complete_count = (
-        _parse_valid_packet_rows(csi_raw, rssi_raw, agc_raw, expected_length)
+        _parse_valid_packet_rows(
+            csi_raw,
+            rssi_raw,
+            agc_raw,
+            expected_length,
+            its5ghz=job.its5ghz,
+        )
     )
     agc_gains = np.array(valid_agc_gains, dtype=int)
 
