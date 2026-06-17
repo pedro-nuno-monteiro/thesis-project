@@ -37,7 +37,7 @@ def make_feat_key(opts: dict[str, Any]) -> str:
     """Encode feature-extraction options as a short, human-readable key."""
     parts: list[str] = []
     win = opts.get("window_size", 60)
-    step = opts.get("overlap_size", 30)
+    step = opts.get("step", opts.get("overlap_size", 30))
     parts.append(f"win{win}-step{step}")
     if opts.get("calibrate", False):
         parts.append("cal-on")

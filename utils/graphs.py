@@ -2707,6 +2707,7 @@ def plot_localization_error_cdf_by_model(
     predictions: pd.DataFrame,
     *,
     dataset: str,
+    save_path: str | Path | None = None,
 ) -> None:
     """Plot localization distance-error CDF curves by model for one dataset."""
     _loc_validate_columns(predictions, {"dataset", "model", "distance_error"})
@@ -2736,6 +2737,8 @@ def plot_localization_error_cdf_by_model(
     ax.set_ylim(0, 1.02)
     ax.grid(visible=True, alpha=0.3)
     fig.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()
 
 
