@@ -6,6 +6,10 @@ __pycache__/
 # C extensions
 *.so
 
+# Data — never commit
+CSI DATA/
+*.csv
+
 # Distribution / packaging
 .Python
 build/

@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import StandardScaler
 
 METADATA_COLUMNS = {
     "frequency_scenario",
@@ -35,6 +37,8 @@ ROOM_3_EF_COLUMNS = range(10, 14)
 HIERARCHICAL_MODEL_NAME = "hierarchical_rf"
 GLOBAL_POSITION_MODEL_NAME = "global_position_rf"
 ROOM_SPECIFIC_MODEL_NAME = "room_specific_position_rf"
+GLOBAL_KNN_MODEL_NAME = "global_position_knn"
+HIERARCHICAL_KNN_MODEL_NAME = "hierarchical_knn"
 
 ROOM_LOCAL_ESPS: dict[int, tuple[str, ...]] = {
     1: (
@@ -188,6 +192,7 @@ COMBINED_SUMMARY_COLUMNS = [
     "median_distance_error",
     "rmse_distance_error",
     "samples",
+    "k",
 ]
 
 LOCALIZATION_SUMMARY_COLUMNS = [
@@ -199,6 +204,32 @@ LOCALIZATION_SUMMARY_COLUMNS = [
     "mean_distance_error",
     "median_distance_error",
     "rmse_distance_error",
+]
+
+GLOBAL_KNN_SUMMARY_COLUMNS = [
+    "dataset",
+    "split",
+    "k",
+    "position_accuracy",
+    "mean_distance_error",
+    "median_distance_error",
+    "rmse_distance_error",
+    "samples",
+]
+
+HIERARCHICAL_KNN_SUMMARY_COLUMNS = [
+    "dataset",
+    "split",
+    "esp_mode",
+    "k",
+    "room_accuracy",
+    "position_accuracy",
+    "mean_distance_error",
+    "median_distance_error",
+    "rmse_distance_error",
+    "distance_error_samples",
+    "localization_samples",
+    "samples",
 ]
 
 
@@ -502,6 +533,53 @@ class HierarchicalPositionClassifier:
         return pred_rooms, pred_locations
 
 
+@dataclass
+class HierarchicalKNNClassifier:
+    """Two-stage KNN classifier: room first, then room-specific reference point.
+
+    Each stage has its own StandardScaler fit on that stage's training data.
+    """
+
+    room_model: KNeighborsClassifier
+    room_scaler: StandardScaler
+    position_models: dict[int, KNeighborsClassifier]
+    position_scalers: dict[int, StandardScaler]
+    feature_columns: list[str]
+    fallback_locations: dict[int, str]
+    esp_mode: Literal["all", "local"] = "all"
+    room_feature_columns: dict[int, list[str]] = field(default_factory=dict)
+
+    def predict(self, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        """Predict room labels and reference point labels for a feature dataframe."""
+        _validate_required_columns(df, set(self.feature_columns))
+        X_room = self.room_scaler.transform(df[self.feature_columns])
+        pred_rooms = np.asarray(self.room_model.predict(X_room), dtype=int)
+        pred_locations = np.empty(len(df), dtype=object)
+
+        for raw_room_label in np.unique(pred_rooms):
+            room_label = int(raw_room_label)
+            room_mask = pred_rooms == room_label
+            if room_label == EMPTY_ROOM_LABEL:
+                pred_locations[room_mask] = EMPTY_ROOM_LOCATION
+                continue
+
+            position_model = self.position_models.get(room_label)
+            if position_model is None:
+                pred_locations[room_mask] = self.fallback_locations.get(
+                    room_label,
+                    EMPTY_ROOM_LOCATION,
+                )
+                continue
+
+            room_feat_cols = self.room_feature_columns.get(room_label, self.feature_columns)
+            pos_scaler = self.position_scalers[room_label]
+            room_indices = np.flatnonzero(room_mask)
+            X_pos = pos_scaler.transform(df[room_feat_cols].iloc[room_indices])
+            pred_locations[room_mask] = position_model.predict(X_pos)
+
+        return pred_rooms, pred_locations
+
+
 def train_hierarchical_position_classifier(
     train_df: pd.DataFrame,
     *,
@@ -556,6 +634,74 @@ def train_hierarchical_position_classifier(
         fallback_locations=fallback_locations,
         esp_mode=esp_mode,
         room_feature_columns=room_feature_columns,
+    )
+
+
+def _knn_classifier(*, k: int) -> KNeighborsClassifier:
+    """Return a KNN classifier with Euclidean distance, uniform weights, and all CPU cores."""
+    return KNeighborsClassifier(n_neighbors=k, metric="euclidean", weights="uniform", n_jobs=-1)
+
+
+def train_hierarchical_knn_classifier(
+    train_df: pd.DataFrame,
+    *,
+    k: int,
+    esp_mode: Literal["all", "local"] = "all",
+    room_local_esps: dict[int, tuple[str, ...]] | None = None,
+) -> HierarchicalKNNClassifier:
+    """Train a two-stage KNN room+position classifier with per-stage StandardScaler.
+
+    The room classifier uses all ESP features. Each room's position classifier uses
+    only that room's local ESP features when esp_mode='local'. Every stage gets its
+    own scaler fit solely on training data to prevent leakage.
+    """
+    _validate_training_dataframe(train_df)
+    columns = feature_columns(train_df)
+    room_labels = train_df["label"].astype(int)
+
+    room_scaler = StandardScaler()
+    X_room = room_scaler.fit_transform(train_df[columns])
+    room_model = _knn_classifier(k=k)
+    room_model.fit(X_room, room_labels)
+
+    fallback_locations = _fallback_locations(train_df, room_labels)
+    position_models: dict[int, KNeighborsClassifier] = {}
+    position_scalers: dict[int, StandardScaler] = {}
+    room_feature_columns_map: dict[int, list[str]] = {}
+    resolved_esps = room_local_esps if room_local_esps is not None else ROOM_LOCAL_ESPS
+
+    for raw_room_label in sorted(room_labels.unique()):
+        room_label = int(raw_room_label)
+        if room_label == EMPTY_ROOM_LABEL:
+            continue
+
+        room_df = train_df.loc[room_labels == room_label]
+
+        if esp_mode == "local":
+            esp_keys = resolved_esps.get(room_label, ())
+            room_feat_cols = (
+                feature_columns_for_esps(room_df, esp_keys) if esp_keys else columns
+            )
+        else:
+            room_feat_cols = columns
+
+        room_feature_columns_map[room_label] = room_feat_cols
+        pos_scaler = StandardScaler()
+        X_pos = pos_scaler.fit_transform(room_df[room_feat_cols])
+        pos_model = _knn_classifier(k=k)
+        pos_model.fit(X_pos, room_df["location"].astype(str))
+        position_models[room_label] = pos_model
+        position_scalers[room_label] = pos_scaler
+
+    return HierarchicalKNNClassifier(
+        room_model=room_model,
+        room_scaler=room_scaler,
+        position_models=position_models,
+        position_scalers=position_scalers,
+        feature_columns=columns,
+        fallback_locations=fallback_locations,
+        esp_mode=esp_mode,
+        room_feature_columns=room_feature_columns_map,
     )
 
 
@@ -883,6 +1029,353 @@ def run_global_position_experiments_by_split(
     return combined_summary, all_predictions, all_models
 
 
+# ── KNN experiment runners ────────────────────────────────────────────────────
+
+
+def run_global_position_experiment_knn(  # noqa: PLR0913
+    df: pd.DataFrame,
+    *,
+    dataset_name: str,
+    k: int,
+    split_mode: Literal["group", "random"] = "group",
+    test_size: float = 0.3,
+    random_state: int = 42,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+) -> tuple[tuple[StandardScaler, KNeighborsClassifier], pd.DataFrame, dict[str, float]]:
+    """Train and evaluate a direct CSI-to-position KNN baseline."""
+    _validate_grid_spacing(row_spacing=row_spacing, column_spacing=column_spacing)
+    _validate_training_dataframe(df)
+    _validate_required_columns(df, {"location", "group_id", "label"})
+
+    train_df, test_df = split_dataframe(
+        df,
+        test_size=test_size,
+        random_state=random_state,
+        split_mode=split_mode,
+        stratify_column="location",
+    )
+    columns = feature_columns(train_df)
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(train_df[columns])
+    model = _knn_classifier(k=k)
+    model.fit(X_train, train_df["location"].astype(str))
+
+    X_test = scaler.transform(test_df[columns])
+    pred_locations = model.predict(X_test)
+    pred_rooms = np.asarray(
+        [room_label_for_location(location) for location in pred_locations],
+        dtype=object,
+    )
+    distance_errors = _distance_errors(
+        test_df["location"],
+        pred_locations,
+        row_spacing=row_spacing,
+        column_spacing=column_spacing,
+    )
+
+    predictions = pd.DataFrame(
+        {
+            "dataset": dataset_name,
+            "model": GLOBAL_KNN_MODEL_NAME,
+            "split": split_mode,
+            "true_room": test_df["label"].astype(int).to_numpy(),
+            "pred_room": pred_rooms,
+            "true_location": test_df["location"].astype(str).to_numpy(),
+            "pred_location": pred_locations,
+            "distance_error": distance_errors,
+            "scenario": test_df["scenario"].to_numpy(),
+            "user": test_df["user"].to_numpy(),
+            "trial": test_df["trial"].to_numpy(),
+            "group_id": test_df["group_id"].to_numpy(),
+            "window_idx": test_df["window_idx"].to_numpy(),
+        },
+        columns=GLOBAL_PREDICTION_COLUMNS,
+    )
+    metrics = _localization_metrics(predictions)
+    metrics["k"] = float(k)
+
+    return (scaler, model), predictions, metrics
+
+
+def run_global_position_experiments_knn(
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    k: int,
+    split_mode: Literal["group", "random"] = "group",
+    test_size: float = 0.3,
+    random_state: int = 42,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+) -> tuple[
+    pd.DataFrame,
+    dict[str, pd.DataFrame],
+    dict[str, tuple[StandardScaler, KNeighborsClassifier]],
+]:
+    """Run the global KNN baseline for every named feature dataframe."""
+    _validate_grid_spacing(row_spacing=row_spacing, column_spacing=column_spacing)
+    summary_rows: list[dict[str, float | str]] = []
+    predictions_by_dataset: dict[str, pd.DataFrame] = {}
+    models: dict[str, tuple[StandardScaler, KNeighborsClassifier]] = {}
+
+    for dataset_name, dataframe in feature_dataframes.items():
+        if dataframe.empty:
+            predictions_by_dataset[dataset_name] = pd.DataFrame(
+                columns=GLOBAL_PREDICTION_COLUMNS,
+            )
+            summary_rows.append(
+                {
+                    "dataset": dataset_name,
+                    "split": split_mode,
+                    "k": float(k),
+                    "position_accuracy": np.nan,
+                    "mean_distance_error": np.nan,
+                    "median_distance_error": np.nan,
+                    "rmse_distance_error": np.nan,
+                    "samples": 0.0,
+                },
+            )
+            continue
+
+        model_pair, predictions, metrics = run_global_position_experiment_knn(
+            dataframe,
+            dataset_name=dataset_name,
+            k=k,
+            split_mode=split_mode,
+            test_size=test_size,
+            random_state=random_state,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
+        models[dataset_name] = model_pair
+        predictions_by_dataset[dataset_name] = predictions
+        summary_rows.append({"dataset": dataset_name, "split": split_mode, **metrics})
+
+    return (
+        pd.DataFrame(summary_rows, columns=GLOBAL_KNN_SUMMARY_COLUMNS),
+        predictions_by_dataset,
+        models,
+    )
+
+
+def run_global_position_experiments_by_split_knn(
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    k_values: tuple[int, ...] = (1, 5, 10),
+    split_modes: tuple[str, ...] = ("group", "random"),
+    test_size: float = 0.3,
+    random_state: int = 42,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+) -> tuple[
+    pd.DataFrame,
+    dict[tuple[str, str, int], pd.DataFrame],
+    dict[tuple[str, str, int], tuple[StandardScaler, KNeighborsClassifier]],
+]:
+    """Run global KNN experiments for every dataset × split mode × k combination."""
+    all_summary_frames: list[pd.DataFrame] = []
+    all_predictions: dict[tuple[str, str, int], pd.DataFrame] = {}
+    all_models: dict[tuple[str, str, int], tuple[StandardScaler, KNeighborsClassifier]] = {}
+
+    for k in k_values:
+        for split_mode in split_modes:
+            summary, predictions, models = run_global_position_experiments_knn(
+                feature_dataframes,
+                k=k,
+                split_mode=split_mode,  # type: ignore[arg-type]
+                test_size=test_size,
+                random_state=random_state,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+            )
+            all_summary_frames.append(summary)
+            for dataset_name, preds in predictions.items():
+                all_predictions[(dataset_name, split_mode, k)] = preds
+            for dataset_name, model in models.items():
+                all_models[(dataset_name, split_mode, k)] = model
+
+    combined_summary = (
+        pd.concat(all_summary_frames, ignore_index=True)
+        if all_summary_frames
+        else pd.DataFrame(columns=GLOBAL_KNN_SUMMARY_COLUMNS)
+    )
+    return combined_summary, all_predictions, all_models
+
+
+def run_hierarchical_position_experiment_knn(  # noqa: PLR0913
+    df: pd.DataFrame,
+    *,
+    dataset_name: str,
+    k: int,
+    split_mode: Literal["group", "random"] = "group",
+    test_size: float = 0.3,
+    random_state: int = 42,
+    distance_options: GridDistanceOptions | None = None,
+    esp_mode: Literal["all", "local"] = "all",
+    room_local_esps: dict[int, tuple[str, ...]] | None = None,
+) -> tuple[HierarchicalKNNClassifier, pd.DataFrame, dict[str, float]]:
+    """Train and evaluate the hierarchical KNN classifier for one feature dataframe."""
+    distance_options = _resolve_distance_options(distance_options)
+    train_df, test_df = split_dataframe(
+        df,
+        test_size=test_size,
+        random_state=random_state,
+        split_mode=split_mode,
+        stratify_column="location",
+    )
+    model = train_hierarchical_knn_classifier(
+        train_df,
+        k=k,
+        esp_mode=esp_mode,
+        room_local_esps=room_local_esps,
+    )
+    pred_rooms, pred_locations = model.predict(test_df)
+    distance_errors = _distance_errors(
+        test_df["location"],
+        pred_locations,
+        row_spacing=distance_options.row_spacing,
+        column_spacing=distance_options.column_spacing,
+    )
+
+    predictions = pd.DataFrame(
+        {
+            "dataset": dataset_name,
+            "model": HIERARCHICAL_KNN_MODEL_NAME,
+            "split": split_mode,
+            "true_room": test_df["label"].astype(int).to_numpy(),
+            "pred_room": pred_rooms,
+            "true_location": test_df["location"].astype(str).to_numpy(),
+            "pred_location": pred_locations,
+            "distance_error": distance_errors,
+            "scenario": test_df["scenario"].to_numpy(),
+            "user": test_df["user"].to_numpy(),
+            "trial": test_df["trial"].to_numpy(),
+            "group_id": test_df["group_id"].to_numpy(),
+            "window_idx": test_df["window_idx"].to_numpy(),
+        },
+        columns=PREDICTION_COLUMNS,
+    )
+    metrics = _metrics(predictions)
+    metrics["k"] = float(k)
+
+    return model, predictions, metrics
+
+
+def run_hierarchical_position_experiments_knn(
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    k: int,
+    split_mode: Literal["group", "random"] = "group",
+    test_size: float = 0.3,
+    random_state: int = 42,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+    esp_mode: Literal["all", "local"] = "all",
+    room_local_esps: dict[int, tuple[str, ...]] | None = None,
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, HierarchicalKNNClassifier]]:
+    """Run the hierarchical KNN classifier for every named feature dataframe."""
+    distance_options = GridDistanceOptions(row_spacing=row_spacing, column_spacing=column_spacing)
+    _validate_grid_spacing(
+        row_spacing=distance_options.row_spacing,
+        column_spacing=distance_options.column_spacing,
+    )
+    summary_rows: list[dict[str, float | str]] = []
+    predictions_by_dataset: dict[str, pd.DataFrame] = {}
+    models: dict[str, HierarchicalKNNClassifier] = {}
+
+    for dataset_name, dataframe in feature_dataframes.items():
+        if dataframe.empty:
+            predictions_by_dataset[dataset_name] = pd.DataFrame(columns=PREDICTION_COLUMNS)
+            summary_rows.append(
+                {
+                    "dataset": dataset_name,
+                    "split": split_mode,
+                    "esp_mode": esp_mode,
+                    "k": float(k),
+                    "room_accuracy": np.nan,
+                    "position_accuracy": np.nan,
+                    "mean_distance_error": np.nan,
+                    "median_distance_error": np.nan,
+                    "rmse_distance_error": np.nan,
+                    "distance_error_samples": 0.0,
+                    "localization_samples": 0.0,
+                    "samples": 0.0,
+                },
+            )
+            continue
+
+        model, predictions, metrics = run_hierarchical_position_experiment_knn(
+            dataframe,
+            dataset_name=dataset_name,
+            k=k,
+            split_mode=split_mode,
+            test_size=test_size,
+            random_state=random_state,
+            distance_options=distance_options,
+            esp_mode=esp_mode,
+            room_local_esps=room_local_esps,
+        )
+        models[dataset_name] = model
+        predictions_by_dataset[dataset_name] = predictions
+        summary_rows.append(
+            {"dataset": dataset_name, "split": split_mode, "esp_mode": esp_mode, **metrics}
+        )
+
+    return (
+        pd.DataFrame(summary_rows, columns=HIERARCHICAL_KNN_SUMMARY_COLUMNS),
+        predictions_by_dataset,
+        models,
+    )
+
+
+def run_hierarchical_position_experiments_by_split_knn(
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    k_values: tuple[int, ...] = (1, 5, 10),
+    split_modes: tuple[str, ...] = ("group", "random"),
+    test_size: float = 0.3,
+    random_state: int = 42,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+    esp_mode: Literal["all", "local"] = "all",
+    room_local_esps: dict[int, tuple[str, ...]] | None = None,
+) -> tuple[
+    pd.DataFrame,
+    dict[tuple[str, str, int], pd.DataFrame],
+    dict[tuple[str, str, int], HierarchicalKNNClassifier],
+]:
+    """Run hierarchical KNN experiments for every dataset × split mode × k combination."""
+    all_summary_frames: list[pd.DataFrame] = []
+    all_predictions: dict[tuple[str, str, int], pd.DataFrame] = {}
+    all_models: dict[tuple[str, str, int], HierarchicalKNNClassifier] = {}
+
+    for k in k_values:
+        for split_mode in split_modes:
+            summary, predictions, models = run_hierarchical_position_experiments_knn(
+                feature_dataframes,
+                k=k,
+                split_mode=split_mode,  # type: ignore[arg-type]
+                test_size=test_size,
+                random_state=random_state,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+                esp_mode=esp_mode,
+                room_local_esps=room_local_esps,
+            )
+            all_summary_frames.append(summary)
+            for dataset_name, preds in predictions.items():
+                all_predictions[(dataset_name, split_mode, k)] = preds
+            for dataset_name, model in models.items():
+                all_models[(dataset_name, split_mode, k)] = model
+
+    combined_summary = (
+        pd.concat(all_summary_frames, ignore_index=True)
+        if all_summary_frames
+        else pd.DataFrame(columns=HIERARCHICAL_KNN_SUMMARY_COLUMNS)
+    )
+    return combined_summary, all_predictions, all_models
+
+
 def feature_columns_for_esps(
     df: pd.DataFrame,
     esp_keys: tuple[str, ...] | list[str],
@@ -1090,12 +1583,14 @@ def combine_position_experiment_summaries(
     global_summary: pd.DataFrame,
     hierarchical_summary: pd.DataFrame,
     room_specific_summary: pd.DataFrame,
+    global_knn_summary: pd.DataFrame | None = None,
+    hierarchical_knn_summary: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Merge global, hierarchical, and room-specific summaries into one table.
+    """Merge global, hierarchical, room-specific, and optional KNN summaries into one table.
 
     Global and hierarchical rows get room='all'. Only the hierarchical summary has
     a meaningful room_accuracy; global gets NaN. Hierarchical rows preserve their
-    esp_mode column values rather than being overwritten.
+    esp_mode column values. RF rows get k=NaN; KNN rows carry their k value.
     """
     frames: list[pd.DataFrame] = []
 
@@ -1106,6 +1601,7 @@ def combine_position_experiment_summaries(
         global_frame["room"] = "all"
         global_frame["esp_mode"] = "all"
         global_frame["room_accuracy"] = np.nan
+        global_frame["k"] = np.nan
         frames.append(global_frame)
 
     if not hierarchical_summary.empty:
@@ -1118,13 +1614,36 @@ def combine_position_experiment_summaries(
             hier_frame["esp_mode"] = "all"
         if "room_accuracy" not in hier_frame.columns:
             hier_frame["room_accuracy"] = np.nan
+        hier_frame["k"] = np.nan
         frames.append(hier_frame)
 
     if not room_specific_summary.empty:
         room_frame = room_specific_summary.copy()
         if "room_accuracy" not in room_frame.columns:
             room_frame["room_accuracy"] = np.nan
+        room_frame["k"] = np.nan
         frames.append(room_frame)
+
+    if global_knn_summary is not None and not global_knn_summary.empty:
+        knn_global_frame = global_knn_summary.copy()
+        if "model" not in knn_global_frame.columns:
+            knn_global_frame["model"] = GLOBAL_KNN_MODEL_NAME
+        knn_global_frame["room"] = "all"
+        knn_global_frame["esp_mode"] = "all"
+        if "room_accuracy" not in knn_global_frame.columns:
+            knn_global_frame["room_accuracy"] = np.nan
+        frames.append(knn_global_frame)
+
+    if hierarchical_knn_summary is not None and not hierarchical_knn_summary.empty:
+        knn_hier_frame = hierarchical_knn_summary.copy()
+        if "model" not in knn_hier_frame.columns:
+            knn_hier_frame["model"] = HIERARCHICAL_KNN_MODEL_NAME
+        knn_hier_frame["room"] = "all"
+        if "esp_mode" not in knn_hier_frame.columns:
+            knn_hier_frame["esp_mode"] = "all"
+        if "room_accuracy" not in knn_hier_frame.columns:
+            knn_hier_frame["room_accuracy"] = np.nan
+        frames.append(knn_hier_frame)
 
     if not frames:
         return pd.DataFrame(columns=COMBINED_SUMMARY_COLUMNS)
