@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Literal
@@ -25,6 +26,7 @@ METADATA_COLUMNS = {
 EMPTY_ROOM_LABEL = 0
 EMPTY_ROOM_LOCATION = "Z-0"
 MIN_GROUP_SPLIT_COUNT = 2
+DEFAULT_BLOCK_COUNT = 10
 DEFAULT_ROW_SPACING = 1.0
 DEFAULT_COLUMN_SPACING = 1.0
 GRID_ROW_ORIGIN = ord("A")
@@ -298,16 +300,24 @@ def split_dataframe(
     *,
     test_size: float = 0.3,
     random_state: int = 42,
-    split_mode: Literal["group", "random"] = "group",
+    split_mode: Literal["group", "random", "block"] = "group",
     stratify_column: str | None = None,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Split a dataframe for train/test evaluation.
 
     split_mode='group' (default, realistic): keeps all sliding windows from the
-    same acquisition group together via GroupShuffleSplit.
+    same acquisition group together via GroupShuffleSplit. Strong cross-session
+    generalization but no packet sharing across splits.
 
     split_mode='random' (optimistic sanity-check): random row-level split that
-    may leak similar windows from the same acquisition across boundaries.
+    may leak similar windows from the same acquisition across boundaries due to
+    the 50% sliding-window overlap.
+
+    split_mode='block' (leak-free random): splits each session into n_blocks
+    contiguous time blocks, randomly assigns blocks to test, and drops windows
+    that straddle a train/test boundary. Eliminates packet-level leakage while
+    exposing every user, position, and trial to training.
     """
     _validate_required_columns(df, {"group_id"})
     if df.empty:
@@ -345,7 +355,62 @@ def split_dataframe(
         )
         return df.iloc[train_idx].copy(), df.iloc[test_idx].copy()
 
-    msg = f"Unknown split_mode {split_mode!r}. Must be 'group' or 'random'."
+    if split_mode == "block":
+        if n_blocks < 1:
+            msg = "n_blocks must be at least 1 for block split mode."
+            raise ValueError(msg)
+        _validate_required_columns(df, {"window_idx"})
+        group_ids = df["group_id"].to_numpy()
+        window_idxs = df["window_idx"].to_numpy()
+        n_test_blocks = min(n_blocks, max(1, round(test_size * n_blocks)))
+
+        train_locs: list[int] = []
+        test_locs: list[int] = []
+
+        for group_id in df["group_id"].unique():
+            session_pos = np.flatnonzero(group_ids == group_id)
+            # Sort windows by temporal order within this session.
+            sort_order = np.argsort(window_idxs[session_pos], kind="stable")
+            session_pos_sorted = session_pos[sort_order]
+            n_windows = len(session_pos_sorted)
+
+            if n_windows < n_blocks:
+                # Too few windows to split into blocks; keep whole session in train.
+                train_locs.extend(session_pos_sorted.tolist())
+                continue
+
+            # Assign windows to contiguous time blocks.
+            block_assignment = (np.arange(n_windows) * n_blocks) // n_windows
+
+            # Reproducible per-session seed: stable across Python runs (no hash()).
+            gid_int = int.from_bytes(
+                hashlib.md5(str(group_id).encode()).digest()[:4], "big"
+            )
+            rng = np.random.RandomState((gid_int + random_state) % (2**31))
+            test_block_set = set(
+                rng.choice(n_blocks, size=n_test_blocks, replace=False).tolist()
+            )
+
+            is_test = np.array([ba in test_block_set for ba in block_assignment])
+
+            # Drop boundary windows (adjacent to a window in the opposite set).
+            is_boundary = np.zeros(n_windows, dtype=bool)
+            if n_windows > 1:
+                is_boundary[:-1] |= is_test[:-1] != is_test[1:]
+                is_boundary[1:] |= is_test[1:] != is_test[:-1]
+
+            for pos, tb, bd in zip(session_pos_sorted, is_test, is_boundary):
+                if bd:
+                    continue
+                (test_locs if tb else train_locs).append(int(pos))
+
+        if not train_locs or not test_locs:
+            msg = "Block split produced an empty train or test set."
+            raise ValueError(msg)
+
+        return df.iloc[train_locs].copy(), df.iloc[test_locs].copy()
+
+    msg = f"Unknown split_mode {split_mode!r}. Must be 'group', 'random', or 'block'."
     raise ValueError(msg)
 
 
@@ -584,6 +649,9 @@ def train_hierarchical_position_classifier(
     train_df: pd.DataFrame,
     *,
     random_state: int = 42,
+    n_estimators: int = 300,
+    max_features: str | float = "sqrt",
+    min_samples_leaf: int = 1,
     esp_mode: Literal["all", "local"] = "all",
     room_local_esps: dict[int, tuple[str, ...]] | None = None,
 ) -> HierarchicalPositionClassifier:
@@ -598,7 +666,12 @@ def train_hierarchical_position_classifier(
     room_labels = train_df["label"].astype(int)
 
     # Stage 1: room classifier always sees all ESP features.
-    room_model = _random_forest_classifier(random_state=random_state)
+    room_model = _random_forest_classifier(
+        random_state=random_state,
+        n_estimators=n_estimators,
+        max_features=max_features,
+        min_samples_leaf=min_samples_leaf,
+    )
     room_model.fit(train_df[columns], room_labels)
 
     fallback_locations = _fallback_locations(train_df, room_labels)
@@ -623,7 +696,12 @@ def train_hierarchical_position_classifier(
             room_feat_cols = columns
 
         room_feature_columns[room_label] = room_feat_cols
-        position_model = _random_forest_classifier(random_state=random_state)
+        position_model = _random_forest_classifier(
+            random_state=random_state,
+            n_estimators=n_estimators,
+            max_features=max_features,
+            min_samples_leaf=min_samples_leaf,
+        )
         position_model.fit(room_df[room_feat_cols], room_df["location"].astype(str))
         position_models[room_label] = position_model
 
@@ -709,9 +787,13 @@ def run_hierarchical_position_experiment(
     df: pd.DataFrame,
     *,
     dataset_name: str,
-    split_mode: Literal["group", "random"] = "group",
+    split_mode: Literal["group", "random", "block"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
+    n_estimators: int = 300,
+    max_features: str | float = "sqrt",
+    min_samples_leaf: int = 1,
     distance_options: GridDistanceOptions | None = None,
     esp_mode: Literal["all", "local"] = "all",
     room_local_esps: dict[int, tuple[str, ...]] | None = None,
@@ -724,10 +806,14 @@ def run_hierarchical_position_experiment(
         random_state=random_state,
         split_mode=split_mode,
         stratify_column="location",
+        n_blocks=n_blocks,
     )
     model = train_hierarchical_position_classifier(
         train_df,
         random_state=random_state,
+        n_estimators=n_estimators,
+        max_features=max_features,
+        min_samples_leaf=min_samples_leaf,
         esp_mode=esp_mode,
         room_local_esps=room_local_esps,
     )
@@ -765,9 +851,13 @@ def run_hierarchical_position_experiment(
 def run_hierarchical_position_experiments(
     feature_dataframes: dict[str, pd.DataFrame],
     *,
-    split_mode: Literal["group", "random"] = "group",
+    split_mode: Literal["group", "random", "block"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
+    n_estimators: int = 300,
+    max_features: str | float = "sqrt",
+    min_samples_leaf: int = 1,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
     esp_mode: Literal["all", "local"] = "all",
@@ -812,6 +902,10 @@ def run_hierarchical_position_experiments(
             split_mode=split_mode,
             test_size=test_size,
             random_state=random_state,
+            n_blocks=n_blocks,
+            n_estimators=n_estimators,
+            max_features=max_features,
+            min_samples_leaf=min_samples_leaf,
             distance_options=distance_options,
             esp_mode=esp_mode,
             room_local_esps=room_local_esps,
@@ -833,9 +927,13 @@ def run_global_position_experiment(  # noqa: PLR0913
     df: pd.DataFrame,
     *,
     dataset_name: str,
-    split_mode: Literal["group", "random"] = "group",
+    split_mode: Literal["group", "random", "block"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
+    n_estimators: int = 300,
+    max_features: str | float = "sqrt",
+    min_samples_leaf: int = 1,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
 ) -> tuple[RandomForestClassifier, pd.DataFrame, dict[str, float]]:
@@ -850,9 +948,15 @@ def run_global_position_experiment(  # noqa: PLR0913
         random_state=random_state,
         split_mode=split_mode,
         stratify_column="location",
+        n_blocks=n_blocks,
     )
     columns = feature_columns(train_df)
-    model = _random_forest_classifier(random_state=random_state)
+    model = _random_forest_classifier(
+        random_state=random_state,
+        n_estimators=n_estimators,
+        max_features=max_features,
+        min_samples_leaf=min_samples_leaf,
+    )
     model.fit(train_df[columns], train_df["location"].astype(str))
 
     pred_locations = model.predict(test_df[columns])
@@ -893,9 +997,13 @@ def run_global_position_experiment(  # noqa: PLR0913
 def run_global_position_experiments(
     feature_dataframes: dict[str, pd.DataFrame],
     *,
-    split_mode: Literal["group", "random"] = "group",
+    split_mode: Literal["group", "random", "block"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
+    n_estimators: int = 300,
+    max_features: str | float = "sqrt",
+    min_samples_leaf: int = 1,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], dict[str, RandomForestClassifier]]:
@@ -929,6 +1037,10 @@ def run_global_position_experiments(
             split_mode=split_mode,
             test_size=test_size,
             random_state=random_state,
+            n_blocks=n_blocks,
+            n_estimators=n_estimators,
+            max_features=max_features,
+            min_samples_leaf=min_samples_leaf,
             row_spacing=row_spacing,
             column_spacing=column_spacing,
         )
@@ -949,6 +1061,10 @@ def run_hierarchical_position_experiments_by_split(
     split_modes: tuple[str, ...] = ("group", "random"),
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
+    n_estimators: int = 300,
+    max_features: str | float = "sqrt",
+    min_samples_leaf: int = 1,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
     esp_mode: Literal["all", "local"] = "all",
@@ -969,6 +1085,10 @@ def run_hierarchical_position_experiments_by_split(
             split_mode=split_mode,  # type: ignore[arg-type]
             test_size=test_size,
             random_state=random_state,
+            n_blocks=n_blocks,
+            n_estimators=n_estimators,
+            max_features=max_features,
+            min_samples_leaf=min_samples_leaf,
             row_spacing=row_spacing,
             column_spacing=column_spacing,
             esp_mode=esp_mode,
@@ -994,6 +1114,10 @@ def run_global_position_experiments_by_split(
     split_modes: tuple[str, ...] = ("group", "random"),
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
+    n_estimators: int = 300,
+    max_features: str | float = "sqrt",
+    min_samples_leaf: int = 1,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
 ) -> tuple[
@@ -1012,6 +1136,10 @@ def run_global_position_experiments_by_split(
             split_mode=split_mode,  # type: ignore[arg-type]
             test_size=test_size,
             random_state=random_state,
+            n_blocks=n_blocks,
+            n_estimators=n_estimators,
+            max_features=max_features,
+            min_samples_leaf=min_samples_leaf,
             row_spacing=row_spacing,
             column_spacing=column_spacing,
         )
@@ -1037,9 +1165,10 @@ def run_global_position_experiment_knn(  # noqa: PLR0913
     *,
     dataset_name: str,
     k: int,
-    split_mode: Literal["group", "random"] = "group",
+    split_mode: Literal["group", "random", "block"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
 ) -> tuple[tuple[StandardScaler, KNeighborsClassifier], pd.DataFrame, dict[str, float]]:
@@ -1054,6 +1183,7 @@ def run_global_position_experiment_knn(  # noqa: PLR0913
         random_state=random_state,
         split_mode=split_mode,
         stratify_column="location",
+        n_blocks=n_blocks,
     )
     columns = feature_columns(train_df)
     scaler = StandardScaler()
@@ -1102,9 +1232,10 @@ def run_global_position_experiments_knn(
     feature_dataframes: dict[str, pd.DataFrame],
     *,
     k: int,
-    split_mode: Literal["group", "random"] = "group",
+    split_mode: Literal["group", "random", "block"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
 ) -> tuple[
@@ -1144,6 +1275,7 @@ def run_global_position_experiments_knn(
             split_mode=split_mode,
             test_size=test_size,
             random_state=random_state,
+            n_blocks=n_blocks,
             row_spacing=row_spacing,
             column_spacing=column_spacing,
         )
@@ -1165,6 +1297,7 @@ def run_global_position_experiments_by_split_knn(
     split_modes: tuple[str, ...] = ("group", "random"),
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
 ) -> tuple[
@@ -1185,6 +1318,7 @@ def run_global_position_experiments_by_split_knn(
                 split_mode=split_mode,  # type: ignore[arg-type]
                 test_size=test_size,
                 random_state=random_state,
+                n_blocks=n_blocks,
                 row_spacing=row_spacing,
                 column_spacing=column_spacing,
             )
@@ -1207,9 +1341,10 @@ def run_hierarchical_position_experiment_knn(  # noqa: PLR0913
     *,
     dataset_name: str,
     k: int,
-    split_mode: Literal["group", "random"] = "group",
+    split_mode: Literal["group", "random", "block"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
     distance_options: GridDistanceOptions | None = None,
     esp_mode: Literal["all", "local"] = "all",
     room_local_esps: dict[int, tuple[str, ...]] | None = None,
@@ -1222,6 +1357,7 @@ def run_hierarchical_position_experiment_knn(  # noqa: PLR0913
         random_state=random_state,
         split_mode=split_mode,
         stratify_column="location",
+        n_blocks=n_blocks,
     )
     model = train_hierarchical_knn_classifier(
         train_df,
@@ -1265,9 +1401,10 @@ def run_hierarchical_position_experiments_knn(
     feature_dataframes: dict[str, pd.DataFrame],
     *,
     k: int,
-    split_mode: Literal["group", "random"] = "group",
+    split_mode: Literal["group", "random", "block"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
     esp_mode: Literal["all", "local"] = "all",
@@ -1311,6 +1448,7 @@ def run_hierarchical_position_experiments_knn(
             split_mode=split_mode,
             test_size=test_size,
             random_state=random_state,
+            n_blocks=n_blocks,
             distance_options=distance_options,
             esp_mode=esp_mode,
             room_local_esps=room_local_esps,
@@ -1335,6 +1473,7 @@ def run_hierarchical_position_experiments_by_split_knn(
     split_modes: tuple[str, ...] = ("group", "random"),
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
     esp_mode: Literal["all", "local"] = "all",
@@ -1357,6 +1496,7 @@ def run_hierarchical_position_experiments_by_split_knn(
                 split_mode=split_mode,  # type: ignore[arg-type]
                 test_size=test_size,
                 random_state=random_state,
+                n_blocks=n_blocks,
                 row_spacing=row_spacing,
                 column_spacing=column_spacing,
                 esp_mode=esp_mode,
@@ -1407,9 +1547,13 @@ def run_room_specific_position_experiment(  # noqa: PLR0913
     room_label: int,
     esp_mode: Literal["all", "local"] = "all",
     room_local_esps: dict[int, tuple[str, ...]] | None = None,
-    split_mode: Literal["group", "random"] = "group",
+    split_mode: Literal["group", "random", "block"] = "group",
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
+    n_estimators: int = 300,
+    max_features: str | float = "sqrt",
+    min_samples_leaf: int = 1,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
 ) -> tuple[RandomForestClassifier, pd.DataFrame, dict[str, object]]:
@@ -1438,10 +1582,16 @@ def run_room_specific_position_experiment(  # noqa: PLR0913
         random_state=random_state,
         split_mode=split_mode,
         stratify_column="location",
+        n_blocks=n_blocks,
     )
 
     columns = feature_columns(train_df)
-    model = _random_forest_classifier(random_state=random_state)
+    model = _random_forest_classifier(
+        random_state=random_state,
+        n_estimators=n_estimators,
+        max_features=max_features,
+        min_samples_leaf=min_samples_leaf,
+    )
     model.fit(train_df[columns], train_df["location"].astype(str))
 
     pred_locations = model.predict(test_df[columns])
@@ -1483,6 +1633,10 @@ def run_room_specific_position_experiments(  # noqa: PLR0913
     room_local_esps: dict[int, tuple[str, ...]] | None = None,
     test_size: float = 0.3,
     random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
+    n_estimators: int = 300,
+    max_features: str | float = "sqrt",
+    min_samples_leaf: int = 1,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
 ) -> tuple[
@@ -1545,6 +1699,10 @@ def run_room_specific_position_experiments(  # noqa: PLR0913
                             split_mode=split_mode,  # type: ignore[arg-type]
                             test_size=test_size,
                             random_state=random_state,
+                            n_blocks=n_blocks,
+                            n_estimators=n_estimators,
+                            max_features=max_features,
+                            min_samples_leaf=min_samples_leaf,
                             row_spacing=row_spacing,
                             column_spacing=column_spacing,
                         )
@@ -1791,10 +1949,18 @@ def per_room_hierarchical_summary(predictions: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(summary_rows, columns=PER_ROOM_SUMMARY_COLUMNS)
 
 
-def _random_forest_classifier(*, random_state: int) -> RandomForestClassifier:
-    """Return a balanced Random Forest with fixed hyperparameters."""
+def _random_forest_classifier(
+    *,
+    random_state: int,
+    n_estimators: int = 300,
+    max_features: str | float = "sqrt",
+    min_samples_leaf: int = 1,
+) -> RandomForestClassifier:
+    """Return a balanced Random Forest with configurable hyperparameters."""
     return RandomForestClassifier(
-        n_estimators=300,
+        n_estimators=n_estimators,
+        max_features=max_features,
+        min_samples_leaf=min_samples_leaf,
         random_state=random_state,
         n_jobs=-1,
         class_weight="balanced",

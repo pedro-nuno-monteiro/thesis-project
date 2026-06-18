@@ -41,7 +41,8 @@ RF_METRIC_COLUMNS = (
     "recall_weighted",
     "f1_weighted",
 )
-RF_SPLIT_ORDER = ("random", "group")
+RF_SPLIT_ORDER = ("random", "block", "group")
+POSITION_SPLIT_ORDER = ("random", "block")
 RF_DATASET_ORDER = ("2.4 GHz", "5 GHz", "Fusion")
 RF_FEATURE_STATISTIC_ORDER = ("mean", "std", "variance", "max", "min", "energy")
 RF_BAND_ORDER = ("2.4 GHz", "5 GHz")
@@ -2958,7 +2959,7 @@ def plot_band_error_cdf(
     predictions: pd.DataFrame,
     *,
     model_label: str,
-    split_modes: tuple[str, ...] = ("group", "random"),
+    split_modes: tuple[str, ...] = POSITION_SPLIT_ORDER,
     band_order: Sequence[str] = _BAND_ORDER,
     save_path: str | Path | None = None,
 ) -> None:
@@ -2968,8 +2969,9 @@ def plot_band_error_cdf(
     is saved as ``{save_path}/cdf_{model_slug}_all-bands_{split}.png``.
     """
     _loc_validate_columns(predictions, {"distance_error", "split", "dataset"})
+    splits = order_existing_values(predictions["split"].astype(str).unique(), split_modes)
 
-    for split in split_modes:
+    for split in splits:
         fig, ax = plt.subplots(figsize=(7, 4.5))
         split_df = predictions.loc[predictions["split"] == split]
         plotted = False
@@ -3005,7 +3007,7 @@ def plot_band_error_boxplot(
     predictions: pd.DataFrame,
     *,
     model_label: str,
-    split_modes: tuple[str, ...] = ("group", "random"),
+    split_modes: tuple[str, ...] = POSITION_SPLIT_ORDER,
     band_order: Sequence[str] = _BAND_ORDER,
     save_path: str | Path | None = None,
 ) -> None:
@@ -3015,8 +3017,9 @@ def plot_band_error_boxplot(
     is saved as ``{save_path}/boxplot_{model_slug}_all-bands_{split}.png``.
     """
     _loc_validate_columns(predictions, {"distance_error", "split", "dataset"})
+    splits = order_existing_values(predictions["split"].astype(str).unique(), split_modes)
 
-    for split in split_modes:
+    for split in splits:
         fig, ax = plt.subplots(figsize=(7, 4.5))
         split_df = predictions.loc[predictions["split"] == split]
         labels: list[str] = []
