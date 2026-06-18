@@ -14,7 +14,20 @@ PROJECT_ROOT = Path(__file__).parent.parent
 CACHE_DIR = PROJECT_ROOT / ".cache" / "dataframes"
 RESULTS_ROOT = PROJECT_ROOT / "results"
 
-_EXPECTED_METADATA_COLS = {"frequency_scenario", "scenario", "location", "user", "trial", "label"}
+_EXPECTED_METADATA_COLS = {
+    "frequency_scenario",
+    "scenario",
+    "location",
+    "user",
+    "trial",
+    "group_id",
+    "window_idx",
+    "label",
+}
+
+
+class _StaleFeatureCache(ValueError):
+    """Raised when an existing cache predates the current feature schema."""
 
 
 # ── Key generation ────────────────────────────────────────────────────────────
@@ -65,8 +78,18 @@ def _check_schema(df: pd.DataFrame, path: Path) -> None:
     missing = _EXPECTED_METADATA_COLS - set(df.columns)
     if missing:
         raise ValueError(
-            f"Cache schema mismatch in {path} — missing columns: {sorted(missing)}.\n"
+            f"Cache schema mismatch in {path} -- missing columns: {sorted(missing)}.\n"
             "Delete the cache folder and rerun to rebuild."
+        )
+
+    feature_cols = [col for col in df.columns if col not in _EXPECTED_METADATA_COLS]
+    non_float32_cols = [
+        col for col in feature_cols if str(df[col].dtype) != "float32"
+    ]
+    if non_float32_cols:
+        raise _StaleFeatureCache(
+            f"Cache schema mismatch in {path} -- feature columns must be float32; "
+            f"stale columns include {non_float32_cols[:5]}."
         )
 
 
@@ -93,12 +116,15 @@ def get_all_dataframes(
 
     if all(p.exists() for p in paths.values()):
         result: dict[str, pd.DataFrame] = {}
-        for name, path in paths.items():
-            print(f"[cache hit] {path}")
-            df = pd.read_parquet(path)
-            _check_schema(df, path)
-            result[name] = df
-        return result
+        try:
+            for name, path in paths.items():
+                print(f"[cache hit] {path}")
+                df = pd.read_parquet(path)
+                _check_schema(df, path)
+                result[name] = df
+            return result
+        except _StaleFeatureCache as exc:
+            print(f"[cache stale] {exc} Rebuilding cached feature dataframes.")
 
     print(f"[cache miss] {cache_dir}, computing...")
     df_24ghz, df_5ghz, df_fusion = builder()
@@ -144,8 +170,11 @@ def get_dataframe(
     if path.exists():
         print(f"[cache hit] {path}")
         df = pd.read_parquet(path)
-        _check_schema(df, path)
-        return df
+        try:
+            _check_schema(df, path)
+            return df
+        except _StaleFeatureCache as exc:
+            print(f"[cache stale] {exc} Rebuilding cached feature dataframe.")
 
     print(f"[cache miss] {path}, computing...")
     df = builder()
@@ -220,6 +249,7 @@ def write_manifest(
     splits: list[str],
     test_size: float,
     feature_dataframes: dict[str, pd.DataFrame],
+    tuned_hyperparameters: dict[str, Any] | None = None,
 ) -> None:
     """Write a self-describing manifest.json to results_dir."""
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -245,6 +275,8 @@ def write_manifest(
         "test_size": test_size,
         "dataset_sizes": dataset_sizes,
     }
+    if tuned_hyperparameters is not None:
+        manifest["tuned_hyperparameters"] = tuned_hyperparameters
 
     manifest_path = results_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")

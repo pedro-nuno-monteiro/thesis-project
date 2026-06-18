@@ -196,7 +196,10 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
                         ),
                     )
 
-    return pd.DataFrame(rows, columns=[*METADATA_COLUMNS, *feature_columns])
+    df = pd.DataFrame(rows, columns=[*METADATA_COLUMNS, *feature_columns])
+    if feature_columns:
+        df[feature_columns] = df[feature_columns].astype("float32")
+    return df
 
 
 def feature_window_bottleneck_report(
