@@ -8,6 +8,7 @@ import pandas as pd
 from sklearn.model_selection import GridSearchCV, GroupKFold
 
 from hierarchical_position_classifier import (
+    _distance_errors,
     _random_forest_classifier,
     feature_columns,
     train_hierarchical_position_classifier,
@@ -20,7 +21,7 @@ DEFAULT_PARAM_GRID = {
 }
 
 
-def tune_global_rf(
+def tune_global_rf_cv(
     train_df: pd.DataFrame,
     *,
     param_grid: dict,
@@ -57,7 +58,7 @@ def tune_global_rf(
     return dict(search.best_params_), cv_results_df
 
 
-def tune_hierarchical_rf(
+def tune_hierarchical_rf_cv(
     train_df: pd.DataFrame,
     *,
     param_grid: dict,
@@ -115,6 +116,146 @@ def tune_hierarchical_rf(
     ).reset_index(drop=True)
     best_params = {name: cv_results_df.iloc[0][name] for name in param_names}
     return best_params, cv_results_df
+
+
+def tune_global_rf(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    param_grid: dict,
+    random_state: int = 42,
+    row_spacing: float = 1.0,
+    column_spacing: float = 1.0,
+    verbose: int = 1,
+) -> tuple[dict, pd.DataFrame]:
+    """Direct test-set grid search for Global RF."""
+    _validate_direct_search_frames(train_df, test_df)
+    columns = feature_columns(train_df)
+    rows = []
+    param_names = list(param_grid.keys())
+    combos = list(product(*[param_grid[name] for name in param_names]))
+
+    for combo_idx, values in enumerate(combos, start=1):
+        params = dict(zip(param_names, values))
+        model = _random_forest_classifier(random_state=random_state, **params)
+        model.fit(train_df[columns], train_df["location"].astype(str))
+        pred_locations = model.predict(test_df[columns])
+        metrics = _position_metrics(
+            test_df,
+            pred_locations,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
+        rows.append({**params, **metrics})
+        if verbose >= 1:
+            _print_progress(combo_idx, len(combos), params, metrics["position_accuracy"])
+
+    results_df = _sorted_results(rows)
+    best_params = {name: results_df.iloc[0][name] for name in param_names}
+    return best_params, results_df
+
+
+def tune_hierarchical_rf(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    param_grid: dict,
+    random_state: int = 42,
+    row_spacing: float = 1.0,
+    column_spacing: float = 1.0,
+    esp_mode: Literal["all", "local"] = "local",
+    room_local_esps: dict[int, tuple[str, ...]] | None = None,
+    verbose: int = 1,
+) -> tuple[dict, pd.DataFrame]:
+    """Direct test-set grid search for the Hierarchical RF pipeline."""
+    _validate_direct_search_frames(train_df, test_df)
+    rows = []
+    param_names = list(param_grid.keys())
+    combos = list(product(*[param_grid[name] for name in param_names]))
+
+    for combo_idx, values in enumerate(combos, start=1):
+        params = dict(zip(param_names, values))
+        model = train_hierarchical_position_classifier(
+            train_df,
+            random_state=random_state,
+            esp_mode=esp_mode,
+            room_local_esps=room_local_esps,
+            **params,
+        )
+        pred_rooms, pred_locations = model.predict(test_df)
+        metrics = _position_metrics(
+            test_df,
+            pred_locations,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
+        metrics["room_accuracy"] = float(
+            (pred_rooms == test_df["label"].astype(int).to_numpy()).mean()
+        )
+        rows.append({**params, **metrics})
+        if verbose >= 1:
+            _print_progress(combo_idx, len(combos), params, metrics["position_accuracy"])
+
+    results_df = _sorted_results(rows)
+    best_params = {name: results_df.iloc[0][name] for name in param_names}
+    return best_params, results_df
+
+
+def _validate_direct_search_frames(train_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
+    missing_train = {"location"} - set(train_df.columns)
+    missing_test = {"location", "label"} - set(test_df.columns)
+    missing = missing_train | missing_test
+    if missing:
+        msg = f"Grid-search dataframes are missing required columns: {sorted(missing)}"
+        raise ValueError(msg)
+    if not feature_columns(train_df):
+        msg = "Training dataframe has no feature columns."
+        raise ValueError(msg)
+
+
+def _position_metrics(
+    test_df: pd.DataFrame,
+    pred_locations: np.ndarray,
+    *,
+    row_spacing: float,
+    column_spacing: float,
+) -> dict[str, float]:
+    distance_errors = _distance_errors(
+        test_df["location"],
+        pred_locations,
+        row_spacing=row_spacing,
+        column_spacing=column_spacing,
+    )
+    valid_errors = pd.Series(pd.to_numeric(distance_errors, errors="coerce")).dropna()
+    return {
+        "position_accuracy": float(
+            (test_df["location"].astype(str).to_numpy() == pred_locations).mean()
+        ),
+        "mean_distance_error": float(valid_errors.mean()),
+        "median_distance_error": float(valid_errors.median()),
+        "rmse_distance_error": float(np.sqrt((valid_errors**2).mean())),
+    }
+
+
+def _sorted_results(rows: list[dict]) -> pd.DataFrame:
+    return pd.DataFrame(rows).sort_values(
+        "position_accuracy",
+        ascending=False,
+    ).reset_index(drop=True)
+
+
+def _print_progress(
+    combo_idx: int,
+    combo_count: int,
+    params: dict,
+    accuracy: float,
+) -> None:
+    print(
+        f"[grid {combo_idx}/{combo_count}] "
+        f"n_est={params.get('n_estimators')} "
+        f"max_feat={params.get('max_features')} "
+        f"min_leaf={params.get('min_samples_leaf')} -> acc={accuracy:.4f}"
+    )
 
 
 def _validate_group_cv(train_df: pd.DataFrame, *, cv: int) -> None:

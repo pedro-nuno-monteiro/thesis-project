@@ -199,23 +199,23 @@ def get_dataframe(
 
 # ── Summary table saving ──────────────────────────────────────────────────────
 
-def save_summary(df: pd.DataFrame, results_dir: Path) -> None:
+def save_summary(df: pd.DataFrame, results_dir: Path, basename: str = "summary") -> None:
     """Write the summary dataframe to CSV, Markdown, and LaTeX in results_dir."""
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(results_dir / "summary.csv")
+    df.to_csv(results_dir / f"{basename}.csv")
 
     md = df.to_markdown(index=True)
-    (results_dir / "summary.md").write_text(md or "", encoding="utf-8")
+    (results_dir / f"{basename}.md").write_text(md or "", encoding="utf-8")
 
     tex = df.to_latex(
         index=True,
         escape=False,
         float_format="%.4f",
     )
-    (results_dir / "summary.tex").write_text(tex, encoding="utf-8")
+    (results_dir / f"{basename}.tex").write_text(tex, encoding="utf-8")
 
-    print(f"[results] Summary saved to {results_dir}/")
+    print(f"[results] Summary saved to {results_dir}/{basename}.*")
 
 
 # ── Reproducibility manifest ──────────────────────────────────────────────────
@@ -250,6 +250,7 @@ def write_manifest(
     test_size: float,
     feature_dataframes: dict[str, pd.DataFrame],
     tuned_hyperparameters: dict[str, Any] | None = None,
+    tuned_hyperparameters_direct: dict[str, Any] | None = None,
 ) -> None:
     """Write a self-describing manifest.json to results_dir."""
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -258,6 +259,14 @@ def write_manifest(
         f"{_band_stem(band)}_windows": len(df)
         for band, df in feature_dataframes.items()
     }
+
+    manifest_path = results_dir / "manifest.json"
+    existing_manifest: dict[str, Any] = {}
+    if manifest_path.exists():
+        try:
+            existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing_manifest = {}
 
     manifest: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
@@ -275,9 +284,12 @@ def write_manifest(
         "test_size": test_size,
         "dataset_sizes": dataset_sizes,
     }
+    if tuned_hyperparameters is None:
+        tuned_hyperparameters = existing_manifest.get("tuned_hyperparameters")
     if tuned_hyperparameters is not None:
         manifest["tuned_hyperparameters"] = tuned_hyperparameters
+    if tuned_hyperparameters_direct is not None:
+        manifest["tuned_hyperparameters_direct"] = tuned_hyperparameters_direct
 
-    manifest_path = results_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
     print(f"[results] Manifest written to {manifest_path}")
