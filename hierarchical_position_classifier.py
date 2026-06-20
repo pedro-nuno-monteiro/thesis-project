@@ -794,11 +794,18 @@ def run_hierarchical_position_experiment(
     n_estimators: int = 300,
     max_features: str | float = "sqrt",
     min_samples_leaf: int = 1,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
     distance_options: GridDistanceOptions | None = None,
     esp_mode: Literal["all", "local"] = "all",
     room_local_esps: dict[int, tuple[str, ...]] | None = None,
 ) -> tuple[HierarchicalPositionClassifier, pd.DataFrame, dict[str, float]]:
     """Train and evaluate the hierarchical classifier for one feature dataframe."""
+    if distance_options is None:
+        distance_options = GridDistanceOptions(
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
     distance_options = _resolve_distance_options(distance_options)
     train_df, test_df = split_dataframe(
         df,
