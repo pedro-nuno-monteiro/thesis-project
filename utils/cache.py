@@ -251,6 +251,8 @@ def write_manifest(
     feature_dataframes: dict[str, pd.DataFrame],
     tuned_hyperparameters: dict[str, Any] | None = None,
     tuned_hyperparameters_direct: dict[str, Any] | None = None,
+    tuned_hyperparameters_v1: dict[str, Any] | None = None,
+    tuned_hyperparameters_v2: dict[str, Any] | None = None,
 ) -> None:
     """Write a self-describing manifest.json to results_dir."""
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -290,6 +292,14 @@ def write_manifest(
         manifest["tuned_hyperparameters"] = tuned_hyperparameters
     if tuned_hyperparameters_direct is not None:
         manifest["tuned_hyperparameters_direct"] = tuned_hyperparameters_direct
+    if tuned_hyperparameters_v1 is None:
+        tuned_hyperparameters_v1 = existing_manifest.get("tuned_hyperparameters_v1")
+    if tuned_hyperparameters_v1 is not None:
+        manifest["tuned_hyperparameters_v1"] = tuned_hyperparameters_v1
+    if tuned_hyperparameters_v2 is None:
+        tuned_hyperparameters_v2 = existing_manifest.get("tuned_hyperparameters_v2")
+    if tuned_hyperparameters_v2 is not None:
+        manifest["tuned_hyperparameters_v2"] = tuned_hyperparameters_v2
 
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
     print(f"[results] Manifest written to {manifest_path}")
