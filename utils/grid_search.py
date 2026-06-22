@@ -20,6 +20,30 @@ DEFAULT_PARAM_GRID = {
     "min_samples_leaf": [1, 2, 5],
 }
 
+DEFAULT_PARAM_GRID_V2 = {
+    "max_depth": [2, 3, 5, 10, 15, 30, 60, 100],
+    "min_samples_split": [2, 4, 8, 16, 32],
+    "min_samples_leaf": [1, 2, 4, 8, 16, 32],
+}
+
+FIXED_PARAMS_SINGLE_BAND = {
+    "n_estimators": 500,
+    "max_features": "sqrt",
+}
+
+FIXED_PARAMS_FUSION = {
+    "n_estimators": 500,
+    "max_features": "log2",
+}
+
+RF_PARAM_COLUMNS = [
+    "n_estimators",
+    "max_features",
+    "max_depth",
+    "min_samples_split",
+    "min_samples_leaf",
+]
+
 
 def tune_global_rf_cv(
     train_df: pd.DataFrame,
@@ -123,12 +147,19 @@ def tune_global_rf(
     test_df: pd.DataFrame,
     *,
     param_grid: dict,
+    fixed_params: dict,
     random_state: int = 42,
     row_spacing: float = 1.0,
     column_spacing: float = 1.0,
     verbose: int = 1,
 ) -> tuple[dict, pd.DataFrame]:
-    """Direct test-set grid search for Global RF."""
+    """Direct test-set grid search for Global RF.
+
+    For each combination of hyperparameters in param_grid, build the RF with
+    fixed_params plus the grid params, train on train_df, and evaluate directly
+    on test_df. Returns the merged best parameters and all results sorted by
+    test-set position accuracy.
+    """
     _validate_direct_search_frames(train_df, test_df)
     columns = feature_columns(train_df)
     rows = []
@@ -136,7 +167,8 @@ def tune_global_rf(
     combos = list(product(*[param_grid[name] for name in param_names]))
 
     for combo_idx, values in enumerate(combos, start=1):
-        params = dict(zip(param_names, values))
+        grid_params = dict(zip(param_names, values))
+        params = {**fixed_params, **grid_params}
         model = _random_forest_classifier(random_state=random_state, **params)
         model.fit(train_df[columns], train_df["location"].astype(str))
         pred_locations = model.predict(test_df[columns])
@@ -146,12 +178,12 @@ def tune_global_rf(
             row_spacing=row_spacing,
             column_spacing=column_spacing,
         )
-        rows.append({**params, **metrics})
+        rows.append({**_result_params(params), **metrics})
         if verbose >= 1:
             _print_progress(combo_idx, len(combos), params, metrics["position_accuracy"])
 
     results_df = _sorted_results(rows)
-    best_params = {name: results_df.iloc[0][name] for name in param_names}
+    best_params = _params_from_result_row(results_df.iloc[0])
     return best_params, results_df
 
 
@@ -160,6 +192,7 @@ def tune_hierarchical_rf(
     test_df: pd.DataFrame,
     *,
     param_grid: dict,
+    fixed_params: dict,
     random_state: int = 42,
     row_spacing: float = 1.0,
     column_spacing: float = 1.0,
@@ -167,14 +200,20 @@ def tune_hierarchical_rf(
     room_local_esps: dict[int, tuple[str, ...]] | None = None,
     verbose: int = 1,
 ) -> tuple[dict, pd.DataFrame]:
-    """Direct test-set grid search for the Hierarchical RF pipeline."""
+    """Direct test-set grid search for the Hierarchical RF pipeline.
+
+    The same merged RF hyperparameters are used for every hierarchical RF stage.
+    Returns the merged best parameters and all results sorted by test-set
+    position accuracy.
+    """
     _validate_direct_search_frames(train_df, test_df)
     rows = []
     param_names = list(param_grid.keys())
     combos = list(product(*[param_grid[name] for name in param_names]))
 
     for combo_idx, values in enumerate(combos, start=1):
-        params = dict(zip(param_names, values))
+        grid_params = dict(zip(param_names, values))
+        params = {**fixed_params, **grid_params}
         model = train_hierarchical_position_classifier(
             train_df,
             random_state=random_state,
@@ -192,12 +231,12 @@ def tune_hierarchical_rf(
         metrics["room_accuracy"] = float(
             (pred_rooms == test_df["label"].astype(int).to_numpy()).mean()
         )
-        rows.append({**params, **metrics})
+        rows.append({**_result_params(params), **metrics})
         if verbose >= 1:
             _print_progress(combo_idx, len(combos), params, metrics["position_accuracy"])
 
     results_df = _sorted_results(rows)
-    best_params = {name: results_df.iloc[0][name] for name in param_names}
+    best_params = _params_from_result_row(results_df.iloc[0])
     return best_params, results_df
 
 
@@ -238,10 +277,28 @@ def _position_metrics(
 
 
 def _sorted_results(rows: list[dict]) -> pd.DataFrame:
-    return pd.DataFrame(rows).sort_values(
+    results = pd.DataFrame(rows).sort_values(
         "position_accuracy",
         ascending=False,
     ).reset_index(drop=True)
+    ordered = [
+        *[col for col in RF_PARAM_COLUMNS if col in results.columns],
+        "position_accuracy",
+        *[col for col in ["room_accuracy"] if col in results.columns],
+        "mean_distance_error",
+        "median_distance_error",
+        "rmse_distance_error",
+    ]
+    remaining = [col for col in results.columns if col not in ordered]
+    return results[ordered + remaining]
+
+
+def _result_params(params: dict) -> dict:
+    return {name: params.get(name) for name in RF_PARAM_COLUMNS}
+
+
+def _params_from_result_row(row: pd.Series) -> dict:
+    return {name: row[name] for name in RF_PARAM_COLUMNS if name in row}
 
 
 def _print_progress(
@@ -252,9 +309,9 @@ def _print_progress(
 ) -> None:
     print(
         f"[grid {combo_idx}/{combo_count}] "
-        f"n_est={params.get('n_estimators')} "
-        f"max_feat={params.get('max_features')} "
-        f"min_leaf={params.get('min_samples_leaf')} -> acc={accuracy:.4f}"
+        f"max_depth={params.get('max_depth')} "
+        f"split={params.get('min_samples_split')} "
+        f"leaf={params.get('min_samples_leaf')} -> acc={accuracy:.4f}"
     )
 
 
