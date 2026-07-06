@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GridSearchCV, GroupKFold
 
-from hierarchical_position_classifier import (
+from utils.hierarchical_position_classifier import (
     _distance_errors,
     _random_forest_classifier,
     feature_columns,
