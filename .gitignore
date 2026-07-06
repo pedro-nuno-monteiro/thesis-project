@@ -8,6 +8,7 @@ __pycache__/
 
 # Data — never commit
 CSI DATA/
+data/
 *.csv
 
 # Distribution / packaging

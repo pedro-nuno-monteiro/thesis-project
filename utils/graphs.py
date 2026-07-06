@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from matplotlib.axes import Axes
 
-    from hierarchical_position_classifier import HierarchicalPositionClassifier
+    from utils.hierarchical_position_classifier import HierarchicalPositionClassifier
 
 FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, str]]]]]
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]

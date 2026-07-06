@@ -7,8 +7,9 @@ USER_NAMES = {
     "01": "Pedro Monteiro",
     "02": "Guilherme Cabaço",
     "03": "Henrique",
-    "03": "João Nascimento",
-    "03": "David Machado",
+    "04": "João Nascimento",
+    "05": "David Machado",
+    "06": "Óscar Martins",
 }
 
 # scenario_id - location_x-location_y - user_id - esp_id - trial - timestamp.csv
