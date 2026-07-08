@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import hashlib
 import json
 import subprocess
 import sys
@@ -60,11 +61,58 @@ def make_feat_key(opts: dict[str, Any]) -> str:
 
 
 def get_cache_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> Path:
-    return CACHE_DIR / f"preproc={make_preproc_key(preproc_opts)}" / f"feat={make_feat_key(feat_opts)}"
+    return (
+        CACHE_DIR
+        / f"preproc={make_preproc_key(preproc_opts)}"
+        / f"feat={make_feat_key(feat_opts)}"
+    )
 
 
 def get_results_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> Path:
-    return RESULTS_ROOT / f"preproc={make_preproc_key(preproc_opts)}" / f"feat={make_feat_key(feat_opts)}"
+    return (
+        RESULTS_ROOT
+        / f"preproc={make_preproc_key(preproc_opts)}"
+        / f"feat={make_feat_key(feat_opts)}"
+    )
+
+
+def predictions_path(results_dir: Path, model: str, band: str, split_mode: str) -> Path:
+    """Return the parquet path for a model/band/split prediction dataframe."""
+    return (
+        Path(results_dir)
+        / "predictions"
+        / f"{_band_stem(band)}__{_band_stem(model)}__{_band_stem(split_mode)}.parquet"
+    )
+
+
+def save_predictions(
+    df: pd.DataFrame,
+    results_dir: Path,
+    model: str,
+    band: str,
+    split_mode: str,
+) -> None:
+    """Persist prediction rows as parquet for analysis without retraining."""
+    path = predictions_path(results_dir, model, band, split_mode)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".parquet.tmp")
+    df.to_parquet(tmp, index=False)
+    tmp.replace(path)
+    print(f"[predictions] Saved {path}")
+
+
+def load_predictions(
+    results_dir: Path,
+    model: str,
+    band: str,
+    split_mode: str,
+) -> pd.DataFrame | None:
+    """Load persisted predictions, returning None when no cache file exists."""
+    path = predictions_path(results_dir, model, band, split_mode)
+    if not path.exists():
+        return None
+    print(f"[predictions cache hit] {path}")
+    return pd.read_parquet(path)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -261,6 +309,26 @@ def write_manifest(
         f"{_band_stem(band)}_windows": len(df)
         for band, df in feature_dataframes.items()
     }
+    feature_matrix_shapes = {
+        band: {
+            "rows": int(df.shape[0]),
+            "columns": int(df.shape[1]),
+            "feature_columns": int(
+                len([col for col in df.columns if col not in _EXPECTED_METADATA_COLS])
+            ),
+        }
+        for band, df in feature_dataframes.items()
+    }
+    config_payload = {
+        "preprocessing_options": preproc_opts,
+        "feature_extraction_options": feat_opts,
+        "classifier_hyperparameters": classifier_params,
+        "splits": splits,
+        "test_size": test_size,
+    }
+    config_hash = hashlib.sha256(
+        json.dumps(config_payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
 
     manifest_path = results_dir / "manifest.json"
     existing_manifest: dict[str, Any] = {}
@@ -282,9 +350,11 @@ def write_manifest(
         "preprocessing_options": preproc_opts,
         "feature_extraction_options": feat_opts,
         "classifier_hyperparameters": classifier_params,
+        "config_hash": config_hash,
         "splits": splits,
         "test_size": test_size,
         "dataset_sizes": dataset_sizes,
+        "feature_matrix_shapes": feature_matrix_shapes,
     }
     if tuned_hyperparameters is None:
         tuned_hyperparameters = existing_manifest.get("tuned_hyperparameters")

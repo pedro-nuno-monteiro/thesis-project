@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from matplotlib.axes import Axes
 
-    from utils.hierarchical_position_classifier import HierarchicalPositionClassifier
+    from paper_utils.hierarchical_position_classifier import HierarchicalPositionClassifier
 
 FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, str]]]]]
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
@@ -2871,7 +2871,7 @@ def plot_position_confusion_by_true_room(
     """Plot end-to-end position confusion matrices for each true room.
 
     If save_path is provided it is treated as a directory; one file per room
-    is saved as ``{save_path}/confusion_room_{room}.png``.
+    is saved as ``{save_path}/confusion_room_{room}.pdf``.
     """
     dataset_predictions = _loc_dataset_predictions(predictions, dataset=dataset)
 
@@ -2881,7 +2881,7 @@ def plot_position_confusion_by_true_room(
             continue
         room_save = None
         if save_path is not None:
-            room_save = Path(save_path) / f"confusion_room_{room}.png"
+            room_save = Path(save_path) / f"confusion_room_{room}.pdf"
         _plot_position_confusion_matrix(
             room_predictions,
             title=f"{dataset} - position confusion | true room {room}",
@@ -2900,7 +2900,7 @@ def plot_position_confusion_when_room_correct(
     """Plot second-stage position confusion matrices after correct room routing.
 
     If save_path is provided it is treated as a directory; one file per room
-    is saved as ``{save_path}/confusion_routed_room_{room}.png``.
+    is saved as ``{save_path}/confusion_routed_room_{room}.pdf``.
     """
     dataset_predictions = _loc_dataset_predictions(predictions, dataset=dataset)
 
@@ -2913,7 +2913,7 @@ def plot_position_confusion_when_room_correct(
             continue
         room_save = None
         if save_path is not None:
-            room_save = Path(save_path) / f"confusion_routed_room_{room}.png"
+            room_save = Path(save_path) / f"confusion_routed_room_{room}.pdf"
         _plot_position_confusion_matrix(
             room_predictions,
             title=f"{dataset} - position confusion | correctly routed room {room}",
@@ -2966,7 +2966,7 @@ def plot_band_error_cdf(
     """CDF of distance error per frequency band for one model, one figure per split.
 
     If save_path is provided it is treated as a directory.  One file per split
-    is saved as ``{save_path}/cdf_{model_slug}_all-bands_{split}.png``.
+    is saved as ``{save_path}/cdf_{model_slug}_all-bands_{split}.pdf``.
     """
     _loc_validate_columns(predictions, {"distance_error", "split", "dataset"})
     splits = order_existing_values(predictions["split"].astype(str).unique(), split_modes)
@@ -2998,7 +2998,7 @@ def plot_band_error_cdf(
         fig.suptitle(f"Position error CDF by frequency band - {model_label}")
         fig.tight_layout()
         if save_path is not None:
-            fname = f"cdf_{_fname_slug(model_label)}_all-bands_{split}.png"
+            fname = f"cdf_{_fname_slug(model_label)}_all-bands_{split}.pdf"
             fig.savefig(Path(save_path) / fname, dpi=150, bbox_inches="tight")
         plt.show()
 
@@ -3014,7 +3014,7 @@ def plot_band_error_boxplot(
     """Boxplot of distance error per frequency band for one model, one figure per split.
 
     If save_path is provided it is treated as a directory.  One file per split
-    is saved as ``{save_path}/boxplot_{model_slug}_all-bands_{split}.png``.
+    is saved as ``{save_path}/boxplot_{model_slug}_all-bands_{split}.pdf``.
     """
     _loc_validate_columns(predictions, {"distance_error", "split", "dataset"})
     splits = order_existing_values(predictions["split"].astype(str).unique(), split_modes)
@@ -3047,7 +3047,7 @@ def plot_band_error_boxplot(
         fig.suptitle(f"Distance error by frequency band - {model_label}")
         fig.tight_layout()
         if save_path is not None:
-            fname = f"boxplot_{_fname_slug(model_label)}_all-bands_{split}.png"
+            fname = f"boxplot_{_fname_slug(model_label)}_all-bands_{split}.pdf"
             fig.savefig(Path(save_path) / fname, dpi=150, bbox_inches="tight")
         plt.show()
 
