@@ -1,12 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import numpy as np
 import pandas as pd
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 AgcGainMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
@@ -210,26 +205,3 @@ def process_magnitude_data(  # noqa: PLR0913
                         )
 
     return processed_data, pd.DataFrame(summary_rows)
-
-
-def summarize_magnitude_processing(
-    summary: pd.DataFrame,
-    options: Mapping[str, object],
-) -> pd.DataFrame:
-    shape_counts = (
-        dict(summary.groupby(["samples", "subcarriers"]).size()) if not summary.empty else {}
-    )
-    return pd.DataFrame(
-        [
-            {
-                "trials": len(summary),
-                "agc_compensated_trials": int(summary["agc_compensated"].sum())
-                if not summary.empty
-                else 0,
-                "filter": options.get("filter_method"),
-                "filter_window": options.get("filter_window"),
-                "normalization": options.get("normalization"),
-                "shape_counts": shape_counts,
-            },
-        ],
-    )
