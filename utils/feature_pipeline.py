@@ -199,6 +199,7 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
         df[feature_columns] = df[feature_columns].astype("float32")
     return df
 
+
 # function that is called by the main script
 # builds three dataframes, one for each frequency scenario, and returns them as a tuple
 def build_frequency_feature_dataframes(
