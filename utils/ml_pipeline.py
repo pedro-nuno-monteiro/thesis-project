@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import importlib.metadata
 import itertools
 import time
 from pathlib import Path
@@ -21,7 +22,9 @@ from utils.global_position_classifier import (
     feature_columns,
     location_distance_error,
     room_label_for_location,
+    run_global_lovo_experiment,
     run_global_position_experiment,
+    split_lovo_folds,
     split_dataframe,
 )
 from utils.import_data import get_csv_files, sort_meta_info
@@ -188,6 +191,9 @@ def run_global_baselines(  # noqa: PLR0913
     """Run every requested global ML baseline and persist summary/manifest files."""
     predictions_by_key = {}
     summary_rows = []
+    lovo_per_fold_rows = []
+    lovo_summary_rows = []
+    lovo_fold_user_ids: dict[str, list[str]] = {}
 
     for band in bands_to_run:
         if band not in feature_dataframes:
@@ -197,23 +203,55 @@ def run_global_baselines(  # noqa: PLR0913
         for model_name in models_to_run:
             params = params_lookup[(model_name, band)]
             for split_mode in split_modes:
-                _, predictions, metrics = run_global_position_experiment(
-                    dataframe,
-                    dataset_name=band,
-                    model_name=model_name,
-                    params=params,
-                    split_mode=split_mode,
-                    test_size=test_size,
-                    random_state=random_state,
-                    row_spacing=row_spacing,
-                    column_spacing=column_spacing,
-                    n_blocks=n_blocks,
-                    n_jobs=n_jobs,
-                    results_dir=results_dir,
-                    force_retrain=force_retrain,
-                    save_prediction_cache=save_predictions,
-                    svm_fallback_seconds=svm_fallback_seconds,
-                )
+                if split_mode == "lovo":
+                    predictions, per_fold_metrics, metrics = run_global_lovo_experiment(
+                        dataframe,
+                        dataset_name=band,
+                        model_name=model_name,
+                        params=params,
+                        random_state=random_state,
+                        row_spacing=row_spacing,
+                        column_spacing=column_spacing,
+                        n_jobs=n_jobs,
+                        results_dir=results_dir,
+                        force_retrain=force_retrain,
+                        save_prediction_cache=save_predictions,
+                        svm_fallback_seconds=svm_fallback_seconds,
+                    )
+                    per_fold_metrics = per_fold_metrics.copy()
+                    per_fold_metrics.insert(0, "dataset", band)
+                    per_fold_metrics.insert(0, "model", model_name)
+                    lovo_per_fold_rows.extend(per_fold_metrics.to_dict("records"))
+                    lovo_summary_rows.append(
+                        {
+                            "dataset": band,
+                            "model": model_name,
+                            **params,
+                            **metrics,
+                        }
+                    )
+                    lovo_fold_user_ids[band] = [
+                        str(test_df["user"].iloc[0])
+                        for _, test_df in split_lovo_folds(dataframe)
+                    ]
+                else:
+                    _, predictions, metrics = run_global_position_experiment(
+                        dataframe,
+                        dataset_name=band,
+                        model_name=model_name,
+                        params=params,
+                        split_mode=split_mode,
+                        test_size=test_size,
+                        random_state=random_state,
+                        row_spacing=row_spacing,
+                        column_spacing=column_spacing,
+                        n_blocks=n_blocks,
+                        n_jobs=n_jobs,
+                        results_dir=results_dir,
+                        force_retrain=force_retrain,
+                        save_prediction_cache=save_predictions,
+                        svm_fallback_seconds=svm_fallback_seconds,
+                    )
                 predictions_by_key[(model_name, band, split_mode)] = predictions
                 summary_rows.append(
                     {
@@ -228,6 +266,10 @@ def run_global_baselines(  # noqa: PLR0913
     summary = pd.DataFrame(summary_rows)
     summary_dir.mkdir(parents=True, exist_ok=True)
     summary.to_csv(summary_dir / "global_summary.csv", index=False)
+    if lovo_per_fold_rows:
+        pd.DataFrame(lovo_per_fold_rows).to_csv(summary_dir / "lovo_per_fold.csv", index=False)
+    if lovo_summary_rows:
+        pd.DataFrame(lovo_summary_rows).to_csv(summary_dir / "lovo_summary.csv", index=False)
     write_manifest(
         results_dir,
         preproc_opts,
@@ -240,6 +282,13 @@ def run_global_baselines(  # noqa: PLR0913
         splits=list(split_modes),
         test_size=test_size,
         feature_dataframes={band: feature_dataframes[band] for band in bands_to_run},
+        lovo_metadata=_build_lovo_manifest_metadata(
+            lovo_fold_user_ids,
+            params_lookup=params_lookup,
+            models_to_run=models_to_run,
+            bands_to_run=bands_to_run,
+            enabled="lovo" in split_modes,
+        ),
     )
     return summary, predictions_by_key
 
@@ -284,7 +333,7 @@ def master_results_table(
                 "model": model,
                 "dataset": band,
                 "split": split_mode,
-                **compute_localization_metrics(group),
+                **_metrics_for_prediction_group(group, split_mode=str(split_mode)),
             }
         )
     table = pd.DataFrame(rows)
@@ -310,14 +359,15 @@ def master_results_table(
 def per_room_position_accuracy_table(predictions: pd.DataFrame) -> pd.DataFrame:
     """Build per-room position accuracy rows for every model and band."""
     rows = []
-    for (model, band, room), group in predictions.groupby(
-        ["model", "dataset", "true_room"],
+    for (model, band, split_mode, room), group in predictions.groupby(
+        ["model", "dataset", "split_mode", "true_room"],
         sort=False,
     ):
         rows.append(
             {
                 "model": model,
                 "dataset": band,
+                "split": split_mode,
                 "true_room": room,
                 "samples": len(group),
                 "position_accuracy": float(
@@ -325,7 +375,11 @@ def per_room_position_accuracy_table(predictions: pd.DataFrame) -> pd.DataFrame:
                 ),
             }
         )
-    return pd.DataFrame(rows).sort_values(["dataset", "model", "true_room"]).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["dataset", "model", "split", "true_room"])
+        .reset_index(drop=True)
+    )
 
 
 def save_analysis_tables(
@@ -348,12 +402,164 @@ def save_analysis_tables(
     )
 
 
+def load_lovo_summary_tables(summary_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load persisted LOVO summary tables without triggering training."""
+    per_fold_path = summary_dir / "lovo_per_fold.csv"
+    summary_path = summary_dir / "lovo_summary.csv"
+    missing = [str(path) for path in (per_fold_path, summary_path) if not path.exists()]
+    if missing:
+        msg = "Missing LOVO summary files. Run the Global baseline cell first.\n"
+        raise FileNotFoundError(msg + "\n".join(missing))
+    return pd.read_csv(per_fold_path), pd.read_csv(summary_path)
+
+
+def lovo_aggregated_analysis_table(lovo_summary: pd.DataFrame) -> pd.DataFrame:
+    """Build the model x band LOVO table with mean +/- std metric strings."""
+    metrics = [
+        ("position_accuracy", "position_accuracy_mean_std"),
+        ("macro_f1", "macro_f1_mean_std"),
+        ("room_accuracy", "room_accuracy_mean_std"),
+        ("mean_distance_error", "mean_distance_error_mean_std"),
+        ("median_distance_error", "median_distance_error_mean_std"),
+        ("rmse_distance_error", "rmse_distance_error_mean_std"),
+        ("p90_distance_error", "p90_distance_error_mean_std"),
+    ]
+    rows = []
+    for _, row in lovo_summary.iterrows():
+        output_row = {"model": row["model"], "dataset": row["dataset"]}
+        for metric, output_col in metrics:
+            output_row[output_col] = _format_mean_std(
+                row.get(f"{metric}_mean", np.nan),
+                row.get(f"{metric}_std", np.nan),
+            )
+        rows.append(output_row)
+    return pd.DataFrame(rows).sort_values(["dataset", "model"]).reset_index(drop=True)
+
+
+def save_lovo_analysis_table(table: pd.DataFrame, *, tables_dir: Path) -> None:
+    """Write the persisted LOVO analysis table to CSV and LaTeX."""
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    table.to_csv(tables_dir / "lovo_aggregated_table.csv", index=False)
+    (tables_dir / "lovo_aggregated_table.tex").write_text(
+        table.to_latex(index=False, escape=False),
+        encoding="utf-8",
+    )
+
+
+def plot_lovo_fold_spread(
+    lovo_per_fold: pd.DataFrame,
+    *,
+    bands: tuple[str, ...],
+    model: str = "RF",
+    save_path: Path | None = None,
+) -> None:
+    """Plot held-out-user position accuracy spread for the selected model."""
+    import matplotlib.pyplot as plt
+
+    filtered = lovo_per_fold.loc[lovo_per_fold["model"] == model]
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    values = []
+    labels = []
+    positions = []
+    for index, band in enumerate(bands, start=1):
+        band_values = pd.to_numeric(
+            filtered.loc[filtered["dataset"] == band, "position_accuracy"],
+            errors="coerce",
+        ).dropna()
+        if band_values.empty:
+            continue
+        values.append(band_values.to_numpy(dtype=float))
+        labels.append(band)
+        positions.append(index)
+
+    if values:
+        ax.boxplot(values, positions=positions, labels=labels, widths=0.45)
+        for position, band_values in zip(positions, values):
+            offsets = np.linspace(-0.08, 0.08, num=len(band_values))
+            ax.scatter(
+                np.full(len(band_values), position) + offsets,
+                band_values,
+                color="black",
+                s=28,
+                zorder=3,
+            )
+    else:
+        ax.text(0.5, 0.5, "No LOVO fold metrics", ha="center", va="center")
+    ax.set_ylabel("Position accuracy")
+    ax.set_title(f"LOVO held-out-user spread - {model}")
+    ax.set_ylim(0, 1.02)
+    ax.grid(axis="y", alpha=0.3)
+    _save_plot(fig, save_path)
+
+
+def plot_block_vs_lovo_position_accuracy(
+    global_summary: pd.DataFrame,
+    lovo_summary: pd.DataFrame,
+    *,
+    bands: tuple[str, ...],
+    model: str = "RF",
+    save_path: Path | None = None,
+) -> None:
+    """Plot block position accuracy beside LOVO fold-mean accuracy."""
+    import matplotlib.pyplot as plt
+
+    rows = []
+    for band in bands:
+        block_row = global_summary.loc[
+            (global_summary["model"] == model)
+            & (global_summary["dataset"] == band)
+            & (global_summary["split"] == "block")
+        ]
+        lovo_row = lovo_summary.loc[
+            (lovo_summary["model"] == model) & (lovo_summary["dataset"] == band)
+        ]
+        if block_row.empty or lovo_row.empty:
+            continue
+        rows.append(
+            {
+                "dataset": band,
+                "block": float(block_row.iloc[0]["position_accuracy"]),
+                "lovo": float(lovo_row.iloc[0]["position_accuracy_mean"]),
+            }
+        )
+
+    fig, ax = plt.subplots(figsize=(7.5, 4.2))
+    if rows:
+        x = np.arange(len(rows))
+        width = 0.35
+        block_values = np.array([row["block"] for row in rows])
+        lovo_values = np.array([row["lovo"] for row in rows])
+        ax.bar(x - width / 2, block_values, width, label="Block")
+        ax.bar(x + width / 2, lovo_values, width, label="LOVO mean")
+        for idx, (block_value, lovo_value) in enumerate(zip(block_values, lovo_values)):
+            gap = block_value - lovo_value
+            ax.text(
+                idx,
+                max(block_value, lovo_value) + 0.025,
+                f"gap {gap:+.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+        ax.set_xticks(x)
+        ax.set_xticklabels([row["dataset"] for row in rows])
+        ax.legend()
+    else:
+        ax.text(0.5, 0.5, "Need both block and LOVO RF results", ha="center", va="center")
+    ax.set_ylabel("Position accuracy")
+    ax.set_title(f"Block vs LOVO cross-user generalization cost - {model}")
+    ax.set_ylim(0, 1.08)
+    ax.grid(axis="y", alpha=0.3)
+    _save_plot(fig, save_path)
+
+
 def best_confusion_predictions(
     predictions: pd.DataFrame,
     results_table: pd.DataFrame,
     *,
     dataset: str,
     model: str,
+    split: str | None = None,
 ) -> tuple[str, pd.DataFrame]:
     """Return predictions for the configured or best-performing confusion model."""
     if model == "best":
@@ -363,15 +569,108 @@ def best_confusion_predictions(
             raise ValueError(msg)
         best_row = candidates.sort_values("position_accuracy", ascending=False).iloc[0]
         model_name = str(best_row["model"])
+        split_name = str(best_row["split"])
     else:
         model_name = model
+        split_candidates = predictions.loc[
+            (predictions["dataset"] == dataset) & (predictions["model"] == model_name),
+            "split_mode",
+        ].astype(str)
+        if split is not None:
+            split_name = split
+        elif "block" in set(split_candidates):
+            split_name = "block"
+        elif not split_candidates.empty:
+            split_name = str(split_candidates.iloc[0])
+        else:
+            split_name = ""
     filtered = predictions.loc[
-        (predictions["dataset"] == dataset) & (predictions["model"] == model_name)
+        (predictions["dataset"] == dataset)
+        & (predictions["model"] == model_name)
+        & (predictions["split_mode"].astype(str) == split_name)
     ].copy()
     if filtered.empty:
-        msg = f"No predictions for dataset={dataset!r}, model={model_name!r}."
+        msg = (
+            f"No predictions for dataset={dataset!r}, model={model_name!r}, "
+            f"split={split_name!r}."
+        )
         raise ValueError(msg)
     return model_name, filtered
+
+
+def _metrics_for_prediction_group(group: pd.DataFrame, *, split_mode: str) -> dict[str, float]:
+    if split_mode == "lovo" and "held_out_user" in group.columns:
+        fold_rows = [
+            compute_localization_metrics(fold_group)
+            for _, fold_group in group.groupby("held_out_user", sort=True)
+        ]
+        metrics: dict[str, float] = {}
+        for metric_name in [
+            "position_accuracy",
+            "macro_f1",
+            "room_accuracy",
+            "mean_distance_error",
+            "median_distance_error",
+            "rmse_distance_error",
+            "p90_distance_error",
+        ]:
+            values = pd.to_numeric(
+                pd.Series([row[metric_name] for row in fold_rows]),
+                errors="coerce",
+            )
+            metrics[metric_name] = float(values.mean())
+        metrics["samples"] = float(len(group))
+        return metrics
+    return compute_localization_metrics(group)
+
+
+def _build_lovo_manifest_metadata(
+    fold_user_ids: dict[str, list[str]],
+    *,
+    params_lookup: dict[tuple[str, str], dict[str, Any]],
+    models_to_run: tuple[str, ...],
+    bands_to_run: tuple[str, ...],
+    enabled: bool,
+) -> dict[str, Any] | None:
+    if not enabled:
+        return None
+    return {
+        "timestamp": pd.Timestamp.now(tz="UTC").isoformat(),
+        "sklearn_version": _package_version("scikit-learn"),
+        "fold_user_ids": fold_user_ids,
+        "classifier_hyperparameters": {
+            f"{model}:{band}": params_lookup[(model, band)]
+            for model in models_to_run
+            for band in bands_to_run
+        },
+        "hyperparameter_provenance": (
+            "LOVO reuses block-split tuned/default hyperparameters; no nested CV."
+        ),
+    }
+
+
+def _format_mean_std(mean_value: object, std_value: object) -> str:
+    mean_float = pd.to_numeric(pd.Series([mean_value]), errors="coerce").iloc[0]
+    std_float = pd.to_numeric(pd.Series([std_value]), errors="coerce").iloc[0]
+    if pd.isna(mean_float) or pd.isna(std_float):
+        return "nan"
+    return f"{float(mean_float):.4f} +/- {float(std_float):.4f}"
+
+
+def _save_plot(fig, save_path: Path | None) -> None:
+    fig.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, bbox_inches="tight")
+    import matplotlib.pyplot as plt
+
+    plt.show()
+
+
+def _package_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def _grid_search_model_band(  # noqa: PLR0913
