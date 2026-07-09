@@ -1,17 +1,18 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import re
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from sklearn.pipeline import Pipeline
 
-from utils.cache import load_predictions, save_predictions
+from utils.cache import load_predictions, prediction_cache_metadata, save_predictions
 from utils.metrics import compute_localization_metrics
 from utils.models import build_estimator
 
@@ -248,6 +249,23 @@ def run_global_position_experiment(  # noqa: PLR0913
     resolved_model_name = model_name.upper()
     resolved_params = dict(params)
 
+    if split_mode == "lovo":
+        predictions, _, metrics = run_global_lovo_experiment(
+            df,
+            dataset_name=dataset_name,
+            model_name=resolved_model_name,
+            params=resolved_params,
+            random_state=random_state,
+            n_jobs=n_jobs,
+            results_dir=results_dir,
+            force_retrain=force_retrain,
+            save_prediction_cache=save_prediction_cache,
+            svm_fallback_seconds=svm_fallback_seconds,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
+        return None, predictions, metrics
+
     if results_dir is not None and not force_retrain:
         cached_predictions = load_predictions(
             Path(results_dir),
@@ -276,8 +294,8 @@ def run_global_position_experiment(  # noqa: PLR0913
         n_blocks=n_blocks,
     )
     if isinstance(split_result, list):
-        msg = "LOVO split returns multiple folds and is not wired into the global runner yet."
-        raise NotImplementedError(msg)
+        msg = "Unexpected multi-fold split outside the LOVO dispatch path."
+        raise RuntimeError(msg)
     train_df, test_df = split_result
     columns = feature_columns(train_df)
 
@@ -340,6 +358,197 @@ def run_global_position_experiment(  # noqa: PLR0913
         )
 
     return model, predictions, metrics
+
+
+def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
+    df: pd.DataFrame,
+    *,
+    dataset_name: str,
+    model_name: str,
+    params: dict[str, Any],
+    random_state: int = 42,
+    n_jobs: int = -1,
+    results_dir: Path | str | None = None,
+    force_retrain: bool = False,
+    save_prediction_cache: bool = True,
+    svm_fallback_seconds: float = 30.0 * 60.0,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    """Run leave-one-volunteer-out global classification for one model/band pair."""
+    _validate_grid_spacing(row_spacing=row_spacing, column_spacing=column_spacing)
+    _validate_training_dataframe(df)
+    _validate_required_columns(df, {"location", "group_id", "label", "user"})
+
+    resolved_model_name = model_name.upper()
+    resolved_params = dict(params)
+    folds = split_lovo_folds(df)
+    held_out_users = [_held_out_user(test_df) for _, test_df in folds]
+    result_path = Path(results_dir) if results_dir is not None else None
+
+    _print_lovo_honesty_warnings(df, folds, dataset_name=dataset_name)
+    print(
+        "[LOVO] Hyperparameter provenance: reusing block-split tuned/default "
+        "hyperparameters; no nested CV is run for LOVO."
+    )
+
+    if result_path is not None and not force_retrain:
+        cached_predictions = _load_lovo_cached_predictions(
+            result_path,
+            resolved_model_name,
+            dataset_name,
+            resolved_params,
+            held_out_users,
+            save_prediction_cache=save_prediction_cache,
+        )
+        if cached_predictions is not None:
+            per_fold_metrics, aggregated_metrics = _lovo_metrics_from_predictions(
+                cached_predictions,
+            )
+            aggregated_metrics.update(
+                {
+                    "fit_seconds": 0.0,
+                    "predict_seconds": 0.0,
+                    "wall_seconds": 0.0,
+                    "used_estimator": "cached_predictions",
+                }
+            )
+            return cached_predictions, per_fold_metrics, aggregated_metrics
+
+    if resolved_model_name == "SVM":
+        print("[SVM] sklearn SVC is single-threaded; n_jobs is not used by SVC.")
+
+    fold_prediction_frames: list[pd.DataFrame] = []
+    fold_metric_rows: list[dict[str, Any]] = []
+    total_started_at = time.perf_counter()
+
+    for fold_index, ((train_df, test_df), held_out_user) in enumerate(
+        zip(folds, held_out_users),
+        start=1,
+    ):
+        fold_label = _lovo_fold_label(held_out_user)
+        print(
+            f"[LOVO] {dataset_name} / {resolved_model_name} fold "
+            f"{fold_index}/{len(folds)}: held_out_user={held_out_user}"
+        )
+        columns = feature_columns(train_df)
+        model = build_estimator(resolved_model_name, resolved_params, random_state, n_jobs)
+
+        fold_started_at = time.perf_counter()
+        fit_started_at = time.perf_counter()
+        model.fit(train_df[columns], train_df["location"].astype(str))
+        fit_seconds = time.perf_counter() - fit_started_at
+        used_estimator = _estimator_name(model)
+
+        if (
+            resolved_model_name == "SVM"
+            and dataset_name == "Fusion"
+            and resolved_params.get("kernel", "rbf") == "rbf"
+            and fit_seconds > svm_fallback_seconds
+        ):
+            fallback_params = {**resolved_params, "kernel": "linear_svc"}
+            print(
+                "[SVM] Fusion RBF fit exceeded "
+                f"{svm_fallback_seconds:.0f}s; refitting with LinearSVC fallback."
+            )
+            model = build_estimator(resolved_model_name, fallback_params, random_state, n_jobs)
+            fit_started_at = time.perf_counter()
+            model.fit(train_df[columns], train_df["location"].astype(str))
+            fit_seconds = time.perf_counter() - fit_started_at
+            used_estimator = "LinearSVC_fallback"
+
+        predict_started_at = time.perf_counter()
+        pred_positions = model.predict(test_df[columns])
+        predict_seconds = time.perf_counter() - predict_started_at
+        fold_predictions = build_global_predictions_dataframe(
+            test_df,
+            pred_positions,
+            dataset_name=dataset_name,
+            model_name=resolved_model_name,
+            split_mode="lovo",
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
+        fold_predictions["held_out_user"] = held_out_user
+        fold_wall_seconds = time.perf_counter() - fold_started_at
+        fold_metrics = compute_localization_metrics(fold_predictions)
+        fold_metric_rows.append(
+            {
+                "held_out_user": held_out_user,
+                **fold_metrics,
+                "n_test_windows": int(len(fold_predictions)),
+                "fit_seconds": float(fit_seconds),
+                "predict_seconds": float(predict_seconds),
+                "wall_seconds": float(fold_wall_seconds),
+                "used_estimator": used_estimator,
+            }
+        )
+        fold_prediction_frames.append(fold_predictions)
+
+        if result_path is not None and save_prediction_cache:
+            save_predictions(
+                fold_predictions,
+                result_path,
+                resolved_model_name,
+                dataset_name,
+                "lovo",
+                fold=fold_label,
+                metadata=prediction_cache_metadata(
+                    model=resolved_model_name,
+                    band=dataset_name,
+                    split_mode="lovo",
+                    params=resolved_params,
+                    fold=fold_label,
+                ),
+            )
+
+        print(
+            f"[LOVO] fold {fold_index}/{len(folds)} done: "
+            f"acc={fold_metrics['position_accuracy']:.4f} "
+            f"fit={fit_seconds:.1f}s predict={predict_seconds:.1f}s "
+            f"wall={fold_wall_seconds:.1f}s"
+        )
+        del model
+        gc.collect()
+
+    predictions = pd.concat(fold_prediction_frames, ignore_index=True)
+    if len(predictions) != len(df):
+        msg = f"LOVO predictions should cover {len(df)} windows, got {len(predictions)}."
+        raise RuntimeError(msg)
+
+    per_fold_metrics = pd.DataFrame(fold_metric_rows)
+    aggregated_metrics = _aggregate_lovo_metrics(per_fold_metrics)
+    aggregated_metrics.update(
+        {
+            "fit_seconds": float(per_fold_metrics["fit_seconds"].sum()),
+            "predict_seconds": float(per_fold_metrics["predict_seconds"].sum()),
+            "wall_seconds": float(time.perf_counter() - total_started_at),
+            "used_estimator": ",".join(sorted(set(per_fold_metrics["used_estimator"]))),
+        }
+    )
+
+    if result_path is not None and save_prediction_cache:
+        save_predictions(
+            predictions,
+            result_path,
+            resolved_model_name,
+            dataset_name,
+            "lovo",
+            metadata=prediction_cache_metadata(
+                model=resolved_model_name,
+                band=dataset_name,
+                split_mode="lovo",
+                params=resolved_params,
+            ),
+        )
+
+    print(
+        f"[LOVO] {dataset_name} / {resolved_model_name} complete: "
+        f"position_accuracy={aggregated_metrics['position_accuracy_mean']:.4f} +/- "
+        f"{aggregated_metrics['position_accuracy_std']:.4f}, "
+        f"total_wall={aggregated_metrics['wall_seconds']:.1f}s"
+    )
+    return predictions, per_fold_metrics, aggregated_metrics
 
 
 def build_global_predictions_dataframe(  # noqa: PLR0913
@@ -418,6 +627,173 @@ def build_global_predictions_dataframe(  # noqa: PLR0913
         },
         columns=GLOBAL_PREDICTION_COLUMNS,
     )
+
+
+def _load_lovo_cached_predictions(
+    results_dir: Path,
+    model_name: str,
+    dataset_name: str,
+    params: dict[str, Any],
+    held_out_users: list[object],
+    *,
+    save_prediction_cache: bool,
+) -> pd.DataFrame | None:
+    concat_metadata = prediction_cache_metadata(
+        model=model_name,
+        band=dataset_name,
+        split_mode="lovo",
+        params=params,
+    )
+    cached_concat = load_predictions(
+        results_dir,
+        model_name,
+        dataset_name,
+        "lovo",
+        expected_metadata=concat_metadata,
+    )
+    if cached_concat is not None:
+        if "held_out_user" not in cached_concat.columns:
+            print("[predictions cache stale] LOVO concat lacks held_out_user.")
+            return None
+        return cached_concat
+
+    fold_frames = []
+    for held_out_user in held_out_users:
+        fold_label = _lovo_fold_label(held_out_user)
+        fold_predictions = load_predictions(
+            results_dir,
+            model_name,
+            dataset_name,
+            "lovo",
+            fold=fold_label,
+            expected_metadata=prediction_cache_metadata(
+                model=model_name,
+                band=dataset_name,
+                split_mode="lovo",
+                params=params,
+                fold=fold_label,
+            ),
+        )
+        if fold_predictions is None:
+            return None
+        if "held_out_user" not in fold_predictions.columns:
+            print(f"[predictions cache stale] LOVO fold {fold_label} lacks held_out_user.")
+            return None
+        fold_frames.append(fold_predictions)
+
+    predictions = pd.concat(fold_frames, ignore_index=True)
+    if save_prediction_cache:
+        save_predictions(
+            predictions,
+            results_dir,
+            model_name,
+            dataset_name,
+            "lovo",
+            metadata=concat_metadata,
+        )
+    return predictions
+
+
+def _lovo_metrics_from_predictions(
+    predictions: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    _validate_required_columns(predictions, {"held_out_user"})
+    rows = []
+    for held_out_user, group in predictions.groupby("held_out_user", sort=True):
+        rows.append(
+            {
+                "held_out_user": held_out_user,
+                **compute_localization_metrics(group),
+                "n_test_windows": int(len(group)),
+            }
+        )
+    per_fold_metrics = pd.DataFrame(rows)
+    return per_fold_metrics, _aggregate_lovo_metrics(per_fold_metrics)
+
+
+def _aggregate_lovo_metrics(per_fold_metrics: pd.DataFrame) -> dict[str, float]:
+    metric_names = [
+        "position_accuracy",
+        "macro_f1",
+        "room_accuracy",
+        "mean_distance_error",
+        "median_distance_error",
+        "rmse_distance_error",
+        "p90_distance_error",
+        "samples",
+    ]
+    aggregated: dict[str, float] = {}
+    for metric_name in metric_names:
+        values = pd.to_numeric(per_fold_metrics[metric_name], errors="coerce")
+        aggregated[f"{metric_name}_mean"] = float(values.mean())
+        aggregated[f"{metric_name}_std"] = float(values.std(ddof=1))
+        if metric_name != "samples":
+            aggregated[metric_name] = aggregated[f"{metric_name}_mean"]
+    sample_values = pd.to_numeric(per_fold_metrics["samples"], errors="coerce")
+    aggregated["samples"] = float(sample_values.sum())
+    aggregated["n_folds"] = float(len(per_fold_metrics))
+    aggregated["n_test_windows"] = float(per_fold_metrics["n_test_windows"].sum())
+    accuracy_values = pd.to_numeric(per_fold_metrics["position_accuracy"], errors="coerce")
+    aggregated["min_fold_position_accuracy"] = float(accuracy_values.min())
+    aggregated["max_fold_position_accuracy"] = float(accuracy_values.max())
+    return aggregated
+
+
+def _print_lovo_honesty_warnings(
+    df: pd.DataFrame,
+    folds: list[tuple[pd.DataFrame, pd.DataFrame]],
+    *,
+    dataset_name: str,
+) -> None:
+    location_user_counts = df.groupby("location", sort=True)["user"].nunique()
+    singleton_positions = sorted(location_user_counts[location_user_counts == 1].index.astype(str))
+    if singleton_positions:
+        affected_windows = int(df["location"].astype(str).isin(singleton_positions).sum())
+        print(
+            f"[LOVO warning] {dataset_name}: {len(singleton_positions)} positions are "
+            f"covered by exactly one user ({affected_windows} windows): "
+            f"{', '.join(singleton_positions)}"
+        )
+        print(
+            "[LOVO warning] Under block split these positions can inflate results via "
+            "user identity; under LOVO they have zero training examples in the held-out "
+            "user's fold."
+        )
+    else:
+        print(f"[LOVO check] {dataset_name}: every observed position has at least two users.")
+
+    all_positions = set(df["location"].astype(str))
+    position_count = len(all_positions)
+    for _, test_df in folds:
+        held_out_user = _held_out_user(test_df)
+        train_df = df.loc[df["user"] != held_out_user]
+        train_positions = set(train_df["location"].astype(str))
+        missing_positions = sorted(all_positions - train_positions)
+        singleton_test_windows = int(
+            test_df["location"].astype(str).isin(singleton_positions).sum()
+        )
+        print(
+            f"[LOVO check] {dataset_name}: held_out_user={held_out_user} training covers "
+            f"{len(train_positions)}/{position_count} observed positions; "
+            f"singleton-position test windows={singleton_test_windows}."
+        )
+        if missing_positions:
+            print(
+                f"[LOVO warning] held_out_user={held_out_user} missing training positions: "
+                f"{', '.join(missing_positions)}"
+            )
+
+
+def _held_out_user(test_df: pd.DataFrame) -> object:
+    users = test_df["user"].dropna().unique()
+    if len(users) != 1:
+        msg = f"Expected exactly one held-out user, got {users!r}."
+        raise ValueError(msg)
+    return users[0]
+
+
+def _lovo_fold_label(held_out_user: object) -> str:
+    return f"user-{held_out_user}"
 
 
 def _split_dataframe_by_blocks(

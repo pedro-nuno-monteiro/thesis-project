@@ -25,6 +25,7 @@ _EXPECTED_METADATA_COLS = {
     "window_idx",
     "label",
 }
+_PREDICTION_METADATA_KEY = b"thesis_prediction_cache_metadata"
 
 
 class _StaleFeatureCache(ValueError):
@@ -76,12 +77,22 @@ def get_results_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) ->
     )
 
 
-def predictions_path(results_dir: Path, model: str, band: str, split_mode: str) -> Path:
+def predictions_path(
+    results_dir: Path,
+    model: str,
+    band: str,
+    split_mode: str,
+    *,
+    fold: str | None = None,
+) -> Path:
     """Return the parquet path for a model/band/split prediction dataframe."""
+    stem = f"{_band_stem(band)}__{_band_stem(model)}__{_band_stem(split_mode)}"
+    if fold is not None:
+        stem = f"{stem}__{_band_stem(fold)}"
     return (
         Path(results_dir)
         / "predictions"
-        / f"{_band_stem(band)}__{_band_stem(model)}__{_band_stem(split_mode)}.parquet"
+        / f"{stem}.parquet"
     )
 
 
@@ -91,13 +102,21 @@ def save_predictions(
     model: str,
     band: str,
     split_mode: str,
+    *,
+    fold: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     """Persist prediction rows as parquet for analysis without retraining."""
-    path = predictions_path(results_dir, model, band, split_mode)
+    path = predictions_path(results_dir, model, band, split_mode, fold=fold)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".parquet.tmp")
-    df.to_parquet(tmp, index=False)
+    if metadata is None:
+        df.to_parquet(tmp, index=False)
+    else:
+        _write_prediction_parquet_with_metadata(df, tmp, metadata)
     tmp.replace(path)
+    if metadata is not None:
+        _write_prediction_metadata(path, metadata)
     print(f"[predictions] Saved {path}")
 
 
@@ -106,13 +125,46 @@ def load_predictions(
     model: str,
     band: str,
     split_mode: str,
+    *,
+    fold: str | None = None,
+    expected_metadata: dict[str, Any] | None = None,
 ) -> pd.DataFrame | None:
     """Load persisted predictions, returning None when no cache file exists."""
-    path = predictions_path(results_dir, model, band, split_mode)
+    path = predictions_path(results_dir, model, band, split_mode, fold=fold)
     if not path.exists():
+        return None
+    if expected_metadata is not None and not _prediction_metadata_matches(
+        path,
+        expected_metadata,
+    ):
+        print(f"[predictions cache stale] {path}")
         return None
     print(f"[predictions cache hit] {path}")
     return pd.read_parquet(path)
+
+
+def prediction_cache_metadata(
+    *,
+    model: str,
+    band: str,
+    split_mode: str,
+    params: dict[str, Any],
+    fold: str | None = None,
+) -> dict[str, Any]:
+    """Return the metadata payload used to validate prediction caches."""
+    normalized_params = _json_normalized(params)
+    return {
+        "schema_version": 1,
+        "model": model,
+        "band": band,
+        "split_mode": split_mode,
+        "fold": fold,
+        "params": normalized_params,
+        "params_hash": hashlib.sha256(
+            json.dumps(normalized_params, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest(),
+        "sklearn_version": _lib_version("scikit-learn"),
+    }
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -120,6 +172,75 @@ def load_predictions(
 def _band_stem(band: str) -> str:
     """'2.4 GHz' → '2_4ghz',  '5 GHz' → '5ghz',  'Fusion' → 'fusion'."""
     return band.lower().replace(".", "_").replace(" ", "")
+
+
+def _prediction_metadata_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".metadata.json")
+
+
+def _write_prediction_metadata(path: Path, metadata: dict[str, Any]) -> None:
+    metadata_path = _prediction_metadata_path(path)
+    tmp = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(_json_normalized(metadata), indent=2), encoding="utf-8")
+    tmp.replace(metadata_path)
+
+
+def _write_prediction_parquet_with_metadata(
+    df: pd.DataFrame,
+    path: Path,
+    metadata: dict[str, Any],
+) -> None:
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError:
+        df.to_parquet(path, index=False)
+        return
+
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    schema_metadata = dict(table.schema.metadata or {})
+    schema_metadata[_PREDICTION_METADATA_KEY] = json.dumps(
+        _json_normalized(metadata),
+        sort_keys=True,
+    ).encode("utf-8")
+    pq.write_table(table.replace_schema_metadata(schema_metadata), path)
+
+
+def _read_prediction_metadata(path: Path) -> dict[str, Any] | None:
+    metadata_path = _prediction_metadata_path(path)
+    if not metadata_path.exists():
+        return _read_prediction_parquet_metadata(path)
+    try:
+        return json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return _read_prediction_parquet_metadata(path)
+
+
+def _read_prediction_parquet_metadata(path: Path) -> dict[str, Any] | None:
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        return None
+    try:
+        parquet_metadata = pq.read_metadata(path).metadata or {}
+        raw_payload = parquet_metadata.get(_PREDICTION_METADATA_KEY)
+        if raw_payload is None:
+            return None
+        return json.loads(raw_payload.decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _prediction_metadata_matches(path: Path, expected_metadata: dict[str, Any]) -> bool:
+    observed = _read_prediction_metadata(path)
+    if observed is None:
+        return False
+    expected = _json_normalized(expected_metadata)
+    return all(observed.get(key) == value for key, value in expected.items())
+
+
+def _json_normalized(payload: Any) -> Any:
+    return json.loads(json.dumps(payload, sort_keys=True, default=str))
 
 
 def _check_schema(df: pd.DataFrame, path: Path) -> None:
@@ -301,6 +422,7 @@ def write_manifest(
     tuned_hyperparameters_direct: dict[str, Any] | None = None,
     tuned_hyperparameters_v1: dict[str, Any] | None = None,
     tuned_hyperparameters_v2: dict[str, Any] | None = None,
+    lovo_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Write a self-describing manifest.json to results_dir."""
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -370,6 +492,10 @@ def write_manifest(
         tuned_hyperparameters_v2 = existing_manifest.get("tuned_hyperparameters_v2")
     if tuned_hyperparameters_v2 is not None:
         manifest["tuned_hyperparameters_v2"] = tuned_hyperparameters_v2
+    if lovo_metadata is None:
+        lovo_metadata = existing_manifest.get("lovo")
+    if lovo_metadata is not None:
+        manifest["lovo"] = lovo_metadata
 
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
     print(f"[results] Manifest written to {manifest_path}")
