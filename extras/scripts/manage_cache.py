@@ -60,16 +60,15 @@ def cmd_list(_args: argparse.Namespace) -> None:
 
         print(f"\n{rel}/  [{size_mb:.1f} MB]")
 
-        agc = preproc.get("apply_agc_compensation", False)
-        filt = preproc.get("filter_method", "none")
         norm = preproc.get("normalization", "none")
-        print(f"  preprocessing: AGC={'on' if agc else 'off'}, filter={filt}, normalization={norm}")
+        scope = preproc.get("baseline_scope", "")
+        scope_text = f", baseline_scope={scope}" if scope else ""
+        print(f"  preprocessing: normalization={norm}{scope_text}")
 
         win = feat.get("window_size", "?")
         step = feat.get("overlap_size", "?")
-        cal = feat.get("calibrate", False)
         all_esps = feat.get("require_all_esps", False)
-        print(f"  feature extraction: window={win}, step={step}, calibrate={cal}, require_all_esps={all_esps}")
+        print(f"  feature extraction: window={win}, step={step}, require_all_esps={all_esps}")
 
         parquet_files = sorted(folder.glob("*.parquet"))
         if parquet_files:

@@ -12,6 +12,7 @@ import pandas as pd
 
 from utils.cache import (
     get_all_dataframes,
+    get_cache_path,
     load_predictions,
     predictions_path,
     write_manifest,
@@ -38,24 +39,23 @@ def load_raw_csi_data(
     *,
     calibration_mode: str,
     csv_options: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any], pd.DataFrame]:
-    """Load CSI CSV files and return magnitude data, AGC gains, and diagnostics."""
+) -> tuple[dict[str, Any], pd.DataFrame]:
+    """Load CSI CSV files and return magnitude data plus diagnostics."""
     all_data_files = get_csv_files(str(data_dir))
     scenarios_id, locations_id, users_id, esps_id, _ = sort_meta_info(str(data_dir))
     print(f"Scenarios present: {', '.join(scenarios_id) or 'none'}")
     print(f"Locations: {len(locations_id)} | Users: {len(users_id)} | ESPs: {len(esps_id)}")
-    magnitude_data, agc_gain_data, csv_diagnostics = process_csv_files(
+    magnitude_data, csv_diagnostics = process_csv_files(
         all_data_files,
         return_diagnostics=True,
         calibration_mode=calibration_mode,
         **csv_options,
     )
-    return magnitude_data, agc_gain_data, csv_diagnostics
+    return magnitude_data, csv_diagnostics
 
 
 def load_feature_dataframes(
     magnitude_data: dict[str, Any],
-    agc_gain_data: dict[str, Any],
     *,
     preproc_opts: dict[str, Any],
     feat_opts: dict[str, Any],
@@ -64,7 +64,7 @@ def load_feature_dataframes(
     """Build or load cached feature dataframes for every requested band."""
 
     def _build_feature_dataframes() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        processed, _ = process_magnitude_data(magnitude_data, agc_gain_data, **preproc_opts)
+        processed, _ = process_magnitude_data(magnitude_data, **preproc_opts)
         return build_frequency_feature_dataframes(processed, **feat_opts)
 
     feature_dataframes = get_all_dataframes(preproc_opts, feat_opts, _build_feature_dataframes)
@@ -75,9 +75,88 @@ def load_feature_dataframes(
 
     for band in bands_to_run:
         df = feature_dataframes[band]
+        _assert_no_empty_room_rows(df, band=band)
         print(f"{band}: {df.shape[0]} windows, {df.shape[1]} columns")
     gc.collect()
     return feature_dataframes
+
+
+def print_normalization_discriminability(
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    normalization: str,
+    reference_feature_dataframes: dict[str, pd.DataFrame] | None = None,
+    bands_to_run: tuple[str, ...],
+) -> pd.DataFrame:
+    """Print median Fisher ratios for the active normalization and the none reference."""
+    rows = []
+    for band in bands_to_run:
+        active_ratio = median_fisher_ratio(feature_dataframes[band])
+        row = {
+            "dataset": band,
+            "normalization": normalization,
+            "median_fisher_ratio": active_ratio,
+        }
+        print(
+            f"[normalization diagnostic] {band}: normalization={normalization}, "
+            f"median_fisher_ratio={active_ratio:.6g}"
+        )
+        if reference_feature_dataframes is not None and band in reference_feature_dataframes:
+            reference_ratio = median_fisher_ratio(reference_feature_dataframes[band])
+            row["none_median_fisher_ratio"] = reference_ratio
+            print(
+                f"[normalization diagnostic] {band}: normalization=none reference, "
+                f"median_fisher_ratio={reference_ratio:.6g}"
+            )
+        rows.append(row)
+
+    print(
+        "[normalization diagnostic] Interpretation: a median ratio near zero means the "
+        "features no longer separate locations, so the normalization likely destroyed "
+        "the fingerprint."
+    )
+    return pd.DataFrame(rows)
+
+
+def load_or_build_none_reference_features(
+    magnitude_data: dict[str, Any],
+    *,
+    active_preproc_opts: dict[str, Any],
+    feat_opts: dict[str, Any],
+) -> dict[str, pd.DataFrame]:
+    """Load or compute the normalization='none' feature cache for diagnostics."""
+    none_preproc_opts = {
+        key: value
+        for key, value in active_preproc_opts.items()
+        if key not in {"normalization", "baseline_scope"}
+    }
+    none_preproc_opts["normalization"] = "none"
+    none_preproc_opts.setdefault("epsilon", active_preproc_opts.get("epsilon", 1e-8))
+    none_cache_path = get_cache_path(none_preproc_opts, feat_opts)
+    print(f"[normalization diagnostic] none reference cache: {none_cache_path}")
+
+    def _build_none_dataframes() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        processed, _ = process_magnitude_data(magnitude_data, **none_preproc_opts)
+        return build_frequency_feature_dataframes(processed, **feat_opts)
+
+    return get_all_dataframes(none_preproc_opts, feat_opts, _build_none_dataframes)
+
+
+def median_fisher_ratio(df: pd.DataFrame) -> float:
+    """Median over feature columns of between-location variance / within-location variance."""
+    if df.empty:
+        return float("nan")
+    columns = feature_columns(df)
+    if not columns:
+        return float("nan")
+
+    grouped = df.groupby("location", sort=True)[columns]
+    location_means = grouped.mean()
+    location_variances = grouped.var(ddof=1)
+    numerator = location_means.var(axis=0, ddof=1)
+    denominator = location_variances.mean(axis=0)
+    ratios = numerator / denominator.replace(0, np.nan)
+    return float(pd.to_numeric(ratios, errors="coerce").median(skipna=True))
 
 
 def load_params_lookup(
@@ -253,6 +332,15 @@ def run_global_baselines(  # noqa: PLR0913
                         svm_fallback_seconds=svm_fallback_seconds,
                     )
                 predictions_by_key[(model_name, band, split_mode)] = predictions
+                if {
+                    "majority_position_accuracy",
+                    "majority_room_accuracy",
+                } <= set(metrics):
+                    print(
+                        f"[baseline] {band} / {model_name} / {split_mode}: "
+                        f"majority_position_accuracy={metrics['majority_position_accuracy']:.4f}, "
+                        f"majority_room_accuracy={metrics['majority_room_accuracy']:.4f}"
+                    )
                 summary_rows.append(
                     {
                         "dataset": band,
@@ -345,6 +433,23 @@ def master_results_table(
                 "model",
                 "dataset",
                 "split",
+                "position_accuracy_mean",
+                "position_accuracy_std",
+                "macro_f1_mean",
+                "macro_f1_std",
+                "room_accuracy_mean",
+                "room_accuracy_std",
+                "mean_distance_error_mean",
+                "mean_distance_error_std",
+                "median_distance_error_mean",
+                "median_distance_error_std",
+                "rmse_distance_error_mean",
+                "rmse_distance_error_std",
+                "p90_distance_error_mean",
+                "p90_distance_error_std",
+                "position_accuracy_pooled",
+                "majority_position_accuracy",
+                "majority_room_accuracy",
                 "fit_seconds",
                 "predict_seconds",
                 "wall_seconds",
@@ -353,6 +458,7 @@ def master_results_table(
             if col in timings.columns
         ]
         table = table.merge(timings[timing_cols], on=["model", "dataset", "split"], how="left")
+        table = _format_lovo_master_rows(table)
     return table.sort_values(["dataset", "model", "split"]).reset_index(drop=True)
 
 
@@ -423,6 +529,8 @@ def lovo_aggregated_analysis_table(lovo_summary: pd.DataFrame) -> pd.DataFrame:
         ("median_distance_error", "median_distance_error_mean_std"),
         ("rmse_distance_error", "rmse_distance_error_mean_std"),
         ("p90_distance_error", "p90_distance_error_mean_std"),
+        ("majority_position_accuracy", "majority_position_accuracy_mean_std"),
+        ("majority_room_accuracy", "majority_room_accuracy_mean_std"),
     ]
     rows = []
     for _, row in lovo_summary.iterrows():
@@ -622,6 +730,49 @@ def _metrics_for_prediction_group(group: pd.DataFrame, *, split_mode: str) -> di
         metrics["samples"] = float(len(group))
         return metrics
     return compute_localization_metrics(group)
+
+
+def _assert_no_empty_room_rows(df: pd.DataFrame, *, band: str) -> None:
+    if "location" not in df.columns:
+        return
+    empty_mask = df["location"].astype(str).str.upper() == "Z-0"
+    if empty_mask.any():
+        msg = (
+            f"Z-0 empty-room calibration rows leaked into the {band} feature dataframe: "
+            f"{int(empty_mask.sum())} rows."
+        )
+        raise ValueError(msg)
+
+
+def _format_lovo_master_rows(table: pd.DataFrame) -> pd.DataFrame:
+    if table.empty or "split" not in table.columns:
+        return table
+    metric_names = [
+        "position_accuracy",
+        "macro_f1",
+        "room_accuracy",
+        "mean_distance_error",
+        "median_distance_error",
+        "rmse_distance_error",
+        "p90_distance_error",
+    ]
+    lovo_mask = table["split"].astype(str) == "lovo"
+    if not lovo_mask.any():
+        return table
+    table = table.copy()
+    for metric_name in metric_names:
+        mean_col = f"{metric_name}_mean"
+        std_col = f"{metric_name}_std"
+        if mean_col in table.columns and std_col in table.columns and metric_name in table.columns:
+            table[metric_name] = table[metric_name].astype(object)
+            table.loc[lovo_mask, metric_name] = [
+                _format_mean_std(mean_value, std_value)
+                for mean_value, std_value in zip(
+                    table.loc[lovo_mask, mean_col],
+                    table.loc[lovo_mask, std_col],
+                )
+            ]
+    return table
 
 
 def _build_lovo_manifest_metadata(

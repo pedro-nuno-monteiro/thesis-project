@@ -20,6 +20,7 @@ METADATA_COLUMNS = (
     "label",
 )
 EXPECTED_MAGNITUDE_DIMS = 2
+EMPTY_ROOM_LOCATION = "Z-0"
 ROOM_1_COLUMNS = range(1, 10)
 ROOM_2_A_COLUMNS = {13, 14}
 ROOM_2_BC_COLUMNS = range(10, 15)
@@ -31,13 +32,12 @@ ESP_IDS_BY_SCENARIO: dict[FeatureScenario, tuple[int, ...]] = {
 }
 
 
-
 # This function maps a location key to a room label (0, 1, 2, or 3)
 # based on the location's row and column.
 def room_label_for_location(location_key: str) -> int | None:
     location = location_key.removeprefix("location_").upper()
-    if location == "Z-0":
-        return 0
+    if location == EMPTY_ROOM_LOCATION:
+        return None
 
     try:
         row, column_text = location.split("-", maxsplit=1)
@@ -65,7 +65,6 @@ def compute_window_features(
     *,
     window_size: int,
     overlap_size: int,
-    calibrate: bool = False,
 ) -> np.ndarray:
     _validate_window_parameters(magnitude, window_size=window_size, overlap_size=overlap_size)
 
@@ -77,9 +76,6 @@ def compute_window_features(
     )
     if window_count == 0:
         return np.empty((0, subcarrier_count * len(FEATURE_NAMES)), dtype=float)
-
-    if calibrate:
-        magnitude = magnitude - np.mean(magnitude, axis=0, keepdims=True)
 
     step = window_size - overlap_size
     features = np.empty((window_count, subcarrier_count * len(FEATURE_NAMES)), dtype=float)
@@ -123,7 +119,6 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
     *,
     window_size: int = 60,
     overlap_size: int = 30,
-    calibrate: bool = False,
     require_all_esps: bool = True,
 ) -> pd.DataFrame:
     esp_keys = _esp_keys_for_scenario(frequency_scenario)
@@ -161,7 +156,6 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
                         trial_key,
                         window_size=window_size,
                         overlap_size=overlap_size,
-                        calibrate=calibrate,
                     )
                     if require_all_esps and len(esp_features) != len(selected_esp_keys):
                         continue
@@ -207,7 +201,6 @@ def build_frequency_feature_dataframes(
     *,
     window_size: int = 60,
     overlap_size: int = 30,
-    calibrate: bool = False,
     require_all_esps: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     df_24ghz = build_frequency_feature_dataframe(
@@ -215,7 +208,6 @@ def build_frequency_feature_dataframes(
         "2.4ghz",
         window_size=window_size,
         overlap_size=overlap_size,
-        calibrate=calibrate,
         require_all_esps=require_all_esps,
     )
     df_5ghz = build_frequency_feature_dataframe(
@@ -223,7 +215,6 @@ def build_frequency_feature_dataframes(
         "5ghz",
         window_size=window_size,
         overlap_size=overlap_size,
-        calibrate=calibrate,
         require_all_esps=require_all_esps,
     )
     df_fusion = build_frequency_feature_dataframe(
@@ -231,7 +222,6 @@ def build_frequency_feature_dataframes(
         "fusion",
         window_size=window_size,
         overlap_size=overlap_size,
-        calibrate=calibrate,
         require_all_esps=require_all_esps,
     )
     return df_24ghz, df_5ghz, df_fusion
@@ -309,7 +299,7 @@ def _validate_window_parameters(
 # mapping ESP keys to their corresponding feature arrays. The features are computed using the
 # compute_window_features function, which applies a sliding window to the magnitude data and
 # computes statistical features for each window. The function takes parameters for window size,
-# overlap size, and whether to calibrate the magnitude data before feature extraction.
+# overlap size.
 def _features_by_esp(  # noqa: PLR0913
     esps_map: dict[str, dict[str, np.ndarray]],
     selected_esp_keys: list[str],
@@ -317,7 +307,6 @@ def _features_by_esp(  # noqa: PLR0913
     *,
     window_size: int,
     overlap_size: int,
-    calibrate: bool,
 ) -> dict[str, np.ndarray]:
     esp_features: dict[str, np.ndarray] = {}
 
@@ -330,7 +319,6 @@ def _features_by_esp(  # noqa: PLR0913
             magnitude,
             window_size=window_size,
             overlap_size=overlap_size,
-            calibrate=calibrate,
         )
         if features.shape[0] > 0:
             esp_features[esp_key] = features
