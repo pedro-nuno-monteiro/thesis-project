@@ -1,0 +1,189 @@
+{
+  "timestamp": "2026-07-09T05:20:02.476267+01:00",
+  "git_commit": "707ec43",
+  "python_version": "3.12.2",
+  "key_library_versions": {
+    "numpy": "1.26.4",
+    "pandas": "2.3.3",
+    "scikit-learn": "1.4.1.post1"
+  },
+  "preprocessing_options": {
+    "apply_agc_compensation": false,
+    "agc_reference": "median",
+    "filter_method": "none",
+    "filter_window": 5,
+    "normalization": "none",
+    "epsilon": 1e-08
+  },
+  "feature_extraction_options": {
+    "window_size": 60,
+    "overlap_size": 30,
+    "calibrate": false,
+    "require_all_esps": false
+  },
+  "classifier_hyperparameters": {
+    "RF:2.4 GHz": {
+      "n_estimators": 500,
+      "max_features": "log2",
+      "max_depth": null,
+      "min_samples_split": 2,
+      "min_samples_leaf": 1
+    },
+    "RF:5 GHz": {
+      "n_estimators": 500,
+      "max_features": "sqrt",
+      "max_depth": null,
+      "min_samples_split": 2,
+      "min_samples_leaf": 1
+    },
+    "RF:Fusion": {
+      "n_estimators": 500,
+      "max_features": "log2",
+      "max_depth": null,
+      "min_samples_split": 2,
+      "min_samples_leaf": 1
+    },
+    "KNN:2.4 GHz": {
+      "n_neighbors": 5,
+      "weights": "distance",
+      "metric": "euclidean"
+    },
+    "KNN:5 GHz": {
+      "n_neighbors": 5,
+      "weights": "distance",
+      "metric": "euclidean"
+    },
+    "KNN:Fusion": {
+      "n_neighbors": 5,
+      "weights": "distance",
+      "metric": "euclidean"
+    },
+    "SVM:2.4 GHz": {
+      "kernel": "rbf",
+      "C": 10.0,
+      "gamma": "scale"
+    },
+    "SVM:5 GHz": {
+      "kernel": "rbf",
+      "C": 10.0,
+      "gamma": "scale"
+    },
+    "SVM:Fusion": {
+      "kernel": "rbf",
+      "C": 10.0,
+      "gamma": "scale"
+    }
+  },
+  "config_hash": "6a0a7f4fe1bf8f00135bfdfb803d48799de082cb088370dfb9f74f052c4fb99b",
+  "splits": [
+    "block",
+    "lovo"
+  ],
+  "test_size": 0.3,
+  "dataset_sizes": {
+    "2_4ghz_windows": 18080,
+    "5ghz_windows": 19673,
+    "fusion_windows": 18038
+  },
+  "feature_matrix_shapes": {
+    "2.4 GHz": {
+      "rows": 18080,
+      "columns": 2408,
+      "feature_columns": 2400
+    },
+    "5 GHz": {
+      "rows": 19673,
+      "columns": 3368,
+      "feature_columns": 3360
+    },
+    "Fusion": {
+      "rows": 18038,
+      "columns": 5768,
+      "feature_columns": 5760
+    }
+  },
+  "lovo": {
+    "timestamp": "2026-07-09T04:20:02.445817+00:00",
+    "sklearn_version": "1.4.1.post1",
+    "fold_user_ids": {
+      "2.4 GHz": [
+        "01",
+        "02",
+        "03",
+        "04",
+        "05",
+        "06"
+      ],
+      "5 GHz": [
+        "01",
+        "02",
+        "03",
+        "04",
+        "05",
+        "06"
+      ],
+      "Fusion": [
+        "01",
+        "02",
+        "03",
+        "04",
+        "05",
+        "06"
+      ]
+    },
+    "classifier_hyperparameters": {
+      "RF:2.4 GHz": {
+        "n_estimators": 500,
+        "max_features": "log2",
+        "max_depth": null,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1
+      },
+      "RF:5 GHz": {
+        "n_estimators": 500,
+        "max_features": "sqrt",
+        "max_depth": null,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1
+      },
+      "RF:Fusion": {
+        "n_estimators": 500,
+        "max_features": "log2",
+        "max_depth": null,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1
+      },
+      "KNN:2.4 GHz": {
+        "n_neighbors": 5,
+        "weights": "distance",
+        "metric": "euclidean"
+      },
+      "KNN:5 GHz": {
+        "n_neighbors": 5,
+        "weights": "distance",
+        "metric": "euclidean"
+      },
+      "KNN:Fusion": {
+        "n_neighbors": 5,
+        "weights": "distance",
+        "metric": "euclidean"
+      },
+      "SVM:2.4 GHz": {
+        "kernel": "rbf",
+        "C": 10.0,
+        "gamma": "scale"
+      },
+      "SVM:5 GHz": {
+        "kernel": "rbf",
+        "C": 10.0,
+        "gamma": "scale"
+      },
+      "SVM:Fusion": {
+        "kernel": "rbf",
+        "C": 10.0,
+        "gamma": "scale"
+      }
+    },
+    "hyperparameter_provenance": "LOVO reuses block-split tuned/default hyperparameters; no nested CV."
+  }
+}

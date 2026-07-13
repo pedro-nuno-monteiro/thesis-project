@@ -1,0 +1,14 @@
+{
+  "band": "5 GHz",
+  "fold": "user-04",
+  "model": "KNN",
+  "params": {
+    "metric": "euclidean",
+    "n_neighbors": 5,
+    "weights": "distance"
+  },
+  "params_hash": "724498a4cb71854cd3ef661f6cadccd06581799cf8de5525d2d78faa59717df6",
+  "schema_version": 1,
+  "sklearn_version": "1.4.1.post1",
+  "split_mode": "lovo"
+}

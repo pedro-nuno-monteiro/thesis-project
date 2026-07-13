@@ -210,10 +210,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-No Combo.png
-No combo.svg
 Subcarrier Clustering.ipynb
 
 # Experiment cache and results (generated, not version-controlled)
 .cache/dataframes/
-results/
+isac paper/results/

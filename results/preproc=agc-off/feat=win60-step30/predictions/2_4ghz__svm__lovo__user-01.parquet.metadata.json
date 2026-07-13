@@ -1,0 +1,14 @@
+{
+  "band": "2.4 GHz",
+  "fold": "user-01",
+  "model": "SVM",
+  "params": {
+    "C": 10.0,
+    "gamma": "scale",
+    "kernel": "rbf"
+  },
+  "params_hash": "35b1d7daa1e96b85c65702c0eece295b7b25dd2e5c8b0b1780fbb7dbc4144eab",
+  "schema_version": 1,
+  "sklearn_version": "1.4.1.post1",
+  "split_mode": "lovo"
+}

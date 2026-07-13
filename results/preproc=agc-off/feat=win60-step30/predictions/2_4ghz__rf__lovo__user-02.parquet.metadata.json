@@ -1,0 +1,16 @@
+{
+  "band": "2.4 GHz",
+  "fold": "user-02",
+  "model": "RF",
+  "params": {
+    "max_depth": null,
+    "max_features": "log2",
+    "min_samples_leaf": 1,
+    "min_samples_split": 2,
+    "n_estimators": 500
+  },
+  "params_hash": "e7254121ecf0a934149e790041d7c5d6950ae49af19d44d920e8053b22f81c23",
+  "schema_version": 1,
+  "sklearn_version": "1.4.1.post1",
+  "split_mode": "lovo"
+}
