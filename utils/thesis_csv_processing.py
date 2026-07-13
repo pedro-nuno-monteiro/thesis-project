@@ -18,11 +18,10 @@ if TYPE_CHECKING:
 
 FileMap = dict[str, dict[str, dict[str, dict[str, dict[str, Path]]]]]
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
-AgcGainMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 CalibrationMode = Literal["none", "packet_norm", "rssi"]
 
 REPO_CACHE_DIR = Path(".cache") / "csi_processing"
-PROCESSOR_VERSION = "standard-v3"
+PROCESSOR_VERSION = "standard-v4"
 FIVE_GHZ_MIN_ESP_ID = 11
 FIVE_GHZ_MAX_ESP_ID = 20
 TWO_GHZ_RAW_LENGTH = 128
@@ -30,7 +29,6 @@ FIVE_GHZ_RAW_LENGTH = 114
 FIVE_GHZ_RAW_LENGTH_228 = 228
 TWO_GHZ_CSI_COLUMN = 24
 TWO_GHZ_RSSI_COLUMN = 3
-FIVE_GHZ_AGC_COLUMN = 7
 FIVE_GHZ_CSI_COLUMN = 14
 FIVE_GHZ_RSSI_COLUMN = 3
 VALID_CALIBRATION_MODES: tuple[CalibrationMode, ...] = ("none", "packet_norm", "rssi")
@@ -112,7 +110,6 @@ class _RunOptions:
 @dataclass(frozen=True)
 class _StandardFileResult:
     magnitude: np.ndarray
-    agc_gains: np.ndarray
     no_match_count: int
     no_complete_count: int
     total_rows: int
@@ -439,9 +436,8 @@ def _apply_complex_csi_calibration(
 
 
 # this function encapsulates the packet filtering logic based on the selected calibration mode
-# and thresholds, returning the filtered CSI, RSSI, and AGC gains along with the count of
-# invalid packets removed. It is called during the processing of each file to ensure that
-# only valid packets are included in the final magnitude calculations and feature extraction steps.
+# and thresholds. It is called during file processing so only valid packets are included in
+# the final magnitude calculations and feature extraction steps.
 def _valid_packet_mask(
     complex_csi: np.ndarray,
     *,
@@ -475,19 +471,16 @@ def _valid_packet_mask(
     return mask
 
 
-def _read_standard_columns(
-    job: _ProcessingJob,
-) -> tuple[pd.Series, pd.Series, pd.Series | None, int]:
+def _read_standard_columns(job: _ProcessingJob) -> tuple[pd.Series, pd.Series, int]:
     if job.its5ghz:
         file_csv = pd.read_csv(
             job.file_path,
             header=None,
-            usecols=[FIVE_GHZ_RSSI_COLUMN, FIVE_GHZ_AGC_COLUMN, FIVE_GHZ_CSI_COLUMN],
+            usecols=[FIVE_GHZ_RSSI_COLUMN, FIVE_GHZ_CSI_COLUMN],
         )
         return (
             file_csv[FIVE_GHZ_CSI_COLUMN],
             pd.to_numeric(file_csv[FIVE_GHZ_RSSI_COLUMN], errors="coerce"),
-            file_csv[FIVE_GHZ_AGC_COLUMN],
             FIVE_GHZ_RAW_LENGTH,
         )
 
@@ -499,7 +492,6 @@ def _read_standard_columns(
     return (
         file_csv[TWO_GHZ_CSI_COLUMN],
         pd.to_numeric(file_csv[TWO_GHZ_RSSI_COLUMN], errors="coerce"),
-        None,
         TWO_GHZ_RAW_LENGTH,
     )
 
@@ -507,14 +499,12 @@ def _read_standard_columns(
 def _parse_valid_packet_rows(
     csi_raw: pd.Series,
     rssi_raw: pd.Series,
-    agc_raw: pd.Series | None,
     expected_length: int,
     *,
     its5ghz: bool,
-) -> tuple[list[list[float]], list[float], list[int], int, int]:
+) -> tuple[list[list[float]], list[float], int, int]:
     valid_csi: list[list[float]] = []
     valid_rssi_dbm: list[float] = []
-    valid_agc_gains: list[int] = []
     no_match_count = 0
     no_complete_count = 0
 
@@ -532,16 +522,13 @@ def _parse_valid_packet_rows(
 
         valid_csi.append(nums)
         valid_rssi_dbm.append(float(rssi_raw.loc[row_index]))
-        if agc_raw is not None:
-            valid_agc_gains.append(int(agc_raw.loc[row_index]))
 
-    return valid_csi, valid_rssi_dbm, valid_agc_gains, no_match_count, no_complete_count
+    return valid_csi, valid_rssi_dbm, no_match_count, no_complete_count
 
 
 def _empty_standard_result(
     job: _ProcessingJob,
     *,
-    agc_gains: np.ndarray,
     no_match_count: int,
     no_complete_count: int,
     total_rows: int,
@@ -549,7 +536,6 @@ def _empty_standard_result(
     mag = _empty_5ghz_magnitude() if job.its5ghz else _empty_24ghz_magnitude()
     return _StandardFileResult(
         magnitude=mag,
-        agc_gains=agc_gains,
         no_match_count=no_match_count,
         no_complete_count=no_complete_count,
         total_rows=total_rows,
@@ -576,11 +562,10 @@ def _select_active_subcarrier_csi(csi_values: np.ndarray, *, its5ghz: bool) -> n
 def _filter_packets_for_calibration(
     selected_csi: np.ndarray,
     rssi_dbm: np.ndarray,
-    agc_gains: np.ndarray,
     options: _RunOptions,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+) -> tuple[np.ndarray, np.ndarray, int]:
     if options.calibration_mode == "none":
-        return selected_csi, rssi_dbm, agc_gains, 0
+        return selected_csi, rssi_dbm, 0
 
     # valid packet mask based on calibration mode and thresholds
     valid_packet_mask = _valid_packet_mask(
@@ -591,11 +576,9 @@ def _filter_packets_for_calibration(
         eps=options.calibration_eps,
     )
     invalid_packets_removed = int(valid_packet_mask.size - np.count_nonzero(valid_packet_mask))
-    filtered_agc_gains = agc_gains[valid_packet_mask] if agc_gains.size else agc_gains
     return (
         selected_csi[valid_packet_mask],
         rssi_dbm[valid_packet_mask],
-        filtered_agc_gains,
         invalid_packets_removed,
     )
 
@@ -606,24 +589,21 @@ def _process_standard_file(
 ) -> _StandardFileResult:
 
     # recolhe valores do ficheiro CSV
-    csi_raw, rssi_raw, agc_raw, expected_length = _read_standard_columns(job)
+    csi_raw, rssi_raw, expected_length = _read_standard_columns(job)
 
     # verifica len de cada vetor CSI
-    valid_csi, valid_rssi_dbm, valid_agc_gains, no_match_count, no_complete_count = (
+    valid_csi, valid_rssi_dbm, no_match_count, no_complete_count = (
         _parse_valid_packet_rows(
             csi_raw,
             rssi_raw,
-            agc_raw,
             expected_length,
             its5ghz=job.its5ghz,
         )
     )
-    agc_gains = np.array(valid_agc_gains, dtype=int)
 
     if not valid_csi:
         return _empty_standard_result(
             job,
-            agc_gains=agc_gains,
             no_match_count=no_match_count,
             no_complete_count=no_complete_count,
             total_rows=len(csi_raw),
@@ -636,8 +616,10 @@ def _process_standard_file(
     selected_csi = _select_active_subcarrier_csi(csi_values, its5ghz=job.its5ghz)
 
     # filtrar pacotes inválidos com base no modo de calibração
-    selected_csi, rssi_dbm, agc_gains, invalid_packets_removed = (
-        _filter_packets_for_calibration(selected_csi, rssi_dbm, agc_gains, options)
+    selected_csi, rssi_dbm, invalid_packets_removed = _filter_packets_for_calibration(
+        selected_csi,
+        rssi_dbm,
+        options,
     )
 
     # aplicar calibração escolhida
@@ -653,7 +635,6 @@ def _process_standard_file(
 
     return _StandardFileResult(
         magnitude=mag,
-        agc_gains=agc_gains,
         no_match_count=no_match_count,
         no_complete_count=no_complete_count,
         total_rows=len(csi_raw),
@@ -662,26 +643,22 @@ def _process_standard_file(
     )
 
 
-def _initialize_maps(data_files: FileMap) -> tuple[CsiMap, AgcGainMap]:
+def _initialize_maps(data_files: FileMap) -> CsiMap:
     magnitudes: CsiMap = {}
-    agc_gain_data: AgcGainMap = {}
 
     for scenario_key, locations_map in data_files.items():
         magnitudes[scenario_key] = {}
-        agc_gain_data[scenario_key] = {}
 
         for location_key, users_map in locations_map.items():
             magnitudes[scenario_key][location_key] = {}
-            agc_gain_data[scenario_key][location_key] = {}
 
             for user_key, esps_map in users_map.items():
                 magnitudes[scenario_key][location_key][user_key] = {}
-                agc_gain_data[scenario_key][location_key][user_key] = {}
 
                 for esp_key in esps_map:
                     magnitudes[scenario_key][location_key][user_key][esp_key] = {}
 
-    return magnitudes, agc_gain_data
+    return magnitudes
 
 
 def _validate_required_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
@@ -704,10 +681,10 @@ def process_csv_files(  # noqa: PLR0913
     min_rssi_dbm: float = -95.0,
     calibration_eps: float = 1e-12,
 ) -> (
-    tuple[CsiMap, AgcGainMap]
-    | tuple[CsiMap, AgcGainMap, CacheStats]
-    | tuple[CsiMap, AgcGainMap, pd.DataFrame]
-    | tuple[CsiMap, AgcGainMap, CacheStats, pd.DataFrame]
+    CsiMap
+    | tuple[CsiMap, CacheStats]
+    | tuple[CsiMap, pd.DataFrame]
+    | tuple[CsiMap, CacheStats, pd.DataFrame]
 ):
     if calibration_mode not in VALID_CALIBRATION_MODES:
         raise _calibration_mode_error()
@@ -719,7 +696,7 @@ def process_csv_files(  # noqa: PLR0913
         raise ValueError(msg)
 
     # para não ter aquele for gigante a passar todo o filename
-    magnitudes, agc_gain_data = _initialize_maps(data_files)
+    magnitudes = _initialize_maps(data_files)
 
     # processing parallel
     jobs = list(_iter_jobs(data_files))
@@ -736,7 +713,6 @@ def process_csv_files(  # noqa: PLR0913
     )
 
     # O processamento paralelo é feito aqui, e os resultados são coletados para atualização
-    # dos mapas de magnitudes e AGC gains.
     results, cache_stats = _run_jobs(jobs, _process_standard_cached, options)
     invalid_packets_removed = 0
     calibration_applied_files = 0
@@ -749,17 +725,6 @@ def process_csv_files(  # noqa: PLR0913
         _set_magnitude_entry(magnitudes, result.job, file_result.magnitude)
         invalid_packets_removed += file_result.invalid_packets_removed
         calibration_applied_files += int(file_result.calibration_applied)
-
-        # Atualiza o mapa de AGC gains apenas para arquivos de 5GHz,
-        # e apenas se houver dados válidos.
-        if result.job.its5ghz:
-            agc_gain_data[result.job.scenario_key][result.job.location_key][
-                result.job.user_key
-            ].setdefault(result.job.esp_key, {})
-            agc_gain_data[result.job.scenario_key][result.job.location_key][result.job.user_key][
-                result.job.esp_key
-            ][result.job.trial_key] = file_result.agc_gains
-
     diagnostics = processing_diagnostics_frame(results, options) if return_diagnostics else None
 
     # guarda em cache
@@ -772,13 +737,13 @@ def process_csv_files(  # noqa: PLR0913
     )
 
     if return_stats and return_diagnostics:
-        return magnitudes, agc_gain_data, stats, diagnostics if diagnostics is not None else pd.DataFrame(
+        return magnitudes, stats, diagnostics if diagnostics is not None else pd.DataFrame(
             columns=PROCESSING_DIAGNOSTIC_COLUMNS,
         )
     if return_stats:
-        return magnitudes, agc_gain_data, stats
+        return magnitudes, stats
     if return_diagnostics:
-        return magnitudes, agc_gain_data, diagnostics if diagnostics is not None else pd.DataFrame(
+        return magnitudes, diagnostics if diagnostics is not None else pd.DataFrame(
             columns=PROCESSING_DIAGNOSTIC_COLUMNS,
         )
-    return magnitudes, agc_gain_data
+    return magnitudes

@@ -37,14 +37,11 @@ class _StaleFeatureCache(ValueError):
 def make_preproc_key(opts: dict[str, Any]) -> str:
     """Encode magnitude-processing options as a short, human-readable key."""
     parts: list[str] = []
-    agc = opts.get("apply_agc_compensation", False)
-    parts.append(f"agc-{'on' if agc else 'off'}")
-    filt = str(opts.get("filter_method", "none")).lower()
-    if filt not in ("none", ""):
-        parts.append(f"filt-{filt}")
     norm = str(opts.get("normalization", "none")).lower()
-    if norm not in ("none", ""):
-        parts.append(f"norm-{norm}")
+    parts.append(f"norm-{norm or 'none'}")
+    if norm == "empty_baseline":
+        scope = str(opts.get("baseline_scope", "per_user")).lower()
+        parts.append(f"scope-{scope}")
     return "_".join(sorted(parts))
 
 
@@ -54,8 +51,6 @@ def make_feat_key(opts: dict[str, Any]) -> str:
     win = opts.get("window_size", 60)
     step = opts.get("step", opts.get("overlap_size", 30))
     parts.append(f"win{win}-step{step}")
-    if opts.get("calibrate", False):
-        parts.append("cal-on")
     if opts.get("require_all_esps", False):
         parts.append("allesps-on")
     return "_".join(sorted(parts))

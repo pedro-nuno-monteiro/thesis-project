@@ -266,25 +266,6 @@ def run_global_position_experiment(  # noqa: PLR0913
         )
         return None, predictions, metrics
 
-    if results_dir is not None and not force_retrain:
-        cached_predictions = load_predictions(
-            Path(results_dir),
-            resolved_model_name,
-            dataset_name,
-            split_mode,
-        )
-        if cached_predictions is not None:
-            metrics = compute_localization_metrics(cached_predictions)
-            metrics.update(
-                {
-                    "fit_seconds": 0.0,
-                    "predict_seconds": 0.0,
-                    "wall_seconds": 0.0,
-                    "used_estimator": "cached_predictions",
-                }
-            )
-            return None, cached_predictions, metrics
-
     split_result = split_dataframe(
         df,
         test_size=test_size,
@@ -297,6 +278,33 @@ def run_global_position_experiment(  # noqa: PLR0913
         msg = "Unexpected multi-fold split outside the LOVO dispatch path."
         raise RuntimeError(msg)
     train_df, test_df = split_result
+    majority_metrics = majority_class_baselines(
+        train_df,
+        test_df,
+        row_spacing=row_spacing,
+        column_spacing=column_spacing,
+    )
+
+    if results_dir is not None and not force_retrain:
+        cached_predictions = load_predictions(
+            Path(results_dir),
+            resolved_model_name,
+            dataset_name,
+            split_mode,
+        )
+        if cached_predictions is not None:
+            metrics = compute_localization_metrics(cached_predictions)
+            metrics.update(majority_metrics)
+            metrics.update(
+                {
+                    "fit_seconds": 0.0,
+                    "predict_seconds": 0.0,
+                    "wall_seconds": 0.0,
+                    "used_estimator": "cached_predictions",
+                }
+            )
+            return None, cached_predictions, metrics
+
     columns = feature_columns(train_df)
 
     model = build_estimator(resolved_model_name, resolved_params, random_state, n_jobs)
@@ -339,6 +347,7 @@ def run_global_position_experiment(  # noqa: PLR0913
         column_spacing=column_spacing,
     )
     metrics = compute_localization_metrics(predictions)
+    metrics.update(majority_metrics)
     metrics.update(
         {
             "fit_seconds": float(fit_seconds),
@@ -404,6 +413,9 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
         if cached_predictions is not None:
             per_fold_metrics, aggregated_metrics = _lovo_metrics_from_predictions(
                 cached_predictions,
+                folds=folds,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
             )
             aggregated_metrics.update(
                 {
@@ -472,6 +484,14 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
         fold_predictions["held_out_user"] = held_out_user
         fold_wall_seconds = time.perf_counter() - fold_started_at
         fold_metrics = compute_localization_metrics(fold_predictions)
+        fold_metrics.update(
+            majority_class_baselines(
+                train_df,
+                test_df,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+            ),
+        )
         fold_metric_rows.append(
             {
                 "held_out_user": held_out_user,
@@ -517,7 +537,10 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
         raise RuntimeError(msg)
 
     per_fold_metrics = pd.DataFrame(fold_metric_rows)
-    aggregated_metrics = _aggregate_lovo_metrics(per_fold_metrics)
+    aggregated_metrics = _aggregate_lovo_metrics(
+        per_fold_metrics,
+        pooled_predictions=predictions,
+    )
     aggregated_metrics.update(
         {
             "fit_seconds": float(per_fold_metrics["fit_seconds"].sum()),
@@ -629,6 +652,38 @@ def build_global_predictions_dataframe(  # noqa: PLR0913
     )
 
 
+def majority_class_baselines(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+) -> dict[str, float]:
+    """Accuracy of constant predictors using the most frequent training labels."""
+    _validate_grid_spacing(row_spacing=row_spacing, column_spacing=column_spacing)
+    _validate_required_columns(train_df, {"location"})
+    _validate_required_columns(test_df, {"location"})
+    if train_df.empty or test_df.empty:
+        return {
+            "majority_position_accuracy": np.nan,
+            "majority_room_accuracy": np.nan,
+        }
+
+    majority_position = str(train_df["location"].astype(str).mode(dropna=True).iloc[0])
+    train_rooms = pd.Series(
+        [room_label_for_location(location) for location in train_df["location"]],
+    )
+    majority_room = train_rooms.mode(dropna=True).iloc[0]
+    true_rooms = pd.Series([room_label_for_location(location) for location in test_df["location"]])
+
+    return {
+        "majority_position_accuracy": float(
+            (test_df["location"].astype(str).to_numpy() == majority_position).mean()
+        ),
+        "majority_room_accuracy": float((true_rooms.to_numpy() == majority_room).mean()),
+    }
+
+
 def _load_lovo_cached_predictions(
     results_dir: Path,
     model_name: str,
@@ -696,22 +751,46 @@ def _load_lovo_cached_predictions(
 
 def _lovo_metrics_from_predictions(
     predictions: pd.DataFrame,
+    *,
+    folds: list[tuple[pd.DataFrame, pd.DataFrame]] | None = None,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
     _validate_required_columns(predictions, {"held_out_user"})
+    majority_by_user: dict[object, dict[str, float]] = {}
+    if folds is not None:
+        majority_by_user = {
+            _held_out_user(test_df): majority_class_baselines(
+                train_df,
+                test_df,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+            )
+            for train_df, test_df in folds
+        }
     rows = []
     for held_out_user, group in predictions.groupby("held_out_user", sort=True):
+        metrics = compute_localization_metrics(group)
+        metrics.update(majority_by_user.get(held_out_user, {}))
         rows.append(
             {
                 "held_out_user": held_out_user,
-                **compute_localization_metrics(group),
+                **metrics,
                 "n_test_windows": int(len(group)),
             }
         )
     per_fold_metrics = pd.DataFrame(rows)
-    return per_fold_metrics, _aggregate_lovo_metrics(per_fold_metrics)
+    return per_fold_metrics, _aggregate_lovo_metrics(
+        per_fold_metrics,
+        pooled_predictions=predictions,
+    )
 
 
-def _aggregate_lovo_metrics(per_fold_metrics: pd.DataFrame) -> dict[str, float]:
+def _aggregate_lovo_metrics(
+    per_fold_metrics: pd.DataFrame,
+    *,
+    pooled_predictions: pd.DataFrame,
+) -> dict[str, float]:
     metric_names = [
         "position_accuracy",
         "macro_f1",
@@ -721,21 +800,27 @@ def _aggregate_lovo_metrics(per_fold_metrics: pd.DataFrame) -> dict[str, float]:
         "rmse_distance_error",
         "p90_distance_error",
         "samples",
+        "majority_position_accuracy",
+        "majority_room_accuracy",
     ]
     aggregated: dict[str, float] = {}
     for metric_name in metric_names:
+        if metric_name not in per_fold_metrics.columns:
+            continue
         values = pd.to_numeric(per_fold_metrics[metric_name], errors="coerce")
         aggregated[f"{metric_name}_mean"] = float(values.mean())
         aggregated[f"{metric_name}_std"] = float(values.std(ddof=1))
-        if metric_name != "samples":
+        aggregated[f"{metric_name}_min"] = float(values.min())
+        aggregated[f"{metric_name}_max"] = float(values.max())
+        if metric_name in {"majority_position_accuracy", "majority_room_accuracy"}:
             aggregated[metric_name] = aggregated[f"{metric_name}_mean"]
+
     sample_values = pd.to_numeric(per_fold_metrics["samples"], errors="coerce")
     aggregated["samples"] = float(sample_values.sum())
     aggregated["n_folds"] = float(len(per_fold_metrics))
     aggregated["n_test_windows"] = float(per_fold_metrics["n_test_windows"].sum())
-    accuracy_values = pd.to_numeric(per_fold_metrics["position_accuracy"], errors="coerce")
-    aggregated["min_fold_position_accuracy"] = float(accuracy_values.min())
-    aggregated["max_fold_position_accuracy"] = float(accuracy_values.max())
+    pooled_metrics = compute_localization_metrics(pooled_predictions)
+    aggregated["position_accuracy_pooled"] = float(pooled_metrics["position_accuracy"])
     return aggregated
 
 
