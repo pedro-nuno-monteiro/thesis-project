@@ -1,0 +1,16 @@
+{
+  "band": "5 GHz",
+  "fold": null,
+  "model": "RF",
+  "params": {
+    "max_depth": null,
+    "max_features": "sqrt",
+    "min_samples_leaf": 1,
+    "min_samples_split": 2,
+    "n_estimators": 500
+  },
+  "params_hash": "e5dde6f3380e1a5f7dfe0410d8d693dcd07d5273364f7b8c7507a4fd1231b7d3",
+  "schema_version": 1,
+  "sklearn_version": "1.4.1.post1",
+  "split_mode": "lovo"
+}
