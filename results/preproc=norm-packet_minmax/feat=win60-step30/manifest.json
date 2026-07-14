@@ -1,0 +1,124 @@
+{
+  "timestamp": "2026-07-14T01:29:19.728054+01:00",
+  "git_commit": "d3e65b2",
+  "python_version": "3.12.2",
+  "key_library_versions": {
+    "numpy": "1.26.4",
+    "pandas": "2.3.3",
+    "scikit-learn": "1.4.1.post1"
+  },
+  "preprocessing_options": {
+    "normalization": "packet_minmax",
+    "epsilon": 1e-08
+  },
+  "feature_extraction_options": {
+    "window_size": 60,
+    "overlap_size": 30,
+    "require_all_esps": false
+  },
+  "classifier_hyperparameters": {
+    "RF:2.4 GHz": {
+      "n_estimators": 500,
+      "max_features": "log2",
+      "max_depth": null,
+      "min_samples_split": 2,
+      "min_samples_leaf": 1
+    },
+    "RF:5 GHz": {
+      "n_estimators": 500,
+      "max_features": "sqrt",
+      "max_depth": null,
+      "min_samples_split": 2,
+      "min_samples_leaf": 1
+    },
+    "RF:Fusion": {
+      "n_estimators": 500,
+      "max_features": "log2",
+      "max_depth": null,
+      "min_samples_split": 2,
+      "min_samples_leaf": 1
+    }
+  },
+  "config_hash": "066dc78c3a89cd4e47f49987e3028e33606e0a2bf01f1a4b86fec73d5631591b",
+  "splits": [
+    "block",
+    "lovo"
+  ],
+  "test_size": 0.3,
+  "dataset_sizes": {
+    "2_4ghz_windows": 17710,
+    "5ghz_windows": 19302,
+    "fusion_windows": 17670
+  },
+  "feature_matrix_shapes": {
+    "2.4 GHz": {
+      "rows": 17710,
+      "columns": 2708,
+      "feature_columns": 2700
+    },
+    "5 GHz": {
+      "rows": 19302,
+      "columns": 3368,
+      "feature_columns": 3360
+    },
+    "Fusion": {
+      "rows": 17670,
+      "columns": 6068,
+      "feature_columns": 6060
+    }
+  },
+  "lovo": {
+    "timestamp": "2026-07-14T00:29:19.718046+00:00",
+    "sklearn_version": "1.4.1.post1",
+    "fold_user_ids": {
+      "2.4 GHz": [
+        "01",
+        "02",
+        "03",
+        "04",
+        "05",
+        "06"
+      ],
+      "5 GHz": [
+        "01",
+        "02",
+        "03",
+        "04",
+        "05",
+        "06"
+      ],
+      "Fusion": [
+        "01",
+        "02",
+        "03",
+        "04",
+        "05",
+        "06"
+      ]
+    },
+    "classifier_hyperparameters": {
+      "RF:2.4 GHz": {
+        "n_estimators": 500,
+        "max_features": "log2",
+        "max_depth": null,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1
+      },
+      "RF:5 GHz": {
+        "n_estimators": 500,
+        "max_features": "sqrt",
+        "max_depth": null,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1
+      },
+      "RF:Fusion": {
+        "n_estimators": 500,
+        "max_features": "log2",
+        "max_depth": null,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1
+      }
+    },
+    "hyperparameter_provenance": "LOVO reuses block-split tuned/default hyperparameters; no nested CV."
+  }
+}
