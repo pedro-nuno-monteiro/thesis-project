@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Literal
+from dataclasses import dataclass
+from typing import Iterator, Literal
 
 import numpy as np
 import pandas as pd
@@ -26,10 +27,23 @@ ROOM_2_A_COLUMNS = {13, 14}
 ROOM_2_BC_COLUMNS = range(10, 15)
 ROOM_3_EF_COLUMNS = range(10, 14)
 ESP_IDS_BY_SCENARIO: dict[FeatureScenario, tuple[int, ...]] = {
-    "2.4ghz": tuple(range(1, 11)),
+    "2.4ghz": (*range(1, 6), *range(7, 11)),
     "5ghz": tuple(range(11, 21)),
-    "fusion": tuple(range(1, 21)),
+    "fusion": (*range(1, 6), *range(7, 21)),
 }
+
+
+@dataclass(frozen=True)
+class WindowGroup:
+    scenario_key: str
+    location_key: str
+    user_key: str
+    trial_key: str
+    selected_esp_keys: list[str]
+    magnitudes_by_esp: dict[str, np.ndarray]
+    min_windows: int
+    label: int
+    group_id: str
 
 
 # This function maps a location key to a room label (0, 1, 2, or 3)
@@ -126,67 +140,42 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
     known_feature_columns: set[str] = set()
     rows: list[dict[str, object]] = []
 
-    for scenario_key, locations_map in magnitude_data.items():
-        for location_key, users_map in locations_map.items():
-            label = room_label_for_location(location_key)
-            if label is None:
-                continue
+    for group in iter_window_groups(
+        magnitude_data,
+        frequency_scenario,
+        window_size=window_size,
+        overlap_size=overlap_size,
+        require_all_esps=require_all_esps,
+    ):
+        esp_features = {
+            esp_key: compute_window_features(
+                magnitude,
+                window_size=window_size,
+                overlap_size=overlap_size,
+            )
+            for esp_key, magnitude in group.magnitudes_by_esp.items()
+        }
 
-            for user_key, esps_map in users_map.items():
-                selected_esp_keys = [esp_key for esp_key in esp_keys if esp_key in esps_map]
-                if require_all_esps and len(selected_esp_keys) != len(esp_keys):
-                    continue
-                if not selected_esp_keys:
-                    continue
-
-                trial_sets = [
-                    {
-                        trial_key
-                        for trial_key, magnitude in esps_map[esp_key].items()
-                        if magnitude is not None
-                    }
-                    for esp_key in selected_esp_keys
-                ]
-                common_trials = sorted(set.intersection(*trial_sets))
-
-                for trial_key in common_trials:
-                    esp_features = _features_by_esp(
-                        esps_map,
-                        selected_esp_keys,
-                        trial_key,
-                        window_size=window_size,
-                        overlap_size=overlap_size,
-                    )
-                    if require_all_esps and len(esp_features) != len(selected_esp_keys):
-                        continue
-                    if not esp_features:
-                        continue
-
-                    # determine the minimum number of windows across all ESPs for this trial
-                    min_windows = min(features.shape[0] for features in esp_features.values())
-                    if min_windows == 0:
-                        continue
-
-                    # extend the feature columns list with any new
-                    # feature columns from this trial's ESPs
-                    _extend_feature_columns(
-                        feature_columns,
-                        known_feature_columns,
-                        _feature_columns_for_group(esp_keys, esp_features),
-                    )
-                    rows.extend(
-                        _rows_for_group(
-                            esp_keys,
-                            esp_features,
-                            min_windows,
-                            frequency_scenario=frequency_scenario,
-                            scenario_key=scenario_key,
-                            location_key=location_key,
-                            user_key=user_key,
-                            trial_key=trial_key,
-                            label=label,
-                        ),
-                    )
+        # extend the feature columns list with any new
+        # feature columns from this trial's ESPs
+        _extend_feature_columns(
+            feature_columns,
+            known_feature_columns,
+            _feature_columns_for_group(esp_keys, esp_features),
+        )
+        rows.extend(
+            _rows_for_group(
+                esp_keys,
+                esp_features,
+                group.min_windows,
+                frequency_scenario=frequency_scenario,
+                scenario_key=group.scenario_key,
+                location_key=group.location_key,
+                user_key=group.user_key,
+                trial_key=group.trial_key,
+                label=group.label,
+            ),
+        )
 
     df = pd.DataFrame(rows, columns=[*METADATA_COLUMNS, *feature_columns])
     if feature_columns:
@@ -229,6 +218,78 @@ def build_frequency_feature_dataframes(
 
 def _esp_keys_for_scenario(frequency_scenario: FeatureScenario) -> tuple[str, ...]:
     return tuple(f"esp_{esp_id:02d}" for esp_id in ESP_IDS_BY_SCENARIO[frequency_scenario])
+
+
+def iter_window_groups(
+    magnitude_data: CsiMap,
+    frequency_scenario: FeatureScenario,
+    *,
+    window_size: int,
+    overlap_size: int,
+    require_all_esps: bool,
+) -> Iterator[WindowGroup]:
+    esp_keys = _esp_keys_for_scenario(frequency_scenario)
+
+    for scenario_key, locations_map in magnitude_data.items():
+        for location_key, users_map in locations_map.items():
+            label = room_label_for_location(location_key)
+            if label is None:
+                continue
+
+            for user_key, esps_map in users_map.items():
+                selected_esp_keys = [esp_key for esp_key in esp_keys if esp_key in esps_map]
+                if require_all_esps and len(selected_esp_keys) != len(esp_keys):
+                    continue
+                if not selected_esp_keys:
+                    continue
+
+                trial_sets = [
+                    {
+                        trial_key
+                        for trial_key, magnitude in esps_map[esp_key].items()
+                        if magnitude is not None
+                    }
+                    for esp_key in selected_esp_keys
+                ]
+                common_trials = sorted(set.intersection(*trial_sets))
+
+                for trial_key in common_trials:
+                    magnitudes_by_esp: dict[str, np.ndarray] = {}
+                    window_counts: list[int] = []
+                    for esp_key in selected_esp_keys:
+                        magnitude = esps_map[esp_key].get(trial_key)
+                        if magnitude is None:
+                            continue
+                        window_count = window_count_for_magnitude(
+                            magnitude,
+                            window_size=window_size,
+                            overlap_size=overlap_size,
+                        )
+                        if window_count > 0:
+                            magnitudes_by_esp[esp_key] = magnitude
+                            window_counts.append(window_count)
+
+                    if require_all_esps and len(magnitudes_by_esp) != len(selected_esp_keys):
+                        continue
+                    if not magnitudes_by_esp:
+                        continue
+
+                    min_windows = min(window_counts)
+                    if min_windows == 0:
+                        continue
+
+                    group_id = f"{scenario_key}_{location_key}_{user_key}_{trial_key}"
+                    yield WindowGroup(
+                        scenario_key=scenario_key,
+                        location_key=location_key,
+                        user_key=user_key,
+                        trial_key=trial_key,
+                        selected_esp_keys=selected_esp_keys,
+                        magnitudes_by_esp=magnitudes_by_esp,
+                        min_windows=min_windows,
+                        label=label,
+                        group_id=group_id,
+                    )
 
 
 def _extend_feature_columns(
