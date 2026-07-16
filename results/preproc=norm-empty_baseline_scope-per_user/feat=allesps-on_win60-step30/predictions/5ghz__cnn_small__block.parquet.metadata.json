@@ -1,0 +1,53 @@
+{
+  "band": "5 GHz",
+  "fold": null,
+  "model": "CNN_small",
+  "params": {
+    "anchor_groups": {
+      "2.4 GHz": [
+        "esp_01",
+        "esp_02",
+        "esp_03",
+        "esp_04",
+        "esp_05",
+        "esp_07",
+        "esp_08",
+        "esp_09",
+        "esp_10"
+      ],
+      "5 GHz": [
+        "esp_11",
+        "esp_12",
+        "esp_13",
+        "esp_14",
+        "esp_15",
+        "esp_16",
+        "esp_17",
+        "esp_18",
+        "esp_19",
+        "esp_20"
+      ]
+    },
+    "batch_size": 64,
+    "conv1_filters": 16,
+    "conv2_filters": 32,
+    "dropout": 0.5,
+    "epochs": 80,
+    "head_hidden": 128,
+    "latent_dim": 64,
+    "lr": 0.001,
+    "max_epoch_seconds": 800.0,
+    "model_label": "CNN_small",
+    "n_blocks": 10,
+    "patience": 15,
+    "random_state": 42,
+    "test_size": 0.3,
+    "torch_version": "2.3.0+cpu",
+    "validation_size": 0.15,
+    "weight_decay": 0.0001
+  },
+  "params_hash": "cd147294205ee0cb82b3b592781333f63c93f60bc71e5edf0170b16003d11ab2",
+  "schema_version": 1,
+  "sklearn_version": "1.9.0",
+  "split_mode": "block"
+}
