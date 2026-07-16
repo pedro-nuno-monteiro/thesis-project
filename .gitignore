@@ -215,3 +215,13 @@ Subcarrier Clustering.ipynb
 # Experiment cache and results (generated, not version-controlled)
 .cache/dataframes/
 isac paper/results/
+
+# large regenerable window arrays — never commit
+*.npy
+results/window_arrays/
+.cache/
+
+# but DO keep the small outputs
+!results/predictions/*.parquet
+!results/summary/*.csv
+!results/plots/*.pdf

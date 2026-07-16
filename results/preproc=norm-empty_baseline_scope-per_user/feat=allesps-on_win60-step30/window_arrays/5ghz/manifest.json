@@ -1,0 +1,39 @@
+{
+  "frequency_scenario": "5 GHz",
+  "feature_scenario": "5ghz",
+  "window_size": 60,
+  "overlap_size": 30,
+  "require_all_esps": true,
+  "preprocessing": {
+    "normalization": "empty_baseline",
+    "epsilon": 1e-08,
+    "baseline_scope": "per_user"
+  },
+  "anchor_order": {
+    "5 GHz": [
+      "esp_11",
+      "esp_12",
+      "esp_13",
+      "esp_14",
+      "esp_15",
+      "esp_16",
+      "esp_17",
+      "esp_18",
+      "esp_19",
+      "esp_20"
+    ]
+  },
+  "subcarrier_counts": {
+    "5 GHz": 56
+  },
+  "shapes": {
+    "5 GHz": [
+      19302,
+      10,
+      56,
+      60
+    ]
+  },
+  "dtype": "float16",
+  "meta_rows": 19302
+}

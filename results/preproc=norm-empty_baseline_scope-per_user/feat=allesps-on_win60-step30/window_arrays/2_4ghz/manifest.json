@@ -1,0 +1,38 @@
+{
+  "frequency_scenario": "2.4 GHz",
+  "feature_scenario": "2.4ghz",
+  "window_size": 60,
+  "overlap_size": 30,
+  "require_all_esps": true,
+  "preprocessing": {
+    "normalization": "empty_baseline",
+    "epsilon": 1e-08,
+    "baseline_scope": "per_user"
+  },
+  "anchor_order": {
+    "2.4 GHz": [
+      "esp_01",
+      "esp_02",
+      "esp_03",
+      "esp_04",
+      "esp_05",
+      "esp_07",
+      "esp_08",
+      "esp_09",
+      "esp_10"
+    ]
+  },
+  "subcarrier_counts": {
+    "2.4 GHz": 50
+  },
+  "shapes": {
+    "2.4 GHz": [
+      17647,
+      9,
+      50,
+      60
+    ]
+  },
+  "dtype": "float16",
+  "meta_rows": 17647
+}
