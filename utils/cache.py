@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.metadata
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -26,6 +27,12 @@ _EXPECTED_METADATA_COLS = {
     "label",
 }
 _PREDICTION_METADATA_KEY = b"thesis_prediction_cache_metadata"
+_RUN_ID_PATTERN = re.compile(
+    r"^(?P<family>ml|dl)__(?P<model>[a-z0-9_]+)__(?P<band>2_4ghz|5ghz|fusion)"
+    r"__(?P<split>block|lovo|cross_session|group|random)"
+    r"__(?P<normalization>none|zscore|minmax|packet_minmax|ebl-(?:session|user|global))"
+    r"(?:__s(?P<seed>\d+))?__(?P<hash6>[0-9a-f]{6})$"
+)
 
 
 class _StaleFeatureCache(ValueError):
@@ -56,6 +63,58 @@ def make_feat_key(opts: dict[str, Any]) -> str:
     return "_".join(sorted(parts))
 
 
+def make_run_id(
+    *,
+    family: str,
+    model: str,
+    band: str,
+    split: str,
+    normalization: str,
+    config: dict[str, Any],
+    baseline_scope: str | None = None,
+    seed: int | None = None,
+) -> str:
+    """Return the readable, content-addressed identifier for one experiment run."""
+    normalized_family = family.strip().lower()
+    if normalized_family not in {"ml", "dl"}:
+        raise ValueError("family must be 'ml' or 'dl'.")
+    normalized_model = _band_stem(model)
+    normalized_band = _band_stem(band)
+    if normalized_band not in {"2_4ghz", "5ghz", "fusion"}:
+        raise ValueError(f"Unsupported band for run_id: {band!r}.")
+    normalized_split = split.strip().lower()
+    if normalized_split not in {"block", "lovo", "cross_session", "group", "random"}:
+        raise ValueError(f"Unsupported split for run_id: {split!r}.")
+    normalization_stem = _normalization_stem(normalization, baseline_scope)
+    config_hash = hashlib.sha256(
+        json.dumps(_json_normalized(config), sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:6]
+    seed_stem = f"__s{int(seed)}" if seed is not None else ""
+    return (
+        f"{normalized_family}__{normalized_model}__{normalized_band}__{normalized_split}"
+        f"__{normalization_stem}{seed_stem}__{config_hash}"
+    )
+
+
+def parse_run_id(run_id: str) -> dict[str, Any]:
+    """Parse a run identifier created by :func:`make_run_id`."""
+    match = _RUN_ID_PATTERN.fullmatch(run_id)
+    if match is None:
+        raise ValueError(f"Invalid run_id: {run_id!r}.")
+    parsed: dict[str, Any] = match.groupdict()
+    parsed["seed"] = int(parsed["seed"]) if parsed["seed"] is not None else None
+    normalization = str(parsed.pop("normalization"))
+    if normalization.startswith("ebl-"):
+        parsed["normalization"] = "empty_baseline"
+        parsed["baseline_scope"] = normalization.removeprefix("ebl-")
+    else:
+        parsed["normalization"] = normalization
+        parsed["baseline_scope"] = None
+    return parsed
+
+
 def get_cache_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> Path:
     return (
         CACHE_DIR
@@ -65,11 +124,9 @@ def get_cache_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> P
 
 
 def get_results_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> Path:
-    return (
-        RESULTS_ROOT
-        / f"preproc={make_preproc_key(preproc_opts)}"
-        / f"feat={make_feat_key(feat_opts)}"
-    )
+    """Return the flat results root (arguments retained for API compatibility)."""
+    del preproc_opts, feat_opts
+    return RESULTS_ROOT
 
 
 def predictions_path(
@@ -79,11 +136,19 @@ def predictions_path(
     split_mode: str,
     *,
     fold: str | None = None,
+    run_id: str | None = None,
 ) -> Path:
     """Return the parquet path for a model/band/split prediction dataframe."""
-    stem = f"{_band_stem(band)}__{_band_stem(model)}__{_band_stem(split_mode)}"
-    if fold is not None:
-        stem = f"{stem}__{_band_stem(fold)}"
+    if run_id is not None:
+        parse_run_id(run_id)
+        stem = run_id
+        if fold is not None:
+            fold_value = str(fold).removeprefix("user-")
+            stem = f"{stem}__fold-{_band_stem(fold_value)}"
+    else:
+        stem = f"{_band_stem(band)}__{_band_stem(model)}__{_band_stem(split_mode)}"
+        if fold is not None:
+            stem = f"{stem}__{_band_stem(fold)}"
     return (
         Path(results_dir)
         / "predictions"
@@ -100,9 +165,12 @@ def save_predictions(
     *,
     fold: str | None = None,
     metadata: dict[str, Any] | None = None,
-) -> None:
+    run_id: str | None = None,
+) -> Path:
     """Persist prediction rows as parquet for analysis without retraining."""
-    path = predictions_path(results_dir, model, band, split_mode, fold=fold)
+    path = predictions_path(
+        results_dir, model, band, split_mode, fold=fold, run_id=run_id
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".parquet.tmp")
     if metadata is None:
@@ -110,9 +178,10 @@ def save_predictions(
     else:
         _write_prediction_parquet_with_metadata(df, tmp, metadata)
     tmp.replace(path)
-    if metadata is not None:
+    if metadata is not None and run_id is None:
         _write_prediction_metadata(path, metadata)
     print(f"[predictions] Saved {path}")
+    return path
 
 
 def load_predictions(
@@ -123,9 +192,12 @@ def load_predictions(
     *,
     fold: str | None = None,
     expected_metadata: dict[str, Any] | None = None,
+    run_id: str | None = None,
 ) -> pd.DataFrame | None:
     """Load persisted predictions, returning None when no cache file exists."""
-    path = predictions_path(results_dir, model, band, split_mode, fold=fold)
+    path = predictions_path(
+        results_dir, model, band, split_mode, fold=fold, run_id=run_id
+    )
     if not path.exists():
         return None
     if expected_metadata is not None and not _prediction_metadata_matches(
@@ -149,6 +221,8 @@ def prediction_cache_metadata(
     row_spacing: float | None = None,
     column_spacing: float | None = None,
     data_fingerprint: str | None = None,
+    train_fingerprint: str | None = None,
+    test_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Return the metadata payload used to validate prediction caches."""
     normalized_params = _json_normalized(params)
@@ -174,6 +248,19 @@ def prediction_cache_metadata(
                 "data_fingerprint": data_fingerprint,
             }
         )
+    if train_fingerprint is not None or test_fingerprint is not None:
+        if train_fingerprint is None or test_fingerprint is None:
+            raise ValueError("train_fingerprint and test_fingerprint must be provided together.")
+        metadata.update(
+            {
+                "schema_version": 3,
+                "random_state": random_state,
+                "row_spacing": row_spacing,
+                "column_spacing": column_spacing,
+                "train_fingerprint": train_fingerprint,
+                "test_fingerprint": test_fingerprint,
+            }
+        )
     return metadata
 
 
@@ -182,6 +269,20 @@ def prediction_cache_metadata(
 def _band_stem(band: str) -> str:
     """'2.4 GHz' → '2_4ghz',  '5 GHz' → '5ghz',  'Fusion' → 'fusion'."""
     return band.lower().replace(".", "_").replace(" ", "")
+
+
+def _normalization_stem(normalization: str, baseline_scope: str | None) -> str:
+    normalized = str(normalization or "none").strip().lower()
+    if normalized == "empty_baseline":
+        scope = str(baseline_scope or "session").strip().lower().removeprefix("per_")
+        if scope not in {"session", "user", "global"}:
+            raise ValueError(
+                "baseline_scope must be session, user, or global for empty_baseline."
+            )
+        return f"ebl-{scope}"
+    if normalized not in {"none", "zscore", "minmax", "packet_minmax"}:
+        raise ValueError(f"Unsupported normalization for run_id: {normalization!r}.")
+    return normalized
 
 
 def _prediction_metadata_path(path: Path) -> Path:
@@ -246,7 +347,22 @@ def _prediction_metadata_matches(path: Path, expected_metadata: dict[str, Any]) 
     if observed is None:
         return False
     expected = _json_normalized(expected_metadata)
-    return all(observed.get(key) == value for key, value in expected.items())
+    mismatches = [
+        key for key, value in expected.items() if observed.get(key) != value
+    ]
+    for side in ("train", "test"):
+        key = f"{side}_fingerprint"
+        if key in mismatches:
+            print(f"[predictions cache mismatch] {side} fingerprint changed: {path}")
+    other_mismatches = [
+        key for key in mismatches if key not in {"train_fingerprint", "test_fingerprint"}
+    ]
+    if other_mismatches:
+        print(
+            f"[predictions cache mismatch] metadata changed ({', '.join(other_mismatches)}): "
+            f"{path}"
+        )
+    return not mismatches
 
 
 def _json_normalized(payload: Any) -> Any:

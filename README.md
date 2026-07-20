@@ -92,3 +92,9 @@ python scripts/manage_cache.py clean --all              # wipe everything
 ---
 
 *This README was updated by GitHub Copilot to reflect the current file organization.*
+## Experiment execution
+
+Blackwell GPU hosts should install `requirements-gpu.txt`; the DL startup check prints
+and validates the torch/CUDA/device/capability tuple and runs a CUDA matmul before
+training. Experiment artifacts use the flat `results/` contract: `runs.csv` is the
+source of truth, with run-addressed predictions, plots, manifests, and checkpoints.
