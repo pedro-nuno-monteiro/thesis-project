@@ -1,6 +1,6 @@
 {
   "frequency_scenario": "Fusion",
-  "feature_scenario": "fusion",
+  "feature_scenario": "Fusion",
   "window_size": 60,
   "overlap_size": 30,
   "require_all_esps": true,
@@ -40,18 +40,18 @@
   },
   "shapes": {
     "2.4 GHz": [
-      17607,
+      26868,
       9,
       50,
       60
     ],
     "5 GHz": [
-      17607,
+      26868,
       10,
       56,
       60
     ]
   },
   "dtype": "float16",
-  "meta_rows": 17607
+  "meta_rows": 26868
 }

@@ -1,6 +1,6 @@
 {
   "frequency_scenario": "2.4 GHz",
-  "feature_scenario": "2.4ghz",
+  "feature_scenario": "2.4 GHz",
   "window_size": 60,
   "overlap_size": 30,
   "require_all_esps": true,
@@ -27,12 +27,12 @@
   },
   "shapes": {
     "2.4 GHz": [
-      17647,
+      26913,
       9,
       50,
       60
     ]
   },
   "dtype": "float16",
-  "meta_rows": 17647
+  "meta_rows": 26913
 }
