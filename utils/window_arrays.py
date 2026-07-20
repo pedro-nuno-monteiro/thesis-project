@@ -7,7 +7,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from utils.cache import get_results_path
+from utils.cache import get_cache_path, get_results_path  # noqa: F401
 from utils.feature_pipeline import (
     METADATA_COLUMNS,
     CsiMap,
@@ -45,8 +45,8 @@ def build_frequency_window_arrays(
         "overlap_size": overlap_size,
         "require_all_esps": require_all_esps,
     }
-    results_dir = get_results_path(preproc_opts or DEFAULT_PREPROC_OPTS, feat_opts)
-    cache_dir = results_dir / "window_arrays" / _band_stem(band_name)
+    feature_cache_dir = get_cache_path(preproc_opts or DEFAULT_PREPROC_OPTS, feat_opts)
+    cache_dir = feature_cache_dir / "window_arrays" / _band_stem(band_name)
     print(f"[window arrays] cache path: {cache_dir.resolve()}")
 
     bands = ["2.4 GHz", "5 GHz"] if band_name == "Fusion" else [band_name]

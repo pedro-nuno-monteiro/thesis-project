@@ -11,13 +11,15 @@ import numpy as np
 import pandas as pd
 
 from utils.cache import (
+    RESULTS_ROOT,
     get_all_dataframes,
     get_cache_path,
     load_predictions,
+    make_run_id,
     predictions_path,
-    write_manifest,
 )
 from utils.csi_preprocessing import process_magnitude_data
+from utils.config import PLOT_DPI, PLOT_FORMAT
 from utils.feature_pipeline import build_frequency_feature_dataframes, iter_window_groups
 from utils.global_position_classifier import (
     feature_columns,
@@ -33,6 +35,13 @@ from utils.global_position_classifier import (
 from utils.import_data import get_csv_files, sort_meta_info
 from utils.metrics import compute_localization_metrics
 from utils.models import PARAM_GRIDS, build_estimator, default_params_for
+from utils.results import (
+    build_run_row,
+    derive_table_from_runs,
+    upsert_fold_rows,
+    upsert_run,
+    write_run_manifest,
+)
 from utils.thesis_csv_processing import process_csv_files
 
 
@@ -380,6 +389,14 @@ def run_optional_grid_search(  # noqa: PLR0913
             )
             all_grid_rows.extend(model_rows)
             best_rows.append(max(model_rows, key=lambda row: row["position_accuracy"]))
+            tuning_path = (
+                RESULTS_ROOT
+                / "tuning"
+                / f"{model.lower()}__{band.lower().replace('.', '_').replace(' ', '')}__grid.csv"
+            )
+            tuning_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(model_rows).to_csv(tuning_path, index=False)
+            print(f"Wrote model/band grid log to {tuning_path}")
 
     grid_log_path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(all_grid_rows).to_csv(grid_log_path, index=False)
@@ -411,7 +428,8 @@ def run_global_baselines(  # noqa: PLR0913
     column_spacing: float,
     frozen_block_results_dir: Path | None = None,
 ) -> tuple[pd.DataFrame, dict[tuple[str, str, str], pd.DataFrame]]:
-    """Run every requested global ML baseline and persist summary/manifest files."""
+    """Run requested ML baselines and persist the flat, global result contract."""
+    del summary_dir
     predictions_by_key = {}
     summary_rows = []
     lovo_per_fold_rows = []
@@ -426,6 +444,36 @@ def run_global_baselines(  # noqa: PLR0913
         for model_name in models_to_run:
             params = params_lookup[(model_name, band)]
             for split_mode in split_modes:
+                seed = None if model_name.upper() == "KNN" else int(random_state)
+                if seed is None:
+                    print(
+                        f"[seed] {band} / KNN / {split_mode}: deterministic; "
+                        "no fabricated seed is stored."
+                    )
+                full_config = {
+                    "preproc_opts": preproc_opts,
+                    "feat_opts": feat_opts,
+                    "model_params": params,
+                    "seed": seed,
+                    "split_params": {
+                        "test_size": test_size,
+                        "random_state": random_state,
+                        "n_blocks": n_blocks,
+                        "row_spacing": row_spacing,
+                        "column_spacing": column_spacing,
+                    },
+                }
+                run_id = make_run_id(
+                    family="ml",
+                    model=model_name,
+                    band=band,
+                    split=split_mode,
+                    normalization=str(preproc_opts.get("normalization", "none")),
+                    baseline_scope=preproc_opts.get("baseline_scope"),
+                    seed=seed,
+                    config=full_config,
+                )
+                write_run_manifest(run_id, full_config, results_root=results_dir)
                 if split_mode == "lovo":
                     predictions, per_fold_metrics, metrics = run_global_lovo_experiment(
                         dataframe,
@@ -440,6 +488,7 @@ def run_global_baselines(  # noqa: PLR0913
                         force_retrain=force_retrain,
                         save_prediction_cache=save_predictions,
                         svm_fallback_seconds=svm_fallback_seconds,
+                        run_id=run_id,
                     )
                     per_fold_metrics = per_fold_metrics.copy()
                     per_fold_metrics.insert(0, "dataset", band)
@@ -474,6 +523,7 @@ def run_global_baselines(  # noqa: PLR0913
                         force_retrain=force_retrain,
                         save_prediction_cache=save_predictions,
                         svm_fallback_seconds=svm_fallback_seconds,
+                        run_id=run_id,
                     )
                 predictions_by_key[(model_name, band, split_mode)] = predictions
                 if {
@@ -495,43 +545,113 @@ def run_global_baselines(  # noqa: PLR0913
                     }
                 )
 
+                protocol_split = split_dataframe(
+                    dataframe,
+                    test_size=test_size,
+                    random_state=random_state,
+                    split_mode=split_mode,
+                    stratify_column="location",
+                    n_blocks=n_blocks,
+                )
+                protocol_folds = (
+                    protocol_split if isinstance(protocol_split, list) else [protocol_split]
+                )
+                trials_used = sorted(
+                    {
+                        str(trial).removeprefix("trial_").zfill(2)
+                        for train_df, test_df in protocol_folds
+                        for frame in (train_df, test_df)
+                        for trial in frame["trial"].dropna().unique()
+                    }
+                )
+                run_metrics = dict(metrics)
+                if split_mode == "lovo":
+                    for metric_name in (
+                        "position_accuracy",
+                        "macro_f1",
+                        "room_accuracy",
+                        "mean_distance_error",
+                        "median_distance_error",
+                        "rmse_distance_error",
+                        "p90_distance_error",
+                    ):
+                        run_metrics.setdefault(
+                            metric_name,
+                            run_metrics.get(f"{metric_name}_mean", np.nan),
+                        )
+                run_row = build_run_row(
+                    run_id=run_id,
+                    preproc_opts=preproc_opts,
+                    feat_opts=feat_opts,
+                    hyperparameters=params,
+                    metrics=run_metrics,
+                    trials_used=trials_used,
+                    n_train=sum(len(train_df) for train_df, _ in protocol_folds),
+                    n_test=sum(len(test_df) for _, test_df in protocol_folds),
+                    n_classes=int(
+                        pd.concat(
+                            [frame for fold in protocol_folds for frame in fold],
+                            ignore_index=True,
+                        )["location"].nunique()
+                    ),
+                    device="cpu",
+                )
+                upsert_run(
+                    run_row,
+                    hyperparameter_columns=params.keys(),
+                    results_root=results_dir,
+                )
+                if split_mode == "lovo":
+                    fold_metrics_by_user = {
+                        str(row["held_out_user"]): row
+                        for row in per_fold_metrics.to_dict("records")
+                    }
+                    upsert_fold_rows(
+                        [
+                            {
+                                "run_id": run_id,
+                                "fold": str(test_df["user"].iloc[0]),
+                                "held_out_user": str(test_df["user"].iloc[0]),
+                                "validation_user": None,
+                                "n_train_windows": len(train_df),
+                                "n_test_windows": len(test_df),
+                                "trials_used": ",".join(trials_used),
+                                **fold_metrics_by_user[str(test_df["user"].iloc[0])],
+                            }
+                            for train_df, test_df in protocol_folds
+                        ],
+                        results_root=results_dir,
+                    )
+                elif split_mode == "cross_session":
+                    train_df, _ = protocol_folds[0]
+                    cross_rows = []
+                    for user, user_predictions in predictions.groupby("user", sort=True):
+                        user_metrics = compute_localization_metrics(user_predictions)
+                        user_test = user_predictions[["true_position"]].rename(
+                            columns={"true_position": "location"}
+                        )
+                        user_metrics.update(majority_class_baselines(train_df, user_test))
+                        cross_rows.append(
+                            {
+                                "run_id": run_id,
+                                "fold": str(user),
+                                "held_out_user": str(user),
+                                "validation_user": None,
+                                "n_train_windows": len(train_df),
+                                "n_test_windows": len(user_predictions),
+                                "trials_used": ",".join(trials_used),
+                                **user_metrics,
+                            }
+                        )
+                    upsert_fold_rows(cross_rows, results_root=results_dir)
+
     summary = pd.DataFrame(summary_rows)
-    summary_dir.mkdir(parents=True, exist_ok=True)
-    summary.to_csv(summary_dir / "global_summary.csv", index=False)
-    if lovo_per_fold_rows:
-        pd.DataFrame(lovo_per_fold_rows).to_csv(summary_dir / "lovo_per_fold.csv", index=False)
-    if lovo_summary_rows:
-        pd.DataFrame(lovo_summary_rows).to_csv(summary_dir / "lovo_summary.csv", index=False)
-    if "cross_session" in split_modes:
-        _write_cross_session_reports(
-            feature_dataframes,
-            predictions_by_key=predictions_by_key,
-            summary=summary,
-            summary_dir=summary_dir,
-            block_results_dir=frozen_block_results_dir or results_dir,
-            row_spacing=row_spacing,
-            column_spacing=column_spacing,
+    derive_table_from_runs("global_summary", results_root=results_dir)
+    if "cross_session" in split_modes and frozen_block_results_dir is not None:
+        print(
+            "[cross_session] per-user rows are stored in runs_folds.csv; no independent "
+            "summary tables are written because runs.csv is the single source of truth."
         )
-    write_manifest(
-        results_dir,
-        preproc_opts,
-        feat_opts,
-        classifier_params={
-            f"{model}:{band}": params_lookup[(model, band)]
-            for model in models_to_run
-            for band in bands_to_run
-        },
-        splits=list(split_modes),
-        test_size=test_size,
-        feature_dataframes={band: feature_dataframes[band] for band in bands_to_run},
-        lovo_metadata=_build_lovo_manifest_metadata(
-            lovo_fold_user_ids,
-            params_lookup=params_lookup,
-            models_to_run=models_to_run,
-            bands_to_run=bands_to_run,
-            enabled="lovo" in split_modes,
-        ),
-    )
     return summary, predictions_by_key
 
 
@@ -625,6 +745,37 @@ def load_all_predictions(
     split_modes: tuple[str, ...],
 ) -> pd.DataFrame:
     """Load all persisted prediction parquet files for analysis-only notebook runs."""
+    runs_path = Path(results_dir) / "runs.csv"
+    if runs_path.exists():
+        runs = pd.read_csv(runs_path)
+        requested_models = {str(model).lower() for model in models_to_run}
+        requested_bands = {
+            band.lower().replace(".", "_").replace(" ", "") for band in bands_to_run
+        }
+        requested_splits = set(split_modes)
+        selected = runs.loc[
+            runs["model"].astype(str).str.lower().isin(requested_models)
+            & runs["band"].astype(str).isin(requested_bands)
+            & runs["split"].astype(str).isin(requested_splits)
+        ]
+        if selected.empty:
+            raise FileNotFoundError(
+                "runs.csv contains no rows matching the requested models/bands/splits."
+            )
+        frames = []
+        missing = []
+        for run_id in selected["run_id"].astype(str):
+            path = Path(results_dir) / "predictions" / f"{run_id}.parquet"
+            if path.exists():
+                frames.append(pd.read_parquet(path))
+            else:
+                missing.append(str(path))
+        if missing:
+            raise FileNotFoundError(
+                "runs.csv references missing prediction parquets:\n" + "\n".join(missing)
+            )
+        return pd.concat(frames, ignore_index=True)
+
     frames = []
     missing = []
     for model in models_to_run:
@@ -663,6 +814,15 @@ def master_results_table(
     table = pd.DataFrame(rows)
     if summary_path is not None and summary_path.exists() and not table.empty:
         timings = pd.read_csv(summary_path)
+        if "run_id" in timings.columns and "band" in timings.columns:
+            band_labels = {
+                "2_4ghz": "2.4 GHz",
+                "5ghz": "5 GHz",
+                "fusion": "Fusion",
+            }
+            timings = timings.copy()
+            timings["dataset"] = timings["band"].astype(str).map(band_labels)
+            timings["model"] = timings["model"].astype(str).str.upper()
         timing_cols = [
             col
             for col in [
@@ -730,29 +890,40 @@ def save_analysis_tables(
     *,
     tables_dir: Path,
 ) -> None:
-    """Write CSV and LaTeX analysis tables."""
-    tables_dir.mkdir(parents=True, exist_ok=True)
-    master_table.to_csv(tables_dir / "global_ml_baseline.csv", index=False)
-    (tables_dir / "global_ml_baseline.tex").write_text(
-        master_table.to_latex(index=False, escape=False, float_format="%.4f"),
-        encoding="utf-8",
+    """Regenerate the global ML view from runs.csv, the sole table source."""
+    del master_table, per_room_table
+    derive_table_from_runs(
+        "global_ml_baseline",
+        query="family == 'ml'",
+        results_root=tables_dir.parent,
     )
-    per_room_table.to_csv(tables_dir / "global_ml_baseline_per_room.csv", index=False)
-    (tables_dir / "global_ml_baseline_per_room.tex").write_text(
-        per_room_table.to_latex(index=False, escape=False, float_format="%.4f"),
-        encoding="utf-8",
-    )
+    print("[tables] per-room predictions remain analysis-only and are not a runs.csv view.")
 
 
 def load_lovo_summary_tables(summary_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load persisted LOVO summary tables without triggering training."""
-    per_fold_path = summary_dir / "lovo_per_fold.csv"
-    summary_path = summary_dir / "lovo_summary.csv"
+    """Load LOVO rows from the two authoritative global CSV files."""
+    results_root = summary_dir.parent if summary_dir.name in {"summary", "tables"} else summary_dir
+    per_fold_path = results_root / "runs_folds.csv"
+    summary_path = results_root / "runs.csv"
     missing = [str(path) for path in (per_fold_path, summary_path) if not path.exists()]
     if missing:
         msg = "Missing LOVO summary files. Run the Global baseline cell first.\n"
         raise FileNotFoundError(msg + "\n".join(missing))
-    return pd.read_csv(per_fold_path), pd.read_csv(summary_path)
+    summary = pd.read_csv(summary_path)
+    summary = summary.loc[summary["split"].astype(str) == "lovo"].copy()
+    summary["dataset"] = summary["band"].astype(str).map(
+        {"2_4ghz": "2.4 GHz", "5ghz": "5 GHz", "fusion": "Fusion"}
+    )
+    summary["model"] = summary["model"].astype(str).str.upper()
+    run_ids = set(summary["run_id"].astype(str))
+    per_fold = pd.read_csv(per_fold_path)
+    per_fold = per_fold.loc[per_fold["run_id"].astype(str).isin(run_ids)].copy()
+    per_fold = per_fold.merge(
+        summary[["run_id", "model", "dataset"]],
+        on="run_id",
+        how="left",
+    )
+    return per_fold, summary
 
 
 def lovo_aggregated_analysis_table(lovo_summary: pd.DataFrame) -> pd.DataFrame:
@@ -770,7 +941,10 @@ def lovo_aggregated_analysis_table(lovo_summary: pd.DataFrame) -> pd.DataFrame:
     ]
     rows = []
     for _, row in lovo_summary.iterrows():
-        output_row = {"model": row["model"], "dataset": row["dataset"]}
+        output_row = {
+            "model": row["model"],
+            "dataset": row.get("dataset", row.get("band")),
+        }
         for metric, output_col in metrics:
             output_row[output_col] = _format_mean_std(
                 row.get(f"{metric}_mean", np.nan),
@@ -781,12 +955,12 @@ def lovo_aggregated_analysis_table(lovo_summary: pd.DataFrame) -> pd.DataFrame:
 
 
 def save_lovo_analysis_table(table: pd.DataFrame, *, tables_dir: Path) -> None:
-    """Write the persisted LOVO analysis table to CSV and LaTeX."""
-    tables_dir.mkdir(parents=True, exist_ok=True)
-    table.to_csv(tables_dir / "lovo_aggregated_table.csv", index=False)
-    (tables_dir / "lovo_aggregated_table.tex").write_text(
-        table.to_latex(index=False, escape=False),
-        encoding="utf-8",
+    """Regenerate the LOVO view directly from runs.csv."""
+    del table
+    derive_table_from_runs(
+        "lovo_aggregated_table",
+        query="split == 'lovo'",
+        results_root=tables_dir.parent,
     )
 
 
@@ -1047,7 +1221,14 @@ def _format_mean_std(mean_value: object, std_value: object) -> str:
 def _save_plot(fig, save_path: Path | None) -> None:
     fig.tight_layout()
     if save_path is not None:
-        fig.savefig(save_path, bbox_inches="tight")
+        output = Path(save_path).with_suffix(f".{PLOT_FORMAT}")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(
+            output,
+            bbox_inches="tight",
+            dpi=PLOT_DPI,
+            format=PLOT_FORMAT,
+        )
     import matplotlib.pyplot as plt
 
     plt.show()

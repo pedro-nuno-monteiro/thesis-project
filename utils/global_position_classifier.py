@@ -13,6 +13,7 @@ from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from sklearn.pipeline import Pipeline
 
 from utils.cache import load_predictions, prediction_cache_metadata, save_predictions
+from utils.config import TRIALS_FOR_TRAINING_PROTOCOLS
 from utils.metrics import compute_localization_metrics
 from utils.models import build_estimator
 
@@ -141,12 +142,22 @@ def location_distance_error(
     return float(np.hypot(row_error, column_error))
 
 
-def split_lovo_folds(df: pd.DataFrame) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
+def split_lovo_folds(
+    df: pd.DataFrame,
+    *,
+    trials_for_training_protocols: tuple[str, ...] = TRIALS_FOR_TRAINING_PROTOCOLS,
+) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
     """Return leave-one-volunteer-out folds using the user column."""
     _validate_required_columns(df, {"user"})
     if df.empty:
         msg = "Cannot split an empty dataframe."
         raise ValueError(msg)
+    if "trial" in df.columns:
+        df = filter_training_protocol_trials(
+            df,
+            trials=trials_for_training_protocols,
+            split_mode="lovo",
+        )
     users = sorted(df["user"].dropna().unique())
     if len(users) < 2:
         msg = "LOVO split requires at least two users."
@@ -158,6 +169,7 @@ def split_lovo_folds(df: pd.DataFrame) -> list[tuple[pd.DataFrame, pd.DataFrame]
         train_df = df.loc[~test_mask].copy()
         test_df = df.loc[test_mask].copy()
         if not train_df.empty and not test_df.empty:
+            _print_protocol_split("lovo", train_df, test_df, fold=user)
             folds.append((train_df, test_df))
     return folds
 
@@ -169,7 +181,7 @@ def split_cross_session(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         msg = "Cannot split an empty dataframe."
         raise ValueError(msg)
 
-    trials = df["trial"].astype(str).str.removeprefix("trial_").str.zfill(2)
+    trials = _normalized_trial_values(df["trial"])
     train_df = df.loc[trials == "01"].copy()
     test_df = df.loc[trials == "02"].copy()
     if train_df.empty:
@@ -177,8 +189,8 @@ def split_cross_session(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     if test_df.empty:
         raise ValueError("cross_session split has no trial-02 test windows.")
 
-    train_trials = train_df["trial"].astype(str).str.removeprefix("trial_").str.zfill(2)
-    test_trials = test_df["trial"].astype(str).str.removeprefix("trial_").str.zfill(2)
+    train_trials = _normalized_trial_values(train_df["trial"])
+    test_trials = _normalized_trial_values(test_df["trial"])
     assert (test_trials == "02").all(), "cross_session test contains a non-trial-02 window"
     assert not (train_trials == "02").any(), "trial-02 window leaked into training"
 
@@ -186,15 +198,16 @@ def split_cross_session(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     test_users = sorted(test_df["user"].astype(str).unique())
     unknown_test_users = sorted(set(test_users) - set(train_users))
     if unknown_test_users:
-        msg = (
-            "cross_session requires every trial-02 user to be present in trial 01; "
-            f"unknown test users: {', '.join(unknown_test_users)}"
+        print(
+            "[cross_session warning] trial-02 contains user(s) absent from trial 01: "
+            f"{', '.join(unknown_test_users)}. Evaluation remains valid as cross-user plus "
+            "cross-session transfer."
         )
-        raise ValueError(msg)
     train_positions = set(train_df["location"].astype(str))
     test_positions = set(test_df["location"].astype(str))
     missing_positions = sorted(test_positions - train_positions)
     print(f"[cross_session] discovered trial-02 users: {', '.join(test_users)}")
+    _print_protocol_split("cross_session", train_df, test_df)
     print(
         f"[cross_session] n_train={len(train_df)} users={train_users} "
         f"positions={len(train_positions)}"
@@ -222,6 +235,7 @@ def split_dataframe(
     split_mode: Literal["group", "random", "block", "lovo", "cross_session"] = "group",
     stratify_column: str | None = None,
     n_blocks: int = DEFAULT_BLOCK_COUNT,
+    trials_for_training_protocols: tuple[str, ...] = TRIALS_FOR_TRAINING_PROTOCOLS,
 ) -> tuple[pd.DataFrame, pd.DataFrame] | list[tuple[pd.DataFrame, pd.DataFrame]]:
     """Split a feature dataframe for global position classification."""
     if df.empty:
@@ -231,11 +245,20 @@ def split_dataframe(
         msg = "test_size must be between 0 and 1."
         raise ValueError(msg)
 
-    if split_mode == "lovo":
-        return split_lovo_folds(df)
-
     if split_mode == "cross_session":
         return split_cross_session(df)
+
+    df = filter_training_protocol_trials(
+        df,
+        trials=trials_for_training_protocols,
+        split_mode=split_mode,
+    )
+
+    if split_mode == "lovo":
+        return split_lovo_folds(
+            df,
+            trials_for_training_protocols=trials_for_training_protocols,
+        )
 
     _validate_required_columns(df, {"group_id"})
 
@@ -250,7 +273,9 @@ def split_dataframe(
             random_state=random_state,
         )
         train_idx, test_idx = next(splitter.split(df, df["label"], groups=df["group_id"]))
-        return df.iloc[train_idx].copy(), df.iloc[test_idx].copy()
+        train_df, test_df = df.iloc[train_idx].copy(), df.iloc[test_idx].copy()
+        _print_protocol_split(split_mode, train_df, test_df)
+        return train_df, test_df
 
     if split_mode == "random":
         stratify = None
@@ -265,15 +290,19 @@ def split_dataframe(
             random_state=random_state,
             stratify=stratify,
         )
-        return df.iloc[train_idx].copy(), df.iloc[test_idx].copy()
+        train_df, test_df = df.iloc[train_idx].copy(), df.iloc[test_idx].copy()
+        _print_protocol_split(split_mode, train_df, test_df)
+        return train_df, test_df
 
     if split_mode == "block":
-        return _split_dataframe_by_blocks(
+        train_df, test_df = _split_dataframe_by_blocks(
             df,
             test_size=test_size,
             random_state=random_state,
             n_blocks=n_blocks,
         )
+        _print_protocol_split(split_mode, train_df, test_df)
+        return train_df, test_df
 
     msg = (
         f"Unknown split_mode {split_mode!r}. Must be 'group', 'random', 'block', "
@@ -299,6 +328,7 @@ def run_global_position_experiment(  # noqa: PLR0913
     svm_fallback_seconds: float = 30.0 * 60.0,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
+    run_id: str | None = None,
 ) -> tuple[Pipeline | None, pd.DataFrame, dict[str, float]]:
     """Train/evaluate or load a global 52-position classical baseline."""
     _validate_grid_spacing(row_spacing=row_spacing, column_spacing=column_spacing)
@@ -321,6 +351,7 @@ def run_global_position_experiment(  # noqa: PLR0913
             svm_fallback_seconds=svm_fallback_seconds,
             row_spacing=row_spacing,
             column_spacing=column_spacing,
+            run_id=run_id,
         )
         return None, predictions, metrics
 
@@ -336,7 +367,8 @@ def run_global_position_experiment(  # noqa: PLR0913
         msg = "Unexpected multi-fold split outside the LOVO dispatch path."
         raise RuntimeError(msg)
     train_df, test_df = split_result
-    data_fingerprint = _window_identity_fingerprint(test_df)
+    train_fingerprint = _window_identity_fingerprint(train_df)
+    test_fingerprint = _window_identity_fingerprint(test_df)
     majority_metrics = majority_class_baselines(
         train_df,
         test_df,
@@ -345,24 +377,24 @@ def run_global_position_experiment(  # noqa: PLR0913
     )
 
     if results_dir is not None and not force_retrain:
-        expected_metadata = None
-        if split_mode == "cross_session":
-            expected_metadata = prediction_cache_metadata(
-                model=resolved_model_name,
-                band=dataset_name,
-                split_mode=split_mode,
-                params=resolved_params,
-                random_state=random_state,
-                row_spacing=row_spacing,
-                column_spacing=column_spacing,
-                data_fingerprint=data_fingerprint,
-            )
+        expected_metadata = prediction_cache_metadata(
+            model=resolved_model_name,
+            band=dataset_name,
+            split_mode=split_mode,
+            params=resolved_params,
+            random_state=random_state,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+            train_fingerprint=train_fingerprint,
+            test_fingerprint=test_fingerprint,
+        )
         cached_predictions = load_predictions(
             Path(results_dir),
             resolved_model_name,
             dataset_name,
             split_mode,
             expected_metadata=expected_metadata,
+            run_id=run_id,
         )
         if cached_predictions is not None:
             metrics = compute_localization_metrics(cached_predictions)
@@ -436,6 +468,7 @@ def run_global_position_experiment(  # noqa: PLR0913
             resolved_model_name,
             dataset_name,
             split_mode,
+            run_id=run_id,
             metadata=prediction_cache_metadata(
                 model=resolved_model_name,
                 band=dataset_name,
@@ -444,7 +477,8 @@ def run_global_position_experiment(  # noqa: PLR0913
                 random_state=random_state,
                 row_spacing=row_spacing,
                 column_spacing=column_spacing,
-                data_fingerprint=data_fingerprint,
+                train_fingerprint=train_fingerprint,
+                test_fingerprint=test_fingerprint,
             ),
         )
 
@@ -463,6 +497,31 @@ def _window_identity_fingerprint(df: pd.DataFrame) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def filter_training_protocol_trials(
+    df: pd.DataFrame,
+    *,
+    trials: tuple[str, ...] = TRIALS_FOR_TRAINING_PROTOCOLS,
+    split_mode: str,
+) -> pd.DataFrame:
+    """Restrict non-cross-session protocols to their configured recording trials."""
+    _validate_required_columns(df, {"trial"})
+    normalized_trials = tuple(_normalized_trial_values(pd.Series(trials)).tolist())
+    if not normalized_trials:
+        raise ValueError("TRIALS_FOR_TRAINING_PROTOCOLS cannot be empty.")
+    observed = _normalized_trial_values(df["trial"])
+    filtered = df.loc[observed.isin(normalized_trials)].copy()
+    if filtered.empty:
+        raise ValueError(
+            f"{split_mode} trial filter emptied the dataframe; requested trials="
+            f"{list(normalized_trials)}, observed trials={sorted(observed.unique())}."
+        )
+    print(
+        f"[trial filter] split={split_mode} trials={list(normalized_trials)} "
+        f"kept={len(filtered)}/{len(df)}"
+    )
+    return filtered
+
+
 def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
     df: pd.DataFrame,
     *,
@@ -477,6 +536,7 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
     svm_fallback_seconds: float = 30.0 * 60.0,
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
+    run_id: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
     """Run leave-one-volunteer-out global classification for one model/band pair."""
     _validate_grid_spacing(row_spacing=row_spacing, column_spacing=column_spacing)
@@ -486,10 +546,11 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
     resolved_model_name = model_name.upper()
     resolved_params = dict(params)
     folds = split_lovo_folds(df)
+    protocol_df = pd.concat([test_df for _, test_df in folds], axis=0).sort_index()
     held_out_users = [_held_out_user(test_df) for _, test_df in folds]
     result_path = Path(results_dir) if results_dir is not None else None
 
-    _print_lovo_honesty_warnings(df, folds, dataset_name=dataset_name)
+    _print_lovo_honesty_warnings(protocol_df, folds, dataset_name=dataset_name)
     print(
         "[LOVO] Hyperparameter provenance: reusing block-split tuned/default "
         "hyperparameters; no nested CV is run for LOVO."
@@ -502,6 +563,11 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
             dataset_name,
             resolved_params,
             held_out_users,
+            folds=folds,
+            random_state=random_state,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+            run_id=run_id,
             save_prediction_cache=save_prediction_cache,
         )
         if cached_predictions is not None:
@@ -533,6 +599,8 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
         start=1,
     ):
         fold_label = _lovo_fold_label(held_out_user)
+        train_fingerprint = _window_identity_fingerprint(train_df)
+        test_fingerprint = _window_identity_fingerprint(test_df)
         print(
             f"[LOVO] {dataset_name} / {resolved_model_name} fold "
             f"{fold_index}/{len(folds)}: held_out_user={held_out_user}"
@@ -607,12 +675,18 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
                 dataset_name,
                 "lovo",
                 fold=fold_label,
+                run_id=run_id,
                 metadata=prediction_cache_metadata(
                     model=resolved_model_name,
                     band=dataset_name,
                     split_mode="lovo",
                     params=resolved_params,
                     fold=fold_label,
+                    random_state=random_state,
+                    row_spacing=row_spacing,
+                    column_spacing=column_spacing,
+                    train_fingerprint=train_fingerprint,
+                    test_fingerprint=test_fingerprint,
                 ),
             )
 
@@ -626,8 +700,11 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
         gc.collect()
 
     predictions = pd.concat(fold_prediction_frames, ignore_index=True)
-    if len(predictions) != len(df):
-        msg = f"LOVO predictions should cover {len(df)} windows, got {len(predictions)}."
+    if len(predictions) != len(protocol_df):
+        msg = (
+            f"LOVO predictions should cover {len(protocol_df)} filtered windows, "
+            f"got {len(predictions)}."
+        )
         raise RuntimeError(msg)
 
     per_fold_metrics = pd.DataFrame(fold_metric_rows)
@@ -651,11 +728,17 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
             resolved_model_name,
             dataset_name,
             "lovo",
+            run_id=run_id,
             metadata=prediction_cache_metadata(
                 model=resolved_model_name,
                 band=dataset_name,
                 split_mode="lovo",
                 params=resolved_params,
+                random_state=random_state,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+                train_fingerprint=_fold_collection_fingerprint(folds, side="train"),
+                test_fingerprint=_fold_collection_fingerprint(folds, side="test"),
             ),
         )
 
@@ -785,6 +868,11 @@ def _load_lovo_cached_predictions(
     params: dict[str, Any],
     held_out_users: list[object],
     *,
+    folds: list[tuple[pd.DataFrame, pd.DataFrame]],
+    random_state: int,
+    row_spacing: float,
+    column_spacing: float,
+    run_id: str | None,
     save_prediction_cache: bool,
 ) -> pd.DataFrame | None:
     concat_metadata = prediction_cache_metadata(
@@ -792,6 +880,11 @@ def _load_lovo_cached_predictions(
         band=dataset_name,
         split_mode="lovo",
         params=params,
+        random_state=random_state,
+        row_spacing=row_spacing,
+        column_spacing=column_spacing,
+        train_fingerprint=_fold_collection_fingerprint(folds, side="train"),
+        test_fingerprint=_fold_collection_fingerprint(folds, side="test"),
     )
     cached_concat = load_predictions(
         results_dir,
@@ -799,6 +892,7 @@ def _load_lovo_cached_predictions(
         dataset_name,
         "lovo",
         expected_metadata=concat_metadata,
+        run_id=run_id,
     )
     if cached_concat is not None:
         if "held_out_user" not in cached_concat.columns:
@@ -807,7 +901,7 @@ def _load_lovo_cached_predictions(
         return cached_concat
 
     fold_frames = []
-    for held_out_user in held_out_users:
+    for held_out_user, (train_df, test_df) in zip(held_out_users, folds):
         fold_label = _lovo_fold_label(held_out_user)
         fold_predictions = load_predictions(
             results_dir,
@@ -815,12 +909,18 @@ def _load_lovo_cached_predictions(
             dataset_name,
             "lovo",
             fold=fold_label,
+            run_id=run_id,
             expected_metadata=prediction_cache_metadata(
                 model=model_name,
                 band=dataset_name,
                 split_mode="lovo",
                 params=params,
                 fold=fold_label,
+                random_state=random_state,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+                train_fingerprint=_window_identity_fingerprint(train_df),
+                test_fingerprint=_window_identity_fingerprint(test_df),
             ),
         )
         if fold_predictions is None:
@@ -838,6 +938,7 @@ def _load_lovo_cached_predictions(
             model_name,
             dataset_name,
             "lovo",
+            run_id=run_id,
             metadata=concat_metadata,
         )
     return predictions
@@ -975,6 +1076,15 @@ def _lovo_fold_label(held_out_user: object) -> str:
     return f"user-{held_out_user}"
 
 
+def _fold_collection_fingerprint(
+    folds: list[tuple[pd.DataFrame, pd.DataFrame]],
+    *,
+    side: Literal["train", "test"],
+) -> str:
+    frames = [train_df if side == "train" else test_df for train_df, test_df in folds]
+    return _window_identity_fingerprint(pd.concat(frames, ignore_index=True))
+
+
 def _split_dataframe_by_blocks(
     df: pd.DataFrame,
     *,
@@ -1065,3 +1175,36 @@ def _validate_required_columns(df: pd.DataFrame, required_columns: set[str]) -> 
     if missing_columns:
         msg = f"Missing required columns: {', '.join(missing_columns)}"
         raise ValueError(msg)
+
+
+def _normalized_trial_values(values: pd.Series) -> pd.Series:
+    return (
+        values.astype(str)
+        .str.removeprefix("trial_")
+        .str.replace(r"\.0$", "", regex=True)
+        .str.zfill(2)
+    )
+
+
+def _print_protocol_split(
+    split_mode: str,
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    fold: object | None = None,
+) -> None:
+    combined = pd.concat([train_df, test_df], ignore_index=True)
+    trials = (
+        sorted(_normalized_trial_values(combined["trial"]).unique())
+        if "trial" in combined.columns
+        else ["unavailable"]
+    )
+    train_users = sorted(train_df["user"].dropna().astype(str).unique())
+    test_users = sorted(test_df["user"].dropna().astype(str).unique())
+    fold_text = f" fold={fold}" if fold is not None else ""
+    print(
+        f"[protocol] split={split_mode}{fold_text} trials_used={trials} "
+        f"n_train={len(train_df)} n_test={len(test_df)} "
+        f"users={sorted(set(train_users) | set(test_users))} "
+        f"train_users={train_users} test_users={test_users}"
+    )

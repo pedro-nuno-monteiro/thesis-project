@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from utils.config import PLOT_DPI, PLOT_FORMAT
+
 LOCATION_PATTERN = re.compile(r"^(?P<row>[A-Z])[-_ ]?(?P<column>\d+)$")
 EMPTY_ROOM_LOCATION = "Z-0"
 BAND_ORDER = ("2.4 GHz", "5 GHz", "Fusion")
@@ -93,7 +95,10 @@ def plot_band_error_cdf(
         fig.tight_layout()
         output = None
         if save_path is not None:
-            output = Path(save_path) / f"cdf_{_slugify(model_label)}_all-bands_{split}.pdf"
+            output = (
+                Path(save_path)
+                / f"cdf_{_slugify(model_label)}_all-bands_{split}.{PLOT_FORMAT}"
+            )
         _save_and_show(fig, output)
 
 
@@ -184,7 +189,11 @@ def plot_position_confusion_by_true_room(
 
     for room in sorted(dataset_predictions["true_room"].dropna().unique()):
         room_predictions = dataset_predictions.loc[dataset_predictions["true_room"] == room]
-        output = output_dir / f"confusion_room_{room}.pdf" if output_dir is not None else None
+        output = (
+            output_dir / f"confusion_room_{room}.{PLOT_FORMAT}"
+            if output_dir is not None
+            else None
+        )
         plot_global_position_confusion_matrix(
             room_predictions,
             dataset=dataset,
@@ -381,5 +390,16 @@ def _validate_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
 def _save_and_show(fig, save_path: str | Path | None) -> None:
     fig.tight_layout()
     if save_path is not None:
-        fig.savefig(save_path, bbox_inches="tight")
+        output = Path(save_path).with_suffix(f".{PLOT_FORMAT}")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(
+            output,
+            bbox_inches="tight",
+            dpi=PLOT_DPI,
+            format=PLOT_FORMAT,
+        )
+        print(
+            f"[plots] saved {output} at dpi={PLOT_DPI}. PNG is raster; set "
+            "PLOT_FORMAT='pdf' for a LaTeX vector figure without other changes."
+        )
     plt.show()
