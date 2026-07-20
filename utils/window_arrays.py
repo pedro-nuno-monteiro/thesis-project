@@ -18,18 +18,13 @@ from utils.feature_pipeline import (
 
 BandName = Literal["2.4 GHz", "5 GHz", "Fusion"]
 
-BAND_TO_SCENARIO: dict[BandName, FeatureScenario] = {
-    "2.4 GHz": "2.4ghz",
-    "5 GHz": "5ghz",
-    "Fusion": "fusion",
-}
 BAND_ANCHOR_RANGES: dict[str, tuple[str, ...]] = {
-    "2.4 GHz": _esp_keys_for_scenario("2.4ghz"),
-    "5 GHz": _esp_keys_for_scenario("5ghz"),
+    "2.4 GHz": _esp_keys_for_scenario("2.4 GHz"),
+    "5 GHz": _esp_keys_for_scenario("5 GHz"),
 }
 DEFAULT_PREPROC_OPTS = {
     "normalization": "empty_baseline",
-    "baseline_scope": "per_user",
+    "baseline_scope": "per_session",
 }
 
 
@@ -168,11 +163,12 @@ def _normalize_frequency_scenario(
     frequency_scenario: BandName | FeatureScenario,
 ) -> tuple[BandName, FeatureScenario]:
     aliases: dict[str, tuple[BandName, FeatureScenario]] = {
-        "2.4 ghz": ("2.4 GHz", "2.4ghz"),
-        "2.4ghz": ("2.4 GHz", "2.4ghz"),
-        "5 ghz": ("5 GHz", "5ghz"),
-        "5ghz": ("5 GHz", "5ghz"),
-        "fusion": ("Fusion", "fusion"),
+        "2.4 ghz": ("2.4 GHz", "2.4 GHz"),
+        "2.4ghz": ("2.4 GHz", "2.4 GHz"),
+        "2_4ghz": ("2.4 GHz", "2.4 GHz"),
+        "5 ghz": ("5 GHz", "5 GHz"),
+        "5ghz": ("5 GHz", "5 GHz"),
+        "fusion": ("Fusion", "Fusion"),
     }
     key = str(frequency_scenario).strip().lower()
     try:

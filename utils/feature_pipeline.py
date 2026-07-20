@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
-FeatureScenario = Literal["2.4ghz", "5ghz", "fusion"]
+FeatureScenario = Literal["2.4 GHz", "5 GHz", "Fusion"]
 
 FEATURE_NAMES = ("mean", "std", "variance", "max", "min", "energy")
 METADATA_COLUMNS = (
@@ -27,9 +27,9 @@ ROOM_2_A_COLUMNS = {13, 14}
 ROOM_2_BC_COLUMNS = range(10, 15)
 ROOM_3_EF_COLUMNS = range(10, 14)
 ESP_IDS_BY_SCENARIO: dict[FeatureScenario, tuple[int, ...]] = {
-    "2.4ghz": (*range(1, 6), *range(7, 11)),
-    "5ghz": tuple(range(11, 21)),
-    "fusion": (*range(1, 6), *range(7, 21)),
+    "2.4 GHz": (*range(1, 6), *range(7, 11)),
+    "5 GHz": tuple(range(11, 21)),
+    "Fusion": (*range(1, 6), *range(7, 21)),
 }
 
 
@@ -194,21 +194,21 @@ def build_frequency_feature_dataframes(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     df_24ghz = build_frequency_feature_dataframe(
         magnitude_data,
-        "2.4ghz",
+        "2.4 GHz",
         window_size=window_size,
         overlap_size=overlap_size,
         require_all_esps=require_all_esps,
     )
     df_5ghz = build_frequency_feature_dataframe(
         magnitude_data,
-        "5ghz",
+        "5 GHz",
         window_size=window_size,
         overlap_size=overlap_size,
         require_all_esps=require_all_esps,
     )
     df_fusion = build_frequency_feature_dataframe(
         magnitude_data,
-        "fusion",
+        "Fusion",
         window_size=window_size,
         overlap_size=overlap_size,
         require_all_esps=require_all_esps,
@@ -217,6 +217,14 @@ def build_frequency_feature_dataframes(
 
 
 def _esp_keys_for_scenario(frequency_scenario: FeatureScenario) -> tuple[str, ...]:
+    if frequency_scenario not in ESP_IDS_BY_SCENARIO:
+        msg = (
+            f"Unknown frequency_scenario {frequency_scenario!r}. "
+            f"Expected one of {sorted(ESP_IDS_BY_SCENARIO)}. "
+            "Note: display names ('2.4 GHz') are scenario identifiers; "
+            "slugs ('2_4ghz') are for cache paths only."
+        )
+        raise ValueError(msg)
     return tuple(f"esp_{esp_id:02d}" for esp_id in ESP_IDS_BY_SCENARIO[frequency_scenario])
 
 

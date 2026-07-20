@@ -94,3 +94,81 @@ def test_empty_baseline_per_user_names_missing_pair() -> None:
 
     with pytest.raises(ValueError, match=r"user=01, esp=01"):
         process_magnitude_data(raw, normalization="empty_baseline", baseline_scope="per_user")
+
+
+def test_empty_baseline_per_session_uses_matching_trial() -> None:
+    raw = {
+        "scenario_1": {
+            "location_Z-0": {
+                "user_01": {
+                    "esp_01": {
+                        "trial_01": np.array([[1.0, 1.0], [1.0, 1.0]], dtype=np.float32),
+                        "trial_02": np.array([[10.0, 10.0], [10.0, 10.0]], dtype=np.float32),
+                    },
+                },
+            },
+            "location_A-1": {
+                "user_01": {
+                    "esp_01": {
+                        "trial_01": np.array([[2.0, 2.0]], dtype=np.float32),
+                        "trial_02": np.array([[20.0, 20.0]], dtype=np.float32),
+                    },
+                },
+            },
+        },
+    }
+
+    processed, _ = process_magnitude_data(
+        raw,
+        normalization="empty_baseline",
+        baseline_scope="per_session",
+    )
+
+    trial_01 = processed["scenario_1"]["location_A-1"]["user_01"]["esp_01"]["trial_01"]
+    trial_02 = processed["scenario_1"]["location_A-1"]["user_01"]["esp_01"]["trial_02"]
+    np.testing.assert_allclose(trial_01, [[1.0, 1.0]])
+    np.testing.assert_allclose(trial_02, [[1.0, 1.0]])
+
+
+def test_empty_baseline_per_session_names_missing_triple() -> None:
+    raw = {
+        "scenario_1": {
+            "location_Z-0": {
+                "user_01": {"esp_01": {"trial_01": np.ones((2, 2), dtype=np.float32)}},
+            },
+            "location_A-1": {
+                "user_01": {"esp_01": {"trial_02": np.ones((2, 2), dtype=np.float32)}},
+            },
+        },
+    }
+
+    with pytest.raises(ValueError, match=r"user=01, trial=02, esp=01"):
+        process_magnitude_data(raw, normalization="empty_baseline", baseline_scope="per_session")
+
+
+def test_per_session_equals_per_user_for_single_trial() -> None:
+    raw = {
+        "scenario_1": {
+            "location_Z-0": {
+                "user_01": {"esp_01": {"trial_01": np.array([[1.0, 2.0]], dtype=np.float32)}},
+            },
+            "location_A-1": {
+                "user_01": {"esp_01": {"trial_01": np.array([[2.0, 4.0]], dtype=np.float32)}},
+            },
+        },
+    }
+    per_session, _ = process_magnitude_data(
+        raw, normalization="empty_baseline", baseline_scope="per_session"
+    )
+    per_user, _ = process_magnitude_data(
+        raw, normalization="empty_baseline", baseline_scope="per_user"
+    )
+    np.testing.assert_array_equal(
+        per_session["scenario_1"]["location_A-1"]["user_01"]["esp_01"]["trial_01"],
+        per_user["scenario_1"]["location_A-1"]["user_01"]["esp_01"]["trial_01"],
+    )
+
+
+def test_unknown_baseline_scope_lists_all_scopes() -> None:
+    with pytest.raises(ValueError, match="per_session, per_user, global"):
+        process_magnitude_data({}, normalization="none", baseline_scope="missing")

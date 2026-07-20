@@ -18,14 +18,16 @@ from utils.cache import (
     write_manifest,
 )
 from utils.csi_preprocessing import process_magnitude_data
-from utils.feature_pipeline import build_frequency_feature_dataframes
+from utils.feature_pipeline import build_frequency_feature_dataframes, iter_window_groups
 from utils.global_position_classifier import (
     feature_columns,
     location_distance_error,
+    majority_class_baselines,
     room_label_for_location,
     run_global_lovo_experiment,
     run_global_position_experiment,
     split_lovo_folds,
+    split_cross_session,
     split_dataframe,
 )
 from utils.import_data import get_csv_files, sort_meta_info
@@ -54,6 +56,117 @@ def load_raw_csi_data(
     return magnitude_data, csv_diagnostics
 
 
+def validate_cross_session_inventory(csv_diagnostics: pd.DataFrame) -> pd.DataFrame:
+    """Verify trial-02 anchor/subcarrier compatibility before cross-session training."""
+    required = {"user", "trial", "location", "esp", "band", "subcarriers"}
+    missing = required - set(csv_diagnostics.columns)
+    if missing:
+        msg = f"CSV diagnostics lack cross-session inventory columns: {sorted(missing)}"
+        raise ValueError(msg)
+
+    diagnostics = csv_diagnostics.copy()
+    diagnostics["user"] = diagnostics["user"].astype(str).str.zfill(2)
+    diagnostics["trial"] = diagnostics["trial"].astype(str).str.zfill(2)
+    diagnostics["esp"] = diagnostics["esp"].astype(str).str.removeprefix("esp_").str.zfill(2)
+    expected_by_band = {
+        "2.4 GHz": ({"01", "02", "03", "04", "05", "07", "08", "09", "10"}, 50),
+        "5 GHz": ({f"{esp:02d}" for esp in range(11, 21)}, 56),
+    }
+    trial_02 = diagnostics.loc[diagnostics["trial"] == "02"]
+    test_users = sorted(trial_02["user"].unique())
+    if not test_users:
+        raise ValueError("No trial-02 CSV recordings were discovered.")
+    print(f"[cross_session inventory] discovered trial-02 users: {', '.join(test_users)}")
+
+    rows: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for user in test_users:
+        user_rows = diagnostics.loc[diagnostics["user"] == user]
+        locations_01 = set(user_rows.loc[user_rows["trial"] == "01", "location"].astype(str))
+        locations_02 = set(user_rows.loc[user_rows["trial"] == "02", "location"].astype(str))
+        if locations_01 != locations_02 or len(locations_02) != 53:
+            failures.append(
+                f"user={user}: trial-01/trial-02 location inventories differ or do not "
+                f"contain 52 positions plus Z-0 (trial01={len(locations_01)}, "
+                f"trial02={len(locations_02)}, missing={sorted(locations_01 - locations_02)}, "
+                f"extra={sorted(locations_02 - locations_01)})"
+            )
+        for band, (expected_anchors, expected_subcarriers) in expected_by_band.items():
+            user_band = diagnostics.loc[
+                (diagnostics["user"] == user) & (diagnostics["band"].astype(str) == band)
+            ]
+            anchors_01 = set(user_band.loc[user_band["trial"] == "01", "esp"].astype(str))
+            anchors_02 = set(user_band.loc[user_band["trial"] == "02", "esp"].astype(str))
+            subcarriers_01 = set(
+                pd.to_numeric(
+                    user_band.loc[user_band["trial"] == "01", "subcarriers"],
+                    errors="coerce",
+                ).dropna().astype(int)
+            )
+            subcarriers_02 = set(
+                pd.to_numeric(
+                    user_band.loc[user_band["trial"] == "02", "subcarriers"],
+                    errors="coerce",
+                ).dropna().astype(int)
+            )
+            compatible = (
+                anchors_01 == expected_anchors
+                and anchors_02 == expected_anchors
+                and subcarriers_01 == {expected_subcarriers}
+                and subcarriers_02 == {expected_subcarriers}
+            )
+            rows.append(
+                {
+                    "user": user,
+                    "band": band,
+                    "trial_01_anchor_count": len(anchors_01),
+                    "trial_02_anchor_count": len(anchors_02),
+                    "trial_01_subcarriers": sorted(subcarriers_01),
+                    "trial_02_subcarriers": sorted(subcarriers_02),
+                    "compatible": compatible,
+                }
+            )
+            if not compatible:
+                failures.append(
+                    f"user={user} band={band}: expected anchors={sorted(expected_anchors)} "
+                    f"and subcarriers={expected_subcarriers}; observed trial01 "
+                    f"anchors={sorted(anchors_01)} subcarriers={sorted(subcarriers_01)}, "
+                    f"trial02 anchors={sorted(anchors_02)} subcarriers={sorted(subcarriers_02)}"
+                )
+            for trial in ("01", "02"):
+                trial_band = user_band.loc[user_band["trial"] == trial]
+                for location, recording_group in trial_band.groupby("location", sort=True):
+                    recording_anchors = set(recording_group["esp"].astype(str))
+                    recording_widths = set(
+                        pd.to_numeric(recording_group["subcarriers"], errors="coerce")
+                        .dropna()
+                        .astype(int)
+                    )
+                    if (
+                        recording_anchors != expected_anchors
+                        or recording_widths != {expected_subcarriers}
+                    ):
+                        failures.append(
+                            f"user={user} trial={trial} location={location} band={band}: "
+                            f"anchors={sorted(recording_anchors)}, "
+                            f"subcarriers={sorted(recording_widths)}"
+                        )
+
+    inventory = pd.DataFrame(rows)
+    print(inventory.to_string(index=False))
+    trial_02_anchors = set(trial_02["esp"].astype(str))
+    if len(trial_02_anchors) != 19:
+        failures.append(
+            f"trial 02 has {len(trial_02_anchors)} distinct anchors, expected 19: "
+            f"{sorted(trial_02_anchors)}"
+        )
+    if failures:
+        msg = "Cross-session inventory mismatch; stopping before training:\n" + "\n".join(failures)
+        raise ValueError(msg)
+    print("[cross_session inventory] PASS: same 19 anchors and matching subcarrier counts")
+    return inventory
+
+
 def load_feature_dataframes(
     magnitude_data: dict[str, Any],
     *,
@@ -67,7 +180,37 @@ def load_feature_dataframes(
         processed, _ = process_magnitude_data(magnitude_data, **preproc_opts)
         return build_frequency_feature_dataframes(processed, **feat_opts)
 
-    feature_dataframes = get_all_dataframes(preproc_opts, feat_opts, _build_feature_dataframes)
+    expected_trials = {
+        str(trial_key).removeprefix("trial_").zfill(2)
+        for locations in magnitude_data.values()
+        for users in locations.values()
+        for esps in users.values()
+        for trials in esps.values()
+        for trial_key, magnitude in trials.items()
+        if magnitude is not None
+    }
+    expected_window_inventory = {
+        band: {
+            group.group_id: int(group.min_windows)
+            for group in iter_window_groups(
+                magnitude_data,
+                band,
+                window_size=int(feat_opts.get("window_size", 60)),
+                overlap_size=int(feat_opts.get("overlap_size", feat_opts.get("step", 30))),
+                require_all_esps=bool(feat_opts.get("require_all_esps", False)),
+            )
+        }
+        for band in bands_to_run
+    }
+    cache_path = get_cache_path(preproc_opts, feat_opts)
+    print(f"[features] resolved cache path: {cache_path}")
+    feature_dataframes = get_all_dataframes(
+        preproc_opts,
+        feat_opts,
+        _build_feature_dataframes,
+        expected_trials=expected_trials,
+        expected_window_inventory=expected_window_inventory,
+    )
     missing_bands = sorted(set(bands_to_run) - set(feature_dataframes))
     if missing_bands:
         msg = f"BANDS_TO_RUN contains bands with no dataframe: {missing_bands}"
@@ -266,6 +409,7 @@ def run_global_baselines(  # noqa: PLR0913
     svm_fallback_seconds: float,
     row_spacing: float,
     column_spacing: float,
+    frozen_block_results_dir: Path | None = None,
 ) -> tuple[pd.DataFrame, dict[tuple[str, str, str], pd.DataFrame]]:
     """Run every requested global ML baseline and persist summary/manifest files."""
     predictions_by_key = {}
@@ -358,6 +502,16 @@ def run_global_baselines(  # noqa: PLR0913
         pd.DataFrame(lovo_per_fold_rows).to_csv(summary_dir / "lovo_per_fold.csv", index=False)
     if lovo_summary_rows:
         pd.DataFrame(lovo_summary_rows).to_csv(summary_dir / "lovo_summary.csv", index=False)
+    if "cross_session" in split_modes:
+        _write_cross_session_reports(
+            feature_dataframes,
+            predictions_by_key=predictions_by_key,
+            summary=summary,
+            summary_dir=summary_dir,
+            block_results_dir=frozen_block_results_dir or results_dir,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
     write_manifest(
         results_dir,
         preproc_opts,
@@ -379,6 +533,88 @@ def run_global_baselines(  # noqa: PLR0913
         ),
     )
     return summary, predictions_by_key
+
+
+def _write_cross_session_reports(  # noqa: PLR0913
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    predictions_by_key: dict[tuple[str, str, str], pd.DataFrame],
+    summary: pd.DataFrame,
+    summary_dir: Path,
+    block_results_dir: Path,
+    row_spacing: float,
+    column_spacing: float,
+) -> None:
+    """Persist the protocol-level, per-user, and paired cross-session tables."""
+    cross_summary = summary.loc[summary["split"] == "cross_session"].copy()
+    cross_summary.to_csv(summary_dir / "cross_session_summary.csv", index=False)
+
+    per_user_rows: list[dict[str, Any]] = []
+    paired_rows: list[dict[str, Any]] = []
+    for (model, band, split_mode), predictions in predictions_by_key.items():
+        if split_mode != "cross_session":
+            continue
+        train_df, test_df = split_cross_session(feature_dataframes[band])
+        block_path = predictions_path(block_results_dir, model, band, "block")
+        block_predictions = pd.read_parquet(block_path) if block_path.exists() else None
+        if block_predictions is None:
+            print(
+                f"[cross_session paired warning] frozen block predictions not found: {block_path}"
+            )
+
+        for test_user, user_predictions in predictions.groupby("user", sort=True):
+            user_test_df = test_df.loc[test_df["user"].astype(str) == str(test_user)]
+            user_metrics = compute_localization_metrics(user_predictions)
+            user_metrics.update(
+                majority_class_baselines(
+                    train_df,
+                    user_test_df,
+                    row_spacing=row_spacing,
+                    column_spacing=column_spacing,
+                )
+            )
+            per_user_rows.append(
+                {
+                    "model": model,
+                    "dataset": band,
+                    "test_user": str(test_user).zfill(2),
+                    **user_metrics,
+                    "n_test_windows": int(len(user_predictions)),
+                }
+            )
+            if block_predictions is not None:
+                user_block = block_predictions.loc[
+                    block_predictions["user"].astype(str).str.zfill(2)
+                    == str(test_user).zfill(2)
+                ]
+                if user_block.empty:
+                    print(
+                        f"[cross_session paired warning] no frozen block rows for user={test_user}, "
+                        f"model={model}, dataset={band}"
+                    )
+                    continue
+                block_accuracy = compute_localization_metrics(user_block)["position_accuracy"]
+                cross_accuracy = user_metrics["position_accuracy"]
+                paired_rows.append(
+                    {
+                        "model": model,
+                        "dataset": band,
+                        "test_user": str(test_user).zfill(2),
+                        "block_position_accuracy": block_accuracy,
+                        "cross_session_position_accuracy": cross_accuracy,
+                        "delta_block_minus_cross_session": block_accuracy - cross_accuracy,
+                    }
+                )
+
+    pd.DataFrame(per_user_rows).to_csv(
+        summary_dir / "cross_session_per_user.csv",
+        index=False,
+    )
+    pd.DataFrame(paired_rows).to_csv(
+        summary_dir / "cross_session_paired_per_user.csv",
+        index=False,
+    )
+    print(f"[cross_session] reports saved under {summary_dir}")
 
 
 def load_all_predictions(
