@@ -12,7 +12,7 @@ BaselineKey = tuple[str, ...]
 DEFAULT_EPSILON = 1e-8
 EXPECTED_MAGNITUDE_DIMS = 2
 EMPTY_ROOM_LOCATION = "Z-0"
-VALID_BASELINE_SCOPES = ("per_user", "global")
+VALID_BASELINE_SCOPES = ("per_session", "per_user", "global")
 
 
 @dataclass(frozen=True)
@@ -149,7 +149,7 @@ def process_magnitude_data(
     raw_magnitude_data: CsiMap,
     *,
     normalization: str = "none",
-    baseline_scope: str = "per_user",
+    baseline_scope: str = "per_session",
     epsilon: float = DEFAULT_EPSILON,
 ) -> tuple[CsiMap, pd.DataFrame]:
     normalization_key = normalization.lower()
@@ -192,6 +192,7 @@ def process_magnitude_data(
                             baseline_tables,
                             baseline_scope=baseline_scope,
                             user_key=user_key,
+                            trial_key=trial_key,
                             esp_key=esp_key,
                             magnitude=trial_magnitude,
                         )
@@ -253,10 +254,18 @@ def build_empty_baseline_tables(
                 for esp_key, trials_map in esps_map.items():
                     esp = _normalized_key(esp_key)
                     if not is_empty_room:
-                        occupied_pairs.add(_baseline_key(baseline_scope, user_key, esp_key))
+                        for trial_key, magnitude in trials_map.items():
+                            if magnitude is not None:
+                                occupied_pairs.add(
+                                    _baseline_key(
+                                        baseline_scope,
+                                        user_key,
+                                        trial_key,
+                                        esp_key,
+                                    )
+                                )
                         continue
 
-                    key = _baseline_key(baseline_scope, user_key, esp_key)
                     for trial_key, magnitude in trials_map.items():
                         if magnitude is None:
                             continue
@@ -264,6 +273,12 @@ def build_empty_baseline_tables(
                         if magnitude_array.ndim != EXPECTED_MAGNITUDE_DIMS:
                             msg = "Empty-room baseline entries must be 2D arrays."
                             raise ValueError(msg)
+                        key = _baseline_key(
+                            baseline_scope,
+                            user_key,
+                            trial_key,
+                            esp_key,
+                        )
                         empty_arrays.setdefault(key, []).append(magnitude_array)
                         file_counts[key] = file_counts.get(key, 0) + 1
                         total_files += 1
@@ -272,13 +287,17 @@ def build_empty_baseline_tables(
                         trial_counts[trial_key_tuple] = trial_counts.get(trial_key_tuple, 0) + 1
 
     missing = sorted(occupied_pairs - set(empty_arrays))
+    missing_error: str | None = None
     if missing:
-        if baseline_scope == "per_user":
+        if baseline_scope == "per_session":
+            missing_text = ", ".join(
+                f"(user={key[0]}, trial={key[1]}, esp={key[2]})" for key in missing
+            )
+        elif baseline_scope == "per_user":
             missing_text = ", ".join(f"(user={key[0]}, esp={key[1]})" for key in missing)
         else:
             missing_text = ", ".join(f"(esp={key[0]})" for key in missing)
-        msg = f"Missing empty-room Z-0 baselines for {missing_text}."
-        raise ValueError(msg)
+        missing_error = f"Missing empty-room Z-0 baselines for {missing_text}."
 
     mean: dict[BaselineKey, np.ndarray] = {}
     divisor: dict[BaselineKey, np.ndarray] = {}
@@ -310,6 +329,9 @@ def build_empty_baseline_tables(
             ),
         )
 
+    if missing_error is not None:
+        raise ValueError(missing_error)
+
     return EmptyBaselineTables(
         mean=mean,
         divisor=divisor,
@@ -333,6 +355,13 @@ def print_z0_inventory_report(
     print("[Z-0 inventory]")
     print(f"  total Z-0 files found: {baseline_tables.total_files}")
     if baseline_tables.trial_counts:
+        print("  Z-0 count per (user, trial):")
+        per_session_counts: dict[tuple[str, str], int] = {}
+        for (user, _, trial), count in baseline_tables.trial_counts.items():
+            session_key = (user, trial)
+            per_session_counts[session_key] = per_session_counts.get(session_key, 0) + count
+        for (user, trial), count in sorted(per_session_counts.items()):
+            print(f"    (user={user}, trial={trial}): {count}")
         print("  breakdown by user / esp / trial:")
         for (user, esp, trial), count in sorted(baseline_tables.trial_counts.items()):
             print(f"    user={user} esp={esp} trial={trial}: {count}")
@@ -341,16 +370,23 @@ def print_z0_inventory_report(
 
     print("  baseline coverage for occupied recordings:")
     for key in occupied_pairs:
-        if baseline_scope == "per_user":
+        if baseline_scope == "per_session":
+            label = f"user={key[0]} trial={key[1]} esp={key[2]}"
+        elif baseline_scope == "per_user":
             label = f"user={key[0]} esp={key[1]}"
         else:
             label = f"esp={key[0]}"
         print(f"    {label}: {'yes' if key in available_keys else 'no'}")
 
-    print(f"  per_user scope fully satisfiable: {'yes' if satisfiable else 'no'}")
+    print(f"  {baseline_scope} scope fully satisfiable: {'yes' if satisfiable else 'no'}")
     print("  deep-fade clipped subcarriers:")
     for key, count in sorted(baseline_tables.clip_counts.items()):
-        label = f"user={key[0]} esp={key[1]}" if len(key) == 2 else f"esp={key[0]}"
+        if baseline_scope == "per_session":
+            label = f"user={key[0]} trial={key[1]} esp={key[2]}"
+        elif baseline_scope == "per_user":
+            label = f"user={key[0]} esp={key[1]}"
+        else:
+            label = f"esp={key[0]}"
         print(f"    {label}: {count}")
 
 
@@ -359,15 +395,19 @@ def _baseline_for_recording(
     *,
     baseline_scope: str,
     user_key: str,
+    trial_key: str,
     esp_key: str,
     magnitude: np.ndarray,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     if baseline_tables is None:
         return None, None
 
-    key = _baseline_key(baseline_scope, user_key, esp_key)
+    key = _baseline_key(baseline_scope, user_key, trial_key, esp_key)
     if key not in baseline_tables.mean:
-        label = f"user={_normalized_key(user_key)} esp={_normalized_key(esp_key)}"
+        label = (
+            f"user={_normalized_key(user_key)} trial={_normalized_key(trial_key)} "
+            f"esp={_normalized_key(esp_key)}"
+        )
         msg = f"Missing empty-room Z-0 baseline for {label}."
         raise ValueError(msg)
 
@@ -392,14 +432,31 @@ def _occupied_baseline_keys(raw_magnitude_data: CsiMap, baseline_scope: str) -> 
             if _normalized_key(location_key) == EMPTY_ROOM_LOCATION:
                 continue
             for user_key, esps_map in users_map.items():
-                for esp_key in esps_map:
-                    occupied.add(_baseline_key(baseline_scope, user_key, esp_key))
+                for esp_key, trials_map in esps_map.items():
+                    for trial_key, magnitude in trials_map.items():
+                        if magnitude is not None:
+                            occupied.add(
+                                _baseline_key(
+                                    baseline_scope,
+                                    user_key,
+                                    trial_key,
+                                    esp_key,
+                                )
+                            )
     return occupied
 
 
-def _baseline_key(baseline_scope: str, user_key: str, esp_key: str) -> BaselineKey:
+def _baseline_key(
+    baseline_scope: str,
+    user_key: str,
+    trial_key: str,
+    esp_key: str,
+) -> BaselineKey:
     user = _normalized_key(user_key)
+    trial = _normalized_key(trial_key)
     esp = _normalized_key(esp_key)
+    if baseline_scope == "per_session":
+        return (user, trial, esp)
     if baseline_scope == "per_user":
         return (user, esp)
     if baseline_scope == "global":

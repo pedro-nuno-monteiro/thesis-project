@@ -11,7 +11,7 @@ UDP_IP = "0.0.0.0"
 DEFAULT_UDP_PORT = 5001
 RECV_BUFFER_SIZE = 4096
 SOCKET_TIMEOUT_SECONDS = 1.0
-DEFAULT_SAVE_DIRECTORY = Path.cwd() / "csi_packets"
+DEFAULT_SAVE_DIRECTORY = Path.cwd() / "csi_henri"
 
 ESP_MAC_MAP = {
     "90:38:0C:EA:D3:78": "01",
@@ -86,7 +86,7 @@ def prompt_location() -> str:
 
 
 def prompt_location_or_stop() -> str | None:
-    value = prompt_text("* * Enter location, or press ENTER to stop: ")
+    value = prompt_text(" * * Enter location, or press ENTER to stop: ")
     if not value:
         return None
     return normalize_location(value)
@@ -178,6 +178,11 @@ def prompt_session_metadata() -> tuple[str, str, float]:
     print("\n* User ID")
     print("* 00 - Nobody")
     print("* 01 - Pedro")
+    print("* 02 - Cabaço")
+    print("* 03 - Henrique")
+    print("* 04 - Nascimento")
+    print("* 05 - David Machado")
+    print("* 06 - Óscar Martins")
     user_id = prompt_user_id()
 
     print("\n* Collection Duration")

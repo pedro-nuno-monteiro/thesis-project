@@ -40,7 +40,7 @@ def make_preproc_key(opts: dict[str, Any]) -> str:
     norm = str(opts.get("normalization", "none")).lower()
     parts.append(f"norm-{norm or 'none'}")
     if norm == "empty_baseline":
-        scope = str(opts.get("baseline_scope", "per_user")).lower()
+        scope = str(opts.get("baseline_scope", "per_session")).lower()
         parts.append(f"scope-{scope}")
     return "_".join(sorted(parts))
 
@@ -145,10 +145,14 @@ def prediction_cache_metadata(
     split_mode: str,
     params: dict[str, Any],
     fold: str | None = None,
+    random_state: int | None = None,
+    row_spacing: float | None = None,
+    column_spacing: float | None = None,
+    data_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Return the metadata payload used to validate prediction caches."""
     normalized_params = _json_normalized(params)
-    return {
+    metadata = {
         "schema_version": 1,
         "model": model,
         "band": band,
@@ -160,6 +164,17 @@ def prediction_cache_metadata(
         ).hexdigest(),
         "sklearn_version": _lib_version("scikit-learn"),
     }
+    if data_fingerprint is not None:
+        metadata.update(
+            {
+                "schema_version": 2,
+                "random_state": random_state,
+                "row_spacing": row_spacing,
+                "column_spacing": column_spacing,
+                "data_fingerprint": data_fingerprint,
+            }
+        )
+    return metadata
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -263,6 +278,9 @@ def get_all_dataframes(
     preproc_opts: dict[str, Any],
     feat_opts: dict[str, Any],
     builder: Callable[[], tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]],
+    *,
+    expected_trials: set[str] | None = None,
+    expected_window_inventory: dict[str, dict[str, int]] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Return feature dataframes for all three bands, using the on-disk cache.
 
@@ -286,6 +304,17 @@ def get_all_dataframes(
                 df = pd.read_parquet(path)
                 _check_schema(df, path)
                 result[name] = df
+            stale_reasons = _feature_cache_stale_reasons(
+                result,
+                expected_trials=expected_trials,
+                expected_window_inventory=expected_window_inventory,
+            )
+            if stale_reasons:
+                print(
+                    "!!! LOUD WARNING: cached feature dataframes are stale: "
+                    f"{'; '.join(stale_reasons)}. Rebuilding all feature dataframes. !!!"
+                )
+                raise _StaleFeatureCache("cached windows do not match raw CSI inventory")
             return result
         except _StaleFeatureCache as exc:
             print(f"[cache stale] {exc} Rebuilding cached feature dataframes.")
@@ -297,6 +326,14 @@ def get_all_dataframes(
         "5 GHz": df_5ghz,
         "Fusion": df_fusion,
     }
+    stale_reasons = _feature_cache_stale_reasons(
+        dataframes,
+        expected_trials=expected_trials,
+        expected_window_inventory=expected_window_inventory,
+    )
+    if stale_reasons:
+        msg = "Built feature dataframes do not match raw CSI data: " + "; ".join(stale_reasons)
+        raise ValueError(msg)
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     for name, df in dataframes.items():
@@ -315,6 +352,42 @@ def get_all_dataframes(
         encoding="utf-8",
     )
     return dataframes
+
+
+def _feature_cache_stale_reasons(
+    dataframes: dict[str, pd.DataFrame],
+    *,
+    expected_trials: set[str] | None,
+    expected_window_inventory: dict[str, dict[str, int]] | None,
+) -> list[str]:
+    reasons: list[str] = []
+    for band, frame in dataframes.items():
+        observed_trials = {str(value).zfill(2) for value in frame["trial"].dropna().unique()}
+        missing_trials = set(expected_trials or ()) - observed_trials
+        if missing_trials:
+            reasons.append(f"{band} lacks trial(s) {sorted(missing_trials)}")
+        if expected_window_inventory is None or band not in expected_window_inventory:
+            continue
+        observed_inventory = {
+            str(group_id): int(count)
+            for group_id, count in frame.groupby("group_id", sort=True).size().items()
+        }
+        expected_inventory = expected_window_inventory[band]
+        if observed_inventory == expected_inventory:
+            continue
+        missing_groups = sorted(set(expected_inventory) - set(observed_inventory))
+        extra_groups = sorted(set(observed_inventory) - set(expected_inventory))
+        changed_groups = sorted(
+            group_id
+            for group_id in set(expected_inventory) & set(observed_inventory)
+            if expected_inventory[group_id] != observed_inventory[group_id]
+        )
+        reasons.append(
+            f"{band} window inventory differs "
+            f"(missing={missing_groups[:3]}, extra={extra_groups[:3]}, "
+            f"changed={changed_groups[:3]})"
+        )
+    return reasons
 
 
 def get_dataframe(

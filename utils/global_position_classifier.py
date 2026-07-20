@@ -162,12 +162,64 @@ def split_lovo_folds(df: pd.DataFrame) -> list[tuple[pd.DataFrame, pd.DataFrame]
     return folds
 
 
+def split_cross_session(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Train on trial 01 and evaluate the same known users in trial 02."""
+    _validate_required_columns(df, {"trial", "user", "location"})
+    if df.empty:
+        msg = "Cannot split an empty dataframe."
+        raise ValueError(msg)
+
+    trials = df["trial"].astype(str).str.removeprefix("trial_").str.zfill(2)
+    train_df = df.loc[trials == "01"].copy()
+    test_df = df.loc[trials == "02"].copy()
+    if train_df.empty:
+        raise ValueError("cross_session split has no trial-01 training windows.")
+    if test_df.empty:
+        raise ValueError("cross_session split has no trial-02 test windows.")
+
+    train_trials = train_df["trial"].astype(str).str.removeprefix("trial_").str.zfill(2)
+    test_trials = test_df["trial"].astype(str).str.removeprefix("trial_").str.zfill(2)
+    assert (test_trials == "02").all(), "cross_session test contains a non-trial-02 window"
+    assert not (train_trials == "02").any(), "trial-02 window leaked into training"
+
+    train_users = sorted(train_df["user"].astype(str).unique())
+    test_users = sorted(test_df["user"].astype(str).unique())
+    unknown_test_users = sorted(set(test_users) - set(train_users))
+    if unknown_test_users:
+        msg = (
+            "cross_session requires every trial-02 user to be present in trial 01; "
+            f"unknown test users: {', '.join(unknown_test_users)}"
+        )
+        raise ValueError(msg)
+    train_positions = set(train_df["location"].astype(str))
+    test_positions = set(test_df["location"].astype(str))
+    missing_positions = sorted(test_positions - train_positions)
+    print(f"[cross_session] discovered trial-02 users: {', '.join(test_users)}")
+    print(
+        f"[cross_session] n_train={len(train_df)} users={train_users} "
+        f"positions={len(train_positions)}"
+    )
+    print(
+        f"[cross_session] n_test={len(test_df)} users={test_users} "
+        f"positions={len(test_positions)}"
+    )
+    print("[cross_session] assertion passed: no trial-02 window is in training")
+    if missing_positions:
+        print(
+            f"[cross_session warning] {len(missing_positions)} test positions are absent "
+            f"from training and therefore unlearnable: {', '.join(missing_positions)}"
+        )
+    else:
+        print("[cross_session] all test positions are represented in training")
+    return train_df, test_df
+
+
 def split_dataframe(
     df: pd.DataFrame,
     *,
     test_size: float = 0.3,
     random_state: int = 42,
-    split_mode: Literal["group", "random", "block", "lovo"] = "group",
+    split_mode: Literal["group", "random", "block", "lovo", "cross_session"] = "group",
     stratify_column: str | None = None,
     n_blocks: int = DEFAULT_BLOCK_COUNT,
 ) -> tuple[pd.DataFrame, pd.DataFrame] | list[tuple[pd.DataFrame, pd.DataFrame]]:
@@ -181,6 +233,9 @@ def split_dataframe(
 
     if split_mode == "lovo":
         return split_lovo_folds(df)
+
+    if split_mode == "cross_session":
+        return split_cross_session(df)
 
     _validate_required_columns(df, {"group_id"})
 
@@ -220,7 +275,10 @@ def split_dataframe(
             n_blocks=n_blocks,
         )
 
-    msg = f"Unknown split_mode {split_mode!r}. Must be 'group', 'random', 'block', or 'lovo'."
+    msg = (
+        f"Unknown split_mode {split_mode!r}. Must be 'group', 'random', 'block', "
+        "'lovo', or 'cross_session'."
+    )
     raise ValueError(msg)
 
 
@@ -230,7 +288,7 @@ def run_global_position_experiment(  # noqa: PLR0913
     dataset_name: str,
     model_name: str,
     params: dict,
-    split_mode: Literal["group", "random", "block", "lovo"] = "block",
+    split_mode: Literal["group", "random", "block", "lovo", "cross_session"] = "block",
     test_size: float = 0.3,
     random_state: int = 42,
     n_blocks: int = DEFAULT_BLOCK_COUNT,
@@ -278,6 +336,7 @@ def run_global_position_experiment(  # noqa: PLR0913
         msg = "Unexpected multi-fold split outside the LOVO dispatch path."
         raise RuntimeError(msg)
     train_df, test_df = split_result
+    data_fingerprint = _window_identity_fingerprint(test_df)
     majority_metrics = majority_class_baselines(
         train_df,
         test_df,
@@ -286,11 +345,24 @@ def run_global_position_experiment(  # noqa: PLR0913
     )
 
     if results_dir is not None and not force_retrain:
+        expected_metadata = None
+        if split_mode == "cross_session":
+            expected_metadata = prediction_cache_metadata(
+                model=resolved_model_name,
+                band=dataset_name,
+                split_mode=split_mode,
+                params=resolved_params,
+                random_state=random_state,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+                data_fingerprint=data_fingerprint,
+            )
         cached_predictions = load_predictions(
             Path(results_dir),
             resolved_model_name,
             dataset_name,
             split_mode,
+            expected_metadata=expected_metadata,
         )
         if cached_predictions is not None:
             metrics = compute_localization_metrics(cached_predictions)
@@ -364,9 +436,31 @@ def run_global_position_experiment(  # noqa: PLR0913
             resolved_model_name,
             dataset_name,
             split_mode,
+            metadata=prediction_cache_metadata(
+                model=resolved_model_name,
+                band=dataset_name,
+                split_mode=split_mode,
+                params=resolved_params,
+                random_state=random_state,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+                data_fingerprint=data_fingerprint,
+            ),
         )
 
     return model, predictions, metrics
+
+
+def _window_identity_fingerprint(df: pd.DataFrame) -> str:
+    """Hash the exact ordered set of windows used by a prediction cache."""
+    _validate_required_columns(df, {"group_id", "window_idx", "user", "trial"})
+    identities = (
+        df[["group_id", "window_idx", "user", "trial"]]
+        .astype(str)
+        .sort_values(["group_id", "window_idx", "user", "trial"], kind="stable")
+    )
+    payload = identities.to_csv(index=False, lineterminator="\n")
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
