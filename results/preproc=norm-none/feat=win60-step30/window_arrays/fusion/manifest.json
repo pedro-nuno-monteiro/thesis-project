@@ -3,9 +3,9 @@
   "feature_scenario": "Fusion",
   "window_size": 60,
   "overlap_size": 30,
-  "require_all_esps": true,
+  "require_all_esps": false,
   "preprocessing": {
-    "normalization": "empty_baseline",
+    "normalization": "none",
     "epsilon": 1e-08,
     "baseline_scope": "per_user"
   },

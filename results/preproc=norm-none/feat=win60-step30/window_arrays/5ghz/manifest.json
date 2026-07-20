@@ -1,26 +1,15 @@
 {
-  "frequency_scenario": "Fusion",
-  "feature_scenario": "Fusion",
+  "frequency_scenario": "5 GHz",
+  "feature_scenario": "5 GHz",
   "window_size": 60,
   "overlap_size": 30,
-  "require_all_esps": true,
+  "require_all_esps": false,
   "preprocessing": {
-    "normalization": "empty_baseline",
+    "normalization": "none",
     "epsilon": 1e-08,
     "baseline_scope": "per_user"
   },
   "anchor_order": {
-    "2.4 GHz": [
-      "esp_01",
-      "esp_02",
-      "esp_03",
-      "esp_04",
-      "esp_05",
-      "esp_07",
-      "esp_08",
-      "esp_09",
-      "esp_10"
-    ],
     "5 GHz": [
       "esp_11",
       "esp_12",
@@ -35,23 +24,16 @@
     ]
   },
   "subcarrier_counts": {
-    "2.4 GHz": 50,
     "5 GHz": 56
   },
   "shapes": {
-    "2.4 GHz": [
-      26868,
-      9,
-      50,
-      60
-    ],
     "5 GHz": [
-      26868,
+      28745,
       10,
       56,
       60
     ]
   },
   "dtype": "float16",
-  "meta_rows": 26868
+  "meta_rows": 28745
 }

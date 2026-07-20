@@ -1,5 +1,5 @@
 {
-  "band": "2.4 GHz",
+  "band": "Fusion",
   "fold": null,
   "model": "CNN_small",
   "params": {
@@ -32,7 +32,7 @@
     "conv1_filters": 16,
     "conv2_filters": 32,
     "dropout": 0.5,
-    "epochs": 80,
+    "epochs": 50,
     "head_hidden": 128,
     "latent_dim": 64,
     "lr": 0.001,
@@ -46,7 +46,7 @@
     "validation_size": 0.15,
     "weight_decay": 0.0001
   },
-  "params_hash": "e8d72c3cfec772d2c80846a7f95b9903a97b24862d52630f1fb97ddef248b74f",
+  "params_hash": "96d2e2e73729e903150e4ca4905b0ec425eec96b0ad2bc13132cda16e2e5c37b",
   "schema_version": 1,
   "sklearn_version": "1.9.0",
   "split_mode": "block"

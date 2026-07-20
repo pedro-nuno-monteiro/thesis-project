@@ -1,6 +1,6 @@
 {
   "frequency_scenario": "5 GHz",
-  "feature_scenario": "5ghz",
+  "feature_scenario": "5 GHz",
   "window_size": 60,
   "overlap_size": 30,
   "require_all_esps": true,
@@ -28,12 +28,12 @@
   },
   "shapes": {
     "5 GHz": [
-      19302,
+      28745,
       10,
       56,
       60
     ]
   },
   "dtype": "float16",
-  "meta_rows": 19302
+  "meta_rows": 28745
 }
