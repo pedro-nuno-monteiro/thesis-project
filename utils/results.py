@@ -4,14 +4,51 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import re
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import f1_score
 
 from utils.cache import RESULTS_ROOT, parse_run_id
+from utils.config import (
+    EMPTY_ROOM_LOCATION,
+    PROJECT_ROOT,
+    ROOM_1_COLUMNS,
+    ROOM_2_A_COLUMNS,
+    ROOM_2_BC_COLUMNS,
+    ROOM_3_EF_COLUMNS,
+)
+
+LOCATION_PATTERN = re.compile(r"^(?P<row>[A-Z])[-_ ]?(?P<column>\d+)$")
+GLOBAL_PREDICTION_COLUMNS = [
+    "window_id",
+    "user",
+    "trial",
+    "true_position",
+    "pred_position",
+    "true_room",
+    "pred_room",
+    "true_x",
+    "true_y",
+    "pred_x",
+    "pred_y",
+    "distance_error",
+    "dataset",
+    "model",
+    "split_mode",
+    "split",
+    "true_location",
+    "pred_location",
+    "scenario",
+    "group_id",
+    "window_idx",
+]
 
 RUN_PREFIX_COLUMNS = [
     "run_id",
@@ -113,6 +150,273 @@ FOLD_METRIC_COLUMNS = [
     "best_epoch",
     "mean_seconds_per_epoch",
 ]
+
+
+def compute_localization_metrics(predictions_df: pd.DataFrame) -> dict[str, float]:
+    """Compute the shared position, room, F1, and distance metrics."""
+    true_position = _metric_column(predictions_df, "true_position", "true_location")
+    pred_position = _metric_column(predictions_df, "pred_position", "pred_location")
+    true_room = _metric_column(predictions_df, "true_room")
+    pred_room = _metric_column(predictions_df, "pred_room")
+
+    if predictions_df.empty:
+        return {
+            "position_accuracy": np.nan,
+            "macro_f1": np.nan,
+            "room_accuracy": np.nan,
+            "mean_distance_error": np.nan,
+            "median_distance_error": np.nan,
+            "rmse_distance_error": np.nan,
+            "p90_distance_error": np.nan,
+            "samples": 0.0,
+        }
+
+    distance_errors = pd.to_numeric(
+        predictions_df["distance_error"],
+        errors="coerce",
+    ).dropna()
+    error_values = distance_errors.to_numpy(dtype=float)
+    return {
+        "position_accuracy": _accuracy(true_position, pred_position),
+        "macro_f1": float(
+            f1_score(
+                true_position.astype(str),
+                pred_position.astype(str),
+                average="macro",
+                zero_division=0,
+            )
+        ),
+        "room_accuracy": _accuracy(true_room, pred_room),
+        "mean_distance_error": float(np.mean(error_values)) if error_values.size else np.nan,
+        "median_distance_error": (
+            float(np.median(error_values)) if error_values.size else np.nan
+        ),
+        "rmse_distance_error": (
+            float(np.sqrt(np.mean(np.square(error_values))))
+            if error_values.size
+            else np.nan
+        ),
+        "p90_distance_error": (
+            float(np.percentile(error_values, 90)) if error_values.size else np.nan
+        ),
+        "samples": float(len(predictions_df)),
+    }
+
+
+def _metric_column(df: pd.DataFrame, *names: str) -> pd.Series:
+    for name in names:
+        if name in df.columns:
+            return df[name]
+    raise ValueError(f"Missing required column. Expected one of: {', '.join(names)}")
+
+
+def _accuracy(left: pd.Series, right: pd.Series) -> float:
+    if left.empty:
+        return np.nan
+    return float((left.to_numpy() == right.to_numpy()).mean())
+
+
+def room_label_for_location(location: object) -> int | None:
+    """Map a reference-point label to its room label."""
+    label = _normalize_location_label(location)
+    if label == EMPTY_ROOM_LOCATION:
+        return 0
+    match = LOCATION_PATTERN.fullmatch(label)
+    if match is None:
+        return None
+    row = match.group("row")
+    column = int(match.group("column"))
+    if row in "ABCDEF" and column in ROOM_1_COLUMNS:
+        return 1
+    if (row == "A" and column in ROOM_2_A_COLUMNS) or (
+        row in "BC" and column in ROOM_2_BC_COLUMNS
+    ):
+        return 2
+    if row in "EF" and column in ROOM_3_EF_COLUMNS:
+        return 3
+    return None
+
+
+def location_grid_coordinates(
+    location: object,
+    *,
+    row_spacing: float = 1.0,
+    column_spacing: float = 1.0,
+) -> tuple[float, float] | None:
+    """Convert a location label to physical row/column coordinates."""
+    _validate_grid_spacing(row_spacing=row_spacing, column_spacing=column_spacing)
+    label = _normalize_location_label(location)
+    if label == EMPTY_ROOM_LOCATION:
+        return None
+    match = LOCATION_PATTERN.fullmatch(label)
+    if match is None:
+        return None
+    row_index = ord(match.group("row")) - ord("A")
+    column_index = int(match.group("column")) - 1
+    return row_index * row_spacing, column_index * column_spacing
+
+
+def location_distance_error(
+    true_location: object,
+    pred_location: object,
+    *,
+    row_spacing: float = 1.0,
+    column_spacing: float = 1.0,
+) -> float:
+    """Return Euclidean distance between two reference-point labels."""
+    true_coordinates = location_grid_coordinates(
+        true_location,
+        row_spacing=row_spacing,
+        column_spacing=column_spacing,
+    )
+    pred_coordinates = location_grid_coordinates(
+        pred_location,
+        row_spacing=row_spacing,
+        column_spacing=column_spacing,
+    )
+    if true_coordinates is None or pred_coordinates is None:
+        return np.nan
+    return float(
+        np.hypot(
+            true_coordinates[0] - pred_coordinates[0],
+            true_coordinates[1] - pred_coordinates[1],
+        )
+    )
+
+
+def build_global_predictions_dataframe(  # noqa: PLR0913
+    test_df: pd.DataFrame,
+    pred_positions: np.ndarray,
+    *,
+    dataset_name: str,
+    model_name: str,
+    split_mode: str,
+    row_spacing: float = 1.0,
+    column_spacing: float = 1.0,
+) -> pd.DataFrame:
+    """Build the shared prediction table used by ML and DL evaluation."""
+    pred_rooms = np.asarray(
+        [room_label_for_location(location) for location in pred_positions],
+        dtype=object,
+    )
+    true_rooms = np.asarray(
+        [room_label_for_location(location) for location in test_df["location"]],
+        dtype=object,
+    )
+    distance_errors = np.asarray(
+        [
+            location_distance_error(
+                true_position,
+                pred_position,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+            )
+            for true_position, pred_position in zip(test_df["location"], pred_positions)
+        ],
+        dtype=float,
+    )
+    true_coordinates = [
+        location_grid_coordinates(
+            location,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
+        for location in test_df["location"]
+    ]
+    pred_coordinates = [
+        location_grid_coordinates(
+            location,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
+        for location in pred_positions
+    ]
+    return pd.DataFrame(
+        {
+            "window_id": (
+                test_df["group_id"].astype(str)
+                + "_window_"
+                + test_df["window_idx"].astype(str)
+            ).to_numpy(),
+            "user": test_df["user"].to_numpy(),
+            "trial": test_df["trial"].to_numpy(),
+            "true_position": test_df["location"].astype(str).to_numpy(),
+            "pred_position": pred_positions,
+            "true_room": true_rooms,
+            "pred_room": pred_rooms,
+            "true_x": [_coord_component(coordinates, "x") for coordinates in true_coordinates],
+            "true_y": [_coord_component(coordinates, "y") for coordinates in true_coordinates],
+            "pred_x": [_coord_component(coordinates, "x") for coordinates in pred_coordinates],
+            "pred_y": [_coord_component(coordinates, "y") for coordinates in pred_coordinates],
+            "distance_error": distance_errors,
+            "dataset": dataset_name,
+            "model": model_name,
+            "split_mode": split_mode,
+            "split": split_mode,
+            "true_location": test_df["location"].astype(str).to_numpy(),
+            "pred_location": pred_positions,
+            "scenario": test_df["scenario"].to_numpy(),
+            "group_id": test_df["group_id"].to_numpy(),
+            "window_idx": test_df["window_idx"].to_numpy(),
+        },
+        columns=GLOBAL_PREDICTION_COLUMNS,
+    )
+
+
+def majority_class_baselines(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    row_spacing: float = 1.0,
+    column_spacing: float = 1.0,
+) -> dict[str, float]:
+    """Return constant position and room baselines from the training labels."""
+    _validate_grid_spacing(row_spacing=row_spacing, column_spacing=column_spacing)
+    _require_columns(train_df, {"location"})
+    _require_columns(test_df, {"location"})
+    if train_df.empty or test_df.empty:
+        return {"majority_position_accuracy": np.nan, "majority_room_accuracy": np.nan}
+    majority_position = str(train_df["location"].astype(str).mode(dropna=True).iloc[0])
+    train_rooms = pd.Series(
+        [room_label_for_location(location) for location in train_df["location"]]
+    )
+    majority_room = train_rooms.mode(dropna=True).iloc[0]
+    true_rooms = pd.Series(
+        [room_label_for_location(location) for location in test_df["location"]]
+    )
+    return {
+        "majority_position_accuracy": float(
+            (test_df["location"].astype(str).to_numpy() == majority_position).mean()
+        ),
+        "majority_room_accuracy": float((true_rooms.to_numpy() == majority_room).mean()),
+    }
+
+
+def _coord_component(
+    coordinates: tuple[float, float] | None,
+    axis: str,
+) -> float:
+    if coordinates is None:
+        return np.nan
+    row_coordinate, column_coordinate = coordinates
+    return float(column_coordinate if axis == "x" else row_coordinate)
+
+
+def _normalize_location_label(location: object) -> str:
+    return str(location).strip().upper().removeprefix("LOCATION_")
+
+
+def _validate_grid_spacing(*, row_spacing: float, column_spacing: float) -> None:
+    if not np.isfinite(row_spacing) or row_spacing <= 0:
+        raise ValueError("row_spacing must be a finite positive value.")
+    if not np.isfinite(column_spacing) or column_spacing <= 0:
+        raise ValueError("column_spacing must be a finite positive value.")
+
+
+def _require_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
+    missing = sorted(required_columns - set(df.columns))
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
 
 def ensure_results_layout(results_root: Path = RESULTS_ROOT) -> None:
@@ -414,3 +718,138 @@ def _version(package: str) -> str:
         return importlib.metadata.version(package)
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
+
+
+# Legacy paper result exports retained in the shared result module.
+
+def save_summary(df: pd.DataFrame, results_dir: Path, basename: str = "summary") -> None:
+    """Write the summary dataframe to CSV, Markdown, and LaTeX in results_dir."""
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    df.to_csv(results_dir / f"{basename}.csv")
+
+    md = df.to_markdown(index=True)
+    (results_dir / f"{basename}.md").write_text(md or "", encoding="utf-8")
+
+    tex = df.to_latex(
+        index=True,
+        escape=False,
+        float_format="%.4f",
+    )
+    (results_dir / f"{basename}.tex").write_text(tex, encoding="utf-8")
+
+    print(f"[results] Summary saved to {results_dir}/{basename}.*")
+
+
+# ── Reproducibility manifest ──────────────────────────────────────────────────
+
+def _git_commit() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=PROJECT_ROOT,
+            timeout=5,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _lib_version(name: str) -> str:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def write_manifest(
+    results_dir: Path,
+    preproc_opts: dict[str, Any],
+    feat_opts: dict[str, Any],
+    classifier_params: dict[str, Any],
+    splits: list[str],
+    test_size: float,
+    feature_dataframes: dict[str, pd.DataFrame],
+    tuned_hyperparameters: dict[str, Any] | None = None,
+    tuned_hyperparameters_direct: dict[str, Any] | None = None,
+    tuned_hyperparameters_v1: dict[str, Any] | None = None,
+    tuned_hyperparameters_v2: dict[str, Any] | None = None,
+    lovo_metadata: dict[str, Any] | None = None,
+) -> None:
+    """Write a self-describing manifest.json to results_dir."""
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset_sizes = {
+        f"{_band_stem(band)}_windows": len(df)
+        for band, df in feature_dataframes.items()
+    }
+    feature_matrix_shapes = {
+        band: {
+            "rows": int(df.shape[0]),
+            "columns": int(df.shape[1]),
+            "feature_columns": int(
+                len([col for col in df.columns if col not in _EXPECTED_METADATA_COLS])
+            ),
+        }
+        for band, df in feature_dataframes.items()
+    }
+    config_payload = {
+        "preprocessing_options": preproc_opts,
+        "feature_extraction_options": feat_opts,
+        "classifier_hyperparameters": classifier_params,
+        "splits": splits,
+        "test_size": test_size,
+    }
+    config_hash = hashlib.sha256(
+        json.dumps(config_payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+    manifest_path = results_dir / "manifest.json"
+    existing_manifest: dict[str, Any] = {}
+    if manifest_path.exists():
+        try:
+            existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing_manifest = {}
+
+    manifest: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
+        "git_commit": _git_commit(),
+        "python_version": sys.version.split()[0],
+        "key_library_versions": {
+            "numpy": _lib_version("numpy"),
+            "pandas": _lib_version("pandas"),
+            "scikit-learn": _lib_version("scikit-learn"),
+        },
+        "preprocessing_options": preproc_opts,
+        "feature_extraction_options": feat_opts,
+        "classifier_hyperparameters": classifier_params,
+        "config_hash": config_hash,
+        "splits": splits,
+        "test_size": test_size,
+        "dataset_sizes": dataset_sizes,
+        "feature_matrix_shapes": feature_matrix_shapes,
+    }
+    if tuned_hyperparameters is None:
+        tuned_hyperparameters = existing_manifest.get("tuned_hyperparameters")
+    if tuned_hyperparameters is not None:
+        manifest["tuned_hyperparameters"] = tuned_hyperparameters
+    if tuned_hyperparameters_direct is not None:
+        manifest["tuned_hyperparameters_direct"] = tuned_hyperparameters_direct
+    if tuned_hyperparameters_v1 is None:
+        tuned_hyperparameters_v1 = existing_manifest.get("tuned_hyperparameters_v1")
+    if tuned_hyperparameters_v1 is not None:
+        manifest["tuned_hyperparameters_v1"] = tuned_hyperparameters_v1
+    if tuned_hyperparameters_v2 is None:
+        tuned_hyperparameters_v2 = existing_manifest.get("tuned_hyperparameters_v2")
+    if tuned_hyperparameters_v2 is not None:
+        manifest["tuned_hyperparameters_v2"] = tuned_hyperparameters_v2
+    if lovo_metadata is None:
+        lovo_metadata = existing_manifest.get("lovo")
+    if lovo_metadata is not None:
+        manifest["lovo"] = lovo_metadata
+
+    manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    print(f"[results] Manifest written to {manifest_path}")

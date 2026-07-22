@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-import importlib.metadata
 import hashlib
 import json
+import os
+import pickle
 import re
-import subprocess
-import sys
-from datetime import datetime, timezone
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 
-PROJECT_ROOT = Path(__file__).parent.parent
-CACHE_DIR = PROJECT_ROOT / ".cache" / "dataframes"
-RESULTS_ROOT = PROJECT_ROOT / "results"
+from utils.config import CACHE_DIR as PROJECT_CACHE_DIR
+from utils.config import RESULTS_DIR
+
+CACHE_DIR = PROJECT_CACHE_DIR / "dataframes"
+CSI_CACHE_DIR = PROJECT_CACHE_DIR / "csi_processing"
+RESULTS_ROOT = RESULTS_DIR
 
 _EXPECTED_METADATA_COLS = {
     "frequency_scenario",
@@ -37,6 +40,106 @@ _RUN_ID_PATTERN = re.compile(
 
 class _StaleFeatureCache(ValueError):
     """Raised when an existing cache predates the current feature schema."""
+
+
+def csi_cache_path(
+    file_path: str | Path,
+    processor_version: str,
+    cache_dir: str | Path | None = None,
+) -> Path:
+    """Return the content-addressed cache path for one CSI CSV file."""
+    path = Path(file_path)
+    stat = path.stat()
+    identity = "|".join(
+        [
+            processor_version,
+            os.path.normcase(str(path.resolve())),
+            str(stat.st_size),
+            str(stat.st_mtime_ns),
+        ]
+    )
+    cache_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    root = CSI_CACHE_DIR if cache_dir is None else Path(cache_dir)
+    return root / processor_version / f"{cache_key}.pkl"
+
+
+def load_csi_cache(cache_file: Path) -> object | None:
+    """Load one cached CSI-processing payload, returning ``None`` if it is stale."""
+    try:
+        with cache_file.open("rb") as file:
+            return pickle.load(file)  # noqa: S301
+    except (EOFError, ImportError, ModuleNotFoundError, OSError, pickle.PickleError):
+        return None
+
+
+def save_csi_cache(cache_file: Path, payload: object) -> None:
+    """Atomically save one CSI-processing payload."""
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f"{cache_file.stem}.",
+        suffix=".tmp",
+        dir=cache_file.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "wb") as file:
+            pickle.dump(payload, file, protocol=pickle.HIGHEST_PROTOCOL)
+        temporary_path.replace(cache_file)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+
+def load_window_array_cache(
+    array_paths: dict[str, Path],
+    meta_path: Path,
+    manifest_path: Path,
+) -> tuple[dict[str, np.ndarray], pd.DataFrame, dict[str, Any]] | None:
+    """Load cached DL windows, metadata, and their manifest when complete."""
+    if not (
+        meta_path.exists()
+        and manifest_path.exists()
+        and all(path.exists() for path in array_paths.values())
+    ):
+        return None
+    arrays = {band: np.load(path, mmap_mode="r") for band, path in array_paths.items()}
+    metadata = pd.read_parquet(meta_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return arrays, metadata, manifest
+
+
+def open_window_array_writers(
+    array_paths: dict[str, Path],
+    shapes: dict[str, tuple[int, ...]],
+) -> dict[str, np.ndarray]:
+    """Open float16 memory-mapped writers for DL window arrays."""
+    return {
+        band: np.lib.format.open_memmap(
+            array_paths[band],
+            mode="w+",
+            dtype=np.float16,
+            shape=shape,
+        )
+        for band, shape in shapes.items()
+    }
+
+
+def save_window_array_metadata(
+    metadata: pd.DataFrame,
+    meta_path: Path,
+    manifest: dict[str, Any],
+    manifest_path: Path,
+) -> None:
+    """Atomically save DL window metadata and write its descriptive manifest."""
+    temporary_meta = meta_path.with_suffix(".parquet.tmp")
+    metadata.to_parquet(temporary_meta, index=False)
+    temporary_meta.replace(meta_path)
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def load_window_arrays(array_paths: dict[str, Path]) -> dict[str, np.ndarray]:
+    """Reopen saved DL window arrays as read-only memory maps."""
+    return {band: np.load(path, mmap_mode="r") for band, path in array_paths.items()}
 
 
 # ── Key generation ────────────────────────────────────────────────────────────
@@ -123,9 +226,8 @@ def get_cache_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> P
     )
 
 
-def get_results_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> Path:
-    """Return the flat results root (arguments retained for API compatibility)."""
-    del preproc_opts, feat_opts
+def get_results_path() -> Path:
+    """Return the shared results root."""
     return RESULTS_ROOT
 
 
@@ -552,134 +654,4 @@ def get_dataframe(
 
 # ── Summary table saving ──────────────────────────────────────────────────────
 
-def save_summary(df: pd.DataFrame, results_dir: Path, basename: str = "summary") -> None:
-    """Write the summary dataframe to CSV, Markdown, and LaTeX in results_dir."""
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    df.to_csv(results_dir / f"{basename}.csv")
-
-    md = df.to_markdown(index=True)
-    (results_dir / f"{basename}.md").write_text(md or "", encoding="utf-8")
-
-    tex = df.to_latex(
-        index=True,
-        escape=False,
-        float_format="%.4f",
-    )
-    (results_dir / f"{basename}.tex").write_text(tex, encoding="utf-8")
-
-    print(f"[results] Summary saved to {results_dir}/{basename}.*")
-
-
 # ── Reproducibility manifest ──────────────────────────────────────────────────
-
-def _git_commit() -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            cwd=PROJECT_ROOT,
-            timeout=5,
-        )
-        return result.stdout.strip() if result.returncode == 0 else None
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-
-
-def _lib_version(name: str) -> str:
-    try:
-        return importlib.metadata.version(name)
-    except importlib.metadata.PackageNotFoundError:
-        return "unknown"
-
-
-def write_manifest(
-    results_dir: Path,
-    preproc_opts: dict[str, Any],
-    feat_opts: dict[str, Any],
-    classifier_params: dict[str, Any],
-    splits: list[str],
-    test_size: float,
-    feature_dataframes: dict[str, pd.DataFrame],
-    tuned_hyperparameters: dict[str, Any] | None = None,
-    tuned_hyperparameters_direct: dict[str, Any] | None = None,
-    tuned_hyperparameters_v1: dict[str, Any] | None = None,
-    tuned_hyperparameters_v2: dict[str, Any] | None = None,
-    lovo_metadata: dict[str, Any] | None = None,
-) -> None:
-    """Write a self-describing manifest.json to results_dir."""
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    dataset_sizes = {
-        f"{_band_stem(band)}_windows": len(df)
-        for band, df in feature_dataframes.items()
-    }
-    feature_matrix_shapes = {
-        band: {
-            "rows": int(df.shape[0]),
-            "columns": int(df.shape[1]),
-            "feature_columns": int(
-                len([col for col in df.columns if col not in _EXPECTED_METADATA_COLS])
-            ),
-        }
-        for band, df in feature_dataframes.items()
-    }
-    config_payload = {
-        "preprocessing_options": preproc_opts,
-        "feature_extraction_options": feat_opts,
-        "classifier_hyperparameters": classifier_params,
-        "splits": splits,
-        "test_size": test_size,
-    }
-    config_hash = hashlib.sha256(
-        json.dumps(config_payload, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
-
-    manifest_path = results_dir / "manifest.json"
-    existing_manifest: dict[str, Any] = {}
-    if manifest_path.exists():
-        try:
-            existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            existing_manifest = {}
-
-    manifest: dict[str, Any] = {
-        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
-        "git_commit": _git_commit(),
-        "python_version": sys.version.split()[0],
-        "key_library_versions": {
-            "numpy": _lib_version("numpy"),
-            "pandas": _lib_version("pandas"),
-            "scikit-learn": _lib_version("scikit-learn"),
-        },
-        "preprocessing_options": preproc_opts,
-        "feature_extraction_options": feat_opts,
-        "classifier_hyperparameters": classifier_params,
-        "config_hash": config_hash,
-        "splits": splits,
-        "test_size": test_size,
-        "dataset_sizes": dataset_sizes,
-        "feature_matrix_shapes": feature_matrix_shapes,
-    }
-    if tuned_hyperparameters is None:
-        tuned_hyperparameters = existing_manifest.get("tuned_hyperparameters")
-    if tuned_hyperparameters is not None:
-        manifest["tuned_hyperparameters"] = tuned_hyperparameters
-    if tuned_hyperparameters_direct is not None:
-        manifest["tuned_hyperparameters_direct"] = tuned_hyperparameters_direct
-    if tuned_hyperparameters_v1 is None:
-        tuned_hyperparameters_v1 = existing_manifest.get("tuned_hyperparameters_v1")
-    if tuned_hyperparameters_v1 is not None:
-        manifest["tuned_hyperparameters_v1"] = tuned_hyperparameters_v1
-    if tuned_hyperparameters_v2 is None:
-        tuned_hyperparameters_v2 = existing_manifest.get("tuned_hyperparameters_v2")
-    if tuned_hyperparameters_v2 is not None:
-        manifest["tuned_hyperparameters_v2"] = tuned_hyperparameters_v2
-    if lovo_metadata is None:
-        lovo_metadata = existing_manifest.get("lovo")
-    if lovo_metadata is not None:
-        manifest["lovo"] = lovo_metadata
-
-    manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
-    print(f"[results] Manifest written to {manifest_path}")

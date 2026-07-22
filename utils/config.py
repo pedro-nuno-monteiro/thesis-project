@@ -1,10 +1,35 @@
-"""Project-wide experiment defaults.
-
-Keep operational settings here so notebook and command-line entry points use the
-same protocol, data-loader, plotting, and model-capacity configuration.
-"""
+"""Shared paths and experiment constants used by both notebooks."""
 
 from __future__ import annotations
+
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "data"
+CACHE_DIR = PROJECT_ROOT / ".cache"
+RESULTS_DIR = PROJECT_ROOT / "results"
+
+ESP_IDS_BY_BAND = {
+    "2.4 GHz": (*range(1, 6), *range(7, 11)),
+    "5 GHz": tuple(range(11, 21)),
+    "Fusion": (*range(1, 6), *range(7, 21)),
+}
+
+EMPTY_ROOM_LOCATION = "Z-0"
+ROOM_1_COLUMNS = range(1, 10)
+ROOM_2_A_COLUMNS = {13, 14}
+ROOM_2_BC_COLUMNS = range(10, 15)
+ROOM_3_EF_COLUMNS = range(10, 14)
+
+DEFAULT_WINDOW_SIZE = 60
+DEFAULT_OVERLAP_SIZE = 30
+WINDOW_CONFIGS = [
+    ("win30-step30", 30, 30),
+    ("win60-step30", 60, 30),
+    ("win60-step60", 60, 60),
+    ("win120-step60", 120, 60),
+    ("win120-step120", 120, 120),
+]
 
 TRIALS_FOR_TRAINING_PROTOCOLS = ("01",)
 SEEDS = (42, 43, 44)

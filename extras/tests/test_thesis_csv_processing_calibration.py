@@ -8,12 +8,14 @@ from pathlib import Path
 
 import numpy as np
 
-from utils.thesis_csv_processing import (
+from utils.csi_processing import (
+    _calibrate_complex_csi_with_rssi,
+    _normalize_complex_csi_per_packet,
+)
+from utils.load_csi import (
     FIVE_GHZ_RAW_LENGTH,
     FIVE_GHZ_RAW_LENGTH_228,
     TWO_GHZ_RAW_LENGTH,
-    _calibrate_complex_csi_with_rssi,
-    _normalize_complex_csi_per_packet,
     _processor_identity,
     _RunOptions,
     process_csv_files,

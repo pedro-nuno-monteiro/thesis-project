@@ -6,6 +6,20 @@ from typing import Iterator, Literal
 import numpy as np
 import pandas as pd
 
+from utils.config import (
+    EMPTY_ROOM_LOCATION,
+    ESP_IDS_BY_BAND,
+    ROOM_1_COLUMNS,
+    ROOM_2_A_COLUMNS,
+    ROOM_2_BC_COLUMNS,
+    ROOM_3_EF_COLUMNS,
+)
+from utils.csi_processing import (
+    iter_magnitude_windows,
+    validate_window_parameters,
+    window_count_for_magnitude,
+)
+
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 FeatureScenario = Literal["2.4 GHz", "5 GHz", "Fusion"]
 
@@ -20,17 +34,6 @@ METADATA_COLUMNS = (
     "window_idx",
     "label",
 )
-EXPECTED_MAGNITUDE_DIMS = 2
-EMPTY_ROOM_LOCATION = "Z-0"
-ROOM_1_COLUMNS = range(1, 10)
-ROOM_2_A_COLUMNS = {13, 14}
-ROOM_2_BC_COLUMNS = range(10, 15)
-ROOM_3_EF_COLUMNS = range(10, 14)
-ESP_IDS_BY_SCENARIO: dict[FeatureScenario, tuple[int, ...]] = {
-    "2.4 GHz": (*range(1, 6), *range(7, 11)),
-    "5 GHz": tuple(range(11, 21)),
-    "Fusion": (*range(1, 6), *range(7, 21)),
-}
 
 
 @dataclass(frozen=True)
@@ -80,7 +83,7 @@ def compute_window_features(
     window_size: int,
     overlap_size: int,
 ) -> np.ndarray:
-    _validate_window_parameters(magnitude, window_size=window_size, overlap_size=overlap_size)
+    validate_window_parameters(magnitude, window_size=window_size, overlap_size=overlap_size)
 
     subcarrier_count = magnitude.shape[1]
     window_count = window_count_for_magnitude(
@@ -91,11 +94,15 @@ def compute_window_features(
     if window_count == 0:
         return np.empty((0, subcarrier_count * len(FEATURE_NAMES)), dtype=float)
 
-    step = window_size - overlap_size
     features = np.empty((window_count, subcarrier_count * len(FEATURE_NAMES)), dtype=float)
 
-    for window_idx, start in enumerate(range(0, magnitude.shape[0] - window_size + 1, step)):
-        window = magnitude[start : start + window_size]
+    for window_idx, window in enumerate(
+        iter_magnitude_windows(
+            magnitude,
+            window_size=window_size,
+            overlap_size=overlap_size,
+        )
+    ):
         features[window_idx] = np.concatenate(
             [
                 np.mean(window, axis=0),
@@ -108,20 +115,6 @@ def compute_window_features(
         )
 
     return features
-
-
-def window_count_for_magnitude(
-    magnitude: np.ndarray,
-    *,
-    window_size: int,
-    overlap_size: int,
-) -> int:
-    _validate_window_parameters(magnitude, window_size=window_size, overlap_size=overlap_size)
-    if magnitude.shape[0] < window_size or magnitude.shape[1] == 0:
-        return 0
-
-    step = window_size - overlap_size
-    return 1 + (magnitude.shape[0] - window_size) // step
 
 
 # This function builds a feature dataframe for a given
@@ -217,15 +210,15 @@ def build_frequency_feature_dataframes(
 
 
 def _esp_keys_for_scenario(frequency_scenario: FeatureScenario) -> tuple[str, ...]:
-    if frequency_scenario not in ESP_IDS_BY_SCENARIO:
+    if frequency_scenario not in ESP_IDS_BY_BAND:
         msg = (
             f"Unknown frequency_scenario {frequency_scenario!r}. "
-            f"Expected one of {sorted(ESP_IDS_BY_SCENARIO)}. "
+            f"Expected one of {sorted(ESP_IDS_BY_BAND)}. "
             "Note: display names ('2.4 GHz') are scenario identifiers; "
             "slugs ('2_4ghz') are for cache paths only."
         )
         raise ValueError(msg)
-    return tuple(f"esp_{esp_id:02d}" for esp_id in ESP_IDS_BY_SCENARIO[frequency_scenario])
+    return tuple(f"esp_{esp_id:02d}" for esp_id in ESP_IDS_BY_BAND[frequency_scenario])
 
 
 def iter_window_groups(
@@ -345,25 +338,6 @@ def _subcarrier_count_from_features(features: np.ndarray) -> int:
     return features.shape[1] // feature_count
 
 
-def _validate_window_parameters(
-    magnitude: np.ndarray,
-    *,
-    window_size: int,
-    overlap_size: int,
-) -> None:
-    if window_size <= 0:
-        msg = "window_size must be greater than zero"
-        raise ValueError(msg)
-    if overlap_size < 0:
-        msg = "overlap_size cannot be negative"
-        raise ValueError(msg)
-    if overlap_size >= window_size:
-        msg = "overlap_size must be smaller than window_size"
-        raise ValueError(msg)
-    if magnitude.ndim != EXPECTED_MAGNITUDE_DIMS:
-        msg = "magnitude must be a 2D array: samples x subcarriers"
-        raise ValueError(msg)
-
 # This function extracts features for each ESP in the given trial and returns a dictionary
 # mapping ESP keys to their corresponding feature arrays. The features are computed using the
 # compute_window_features function, which applies a sliding window to the magnitude data and
@@ -393,6 +367,7 @@ def _features_by_esp(  # noqa: PLR0913
             esp_features[esp_key] = features
 
     return esp_features
+
 
 # This function builds a list of rows for a given group of features
 # corresponding to a specific trial.
