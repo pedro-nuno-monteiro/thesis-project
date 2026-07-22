@@ -161,6 +161,7 @@ def run_dl_experiments(  # noqa: PLR0913, PLR0914
         tuple[str, str, int],
         tuple[pd.DataFrame, dict[str, float], pd.DataFrame],
     ] = {}
+    # Build and validate one aligned raw-window representation per requested band.
     for band in bands:
         print(f"\n=== {band} ===")
         arrays, meta = build_frequency_window_arrays(
@@ -199,6 +200,8 @@ def run_dl_experiments(  # noqa: PLR0913, PLR0914
                 )
             print(f"Fusion N PASS: {n_24} windows")
 
+        # Prove the raw CNN arrays and ML DataFrame describe the same windows
+        # before reusing the shared split logic.
         assert_window_identity(band=band, meta=meta, feature_df=feature_dataframes[band])
         for split_mode in split_modes:
             assert_split_identity(
@@ -210,6 +213,7 @@ def run_dl_experiments(  # noqa: PLR0913, PLR0914
                 random_state=random_state,
                 n_blocks=n_blocks,
             )
+            # Each seed is a distinct recorded run, while band arrays are reused.
             seed_outputs = train_evaluate_cnn_multi_seed(
                 seeds=seeds,
                 band=band,
@@ -247,20 +251,25 @@ def show_dl_results(results_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 class RawCsiWindowDataset(Dataset):
+    """Expose cached multi-band CSI windows and encoded targets to PyTorch."""
+
     def __init__(
         self,
         arrays: dict[str, np.ndarray],
         indices: np.ndarray,
         targets: np.ndarray,
     ) -> None:
+        """Store shared arrays and the row indices selected for this split."""
         self.arrays = arrays
         self.indices = np.asarray(indices, dtype=np.int64)
         self.targets = np.asarray(targets, dtype=np.int64)
 
     def __len__(self) -> int:
+        """Return the number of selected windows."""
         return len(self.indices)
 
     def __getitem__(self, item: int) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        """Return one band-to-tensor sample mapping and its class target."""
         array_index = int(self.indices[item])
         sample = {
             band: torch.as_tensor(array[array_index], dtype=torch.float32)
@@ -317,6 +326,7 @@ def print_torch_environment(*, require_cuda: bool = False) -> torch.device:
 
 
 def parameter_count(model: nn.Module) -> int:
+    """Return the total number of trainable and non-trainable model parameters."""
     return sum(parameter.numel() for parameter in model.parameters())
 
 
@@ -326,6 +336,7 @@ def assert_window_identity(
     meta: pd.DataFrame,
     feature_df: pd.DataFrame,
 ) -> None:
+    """Assert that raw window arrays follow the same row order as ML features."""
     left = _window_pairs(meta)
     right = _window_pairs(feature_df)
     if not left.equals(right):
@@ -445,6 +456,8 @@ def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
     )
     result_root = Path(results_dir)
     write_run_manifest(resolved_run_id, full_config, results_root=result_root)
+    # When ML features are available, prove both pipelines use identical windows
+    # and splits before training the CNN.
     if feature_df is not None:
         assert_window_identity(band=band, meta=meta, feature_df=feature_df)
         assert_split_identity(
@@ -477,6 +490,8 @@ def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
     total_predict = 0.0
     run_parameter_count = float("nan")
 
+    # Train each protocol fold independently; LOVO reserves one whole training
+    # user for validation to keep early stopping user-independent.
     for fold_index, (protocol_train, test_df) in enumerate(folds):
         held_out_user = _single_user(test_df) if split_mode == "lovo" else None
         validation_user: object | None = None
@@ -509,6 +524,8 @@ def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
             train_df, val_df = validation_split
 
         fold_token = held_out_user if split_mode == "lovo" else None
+        # The fold helper owns model construction, checkpointing, early stopping,
+        # prediction caching, and fold-level metric calculation.
         fold_pred, fold_metrics, history = _train_predict_fold(
             band=band,
             arrays=arrays,
@@ -680,6 +697,7 @@ def train_evaluate_cnn_multi_seed(
 
 
 def save_label_classes(classes: np.ndarray, results_dir: Path = RESULTS_ROOT) -> None:
+    """Persist the ordered position labels used by CNN classification heads."""
     path = Path(results_dir) / "manifests" / "cnn_label_classes.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(list(map(str, classes)), indent=2), encoding="utf-8")
@@ -741,6 +759,7 @@ def _train_predict_fold(  # noqa: PLR0913, PLR0915
     fold: object | None,
     force_retrain: bool,
 ) -> tuple[pd.DataFrame, dict[str, float], pd.DataFrame]:
+    """Train or restore one CNN fold and return predictions, metrics, and history."""
     expected_metadata = prediction_cache_metadata(
         model=model_label,
         band=band,
@@ -766,6 +785,8 @@ def _train_predict_fold(  # noqa: PLR0913, PLR0915
     )
     checkpoint = checkpoint_path(run_id, fold=fold, results_root=results_root)
     checkpoint_metadata_path = checkpoint.with_suffix(".pt.metadata.json")
+    # Prediction metadata fingerprints both protocol sides, preventing reuse when
+    # a split changes even if its human-readable run label stays the same.
     cached = None
     if not force_retrain:
         cached = load_predictions(
@@ -785,6 +806,7 @@ def _train_predict_fold(  # noqa: PLR0913, PLR0915
     stopped_epoch = 0
     patience_triggered = False
     if cached is None:
+        # DataLoaders share mmap-backed arrays and differ only in selected indices.
         train_loader = _loader(
             arrays,
             train_df.index.to_numpy(dtype=np.int64),
@@ -820,6 +842,8 @@ def _train_predict_fold(  # noqa: PLR0913, PLR0915
         patience = int(params.get("patience", 15))
         epochs_without_improvement = 0
         started_at = time.perf_counter()
+        # Keep the best validation state in memory and stop after the configured
+        # number of epochs without improvement.
         for epoch in range(1, int(params.get("epochs", 50)) + 1):
             epoch_started = time.perf_counter()
             train_loss, train_acc = _run_epoch(
@@ -869,6 +893,7 @@ def _train_predict_fold(  # noqa: PLR0913, PLR0915
         fit_seconds = time.perf_counter() - started_at
         if not patience_triggered:
             stopped_epoch = len(history_rows)
+        # Restore the best epoch before checkpoint export and test prediction.
         model.load_state_dict(best_state)
         torch.save(best_state, checkpoint)
         _save_checkpoint_metadata(
@@ -944,6 +969,7 @@ def _loader(
     device: torch.device,
     shuffle: bool,
 ) -> DataLoader:
+    """Create a DataLoader over selected indices in shared CSI window arrays."""
     settings = resolved_dataloader_settings(device, params)
     return DataLoader(
         RawCsiWindowDataset(arrays, indices, targets[indices]),
@@ -960,6 +986,7 @@ def _run_epoch(
     *,
     optimizer: torch.optim.Optimizer | None,
 ) -> tuple[float, float]:
+    """Run one training or validation epoch and return mean loss and accuracy."""
     is_training = optimizer is not None
     model.train(is_training)
     total_loss = 0.0
@@ -989,6 +1016,7 @@ def _run_epoch(
 
 
 def _predict(model: nn.Module, loader: DataLoader, device: torch.device) -> np.ndarray:
+    """Predict encoded class labels for every sample in a DataLoader."""
     model.eval()
     predictions: list[list[int]] = []
     non_blocking = device.type == "cuda"
@@ -1007,6 +1035,7 @@ def _aggregate_fold_metrics(
     per_fold: pd.DataFrame,
     pooled_predictions: pd.DataFrame,
 ) -> dict[str, float]:
+    """Aggregate CNN LOVO metrics across folds and compute pooled accuracy."""
     metric_names = [
         "position_accuracy",
         "macro_f1",
@@ -1053,6 +1082,7 @@ def _cross_session_user_rows(
     predictions: pd.DataFrame,
     run_metrics: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    """Build per-user result rows for a cross-session prediction table."""
     rows = []
     for user, user_predictions in predictions.groupby("user", sort=True):
         metrics = compute_localization_metrics(user_predictions)
@@ -1083,11 +1113,13 @@ def _fold_fingerprint(
     *,
     side: Literal["train", "test"],
 ) -> str:
+    """Fingerprint all train or test window identities in a fold collection."""
     frames = [train if side == "train" else test for train, test in folds]
     return _window_identity_fingerprint(pd.concat(frames, ignore_index=True))
 
 
 def _trial_values(*frames: pd.DataFrame) -> set[str]:
+    """Return normalized trial identifiers found across DataFrames."""
     return {
         str(value).removeprefix("trial_").zfill(2)
         for frame in frames
@@ -1096,10 +1128,12 @@ def _trial_values(*frames: pd.DataFrame) -> set[str]:
 
 
 def _trials_used(*frames: pd.DataFrame) -> str:
+    """Return the normalized trial identifiers as a comma-separated value."""
     return ",".join(sorted(_trial_values(*frames)))
 
 
 def _single_user(df: pd.DataFrame) -> object:
+    """Return the single user represented by a LOVO test fold."""
     users = df["user"].dropna().unique()
     if len(users) != 1:
         raise ValueError(f"Expected one LOVO test user, observed {users!r}.")
@@ -1107,6 +1141,7 @@ def _single_user(df: pd.DataFrame) -> object:
 
 
 def _save_checkpoint_metadata(path: Path, metadata: dict[str, Any]) -> None:
+    """Atomically persist early-stopping metadata beside a checkpoint."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -1114,6 +1149,7 @@ def _save_checkpoint_metadata(path: Path, metadata: dict[str, Any]) -> None:
 
 
 def _load_checkpoint_metadata(path: Path) -> dict[str, Any]:
+    """Load checkpoint metadata, returning an empty mapping when unavailable."""
     if not path.exists():
         return {}
     try:
@@ -1123,10 +1159,12 @@ def _load_checkpoint_metadata(path: Path) -> dict[str, Any]:
 
 
 def _window_pairs(df: pd.DataFrame) -> pd.DataFrame:
+    """Return stable group/window identity columns for ordering comparisons."""
     return df[["group_id", "window_idx"]].reset_index(drop=True)
 
 
 def _version_pair(version: str) -> tuple[int, int]:
+    """Extract a major/minor integer pair from a version string."""
     numbers = []
     for part in version.split("+")[0].split("."):
         digits = "".join(character for character in part if character.isdigit())
@@ -1176,6 +1214,7 @@ def build_frequency_window_arrays(
     meta_path = cache_dir / "meta.parquet"
     manifest_path = cache_dir / "manifest.json"
 
+    # Reuse mmap-backed arrays only when their metadata and manifest are complete.
     if not force_rebuild:
         cached = load_window_array_cache(array_paths, meta_path, manifest_path)
         if cached is not None:
@@ -1183,6 +1222,7 @@ def build_frequency_window_arrays(
             _print_loaded_arrays(arrays, manifest, cache_dir)
             return arrays, meta
 
+    # Discover aligned groups first so array shapes can be allocated once.
     groups = list(
         iter_window_groups(
             magnitude_data,
@@ -1210,6 +1250,7 @@ def build_frequency_window_arrays(
     }
 
     cache_dir.mkdir(parents=True, exist_ok=True)
+    # Write each aligned window directly into its final band-specific mmap file.
     writers = open_window_array_writers(array_paths, shapes)
     rows: list[dict[str, object]] = []
     step = window_size - overlap_size
@@ -1268,6 +1309,7 @@ def build_frequency_window_arrays(
 def _normalize_frequency_scenario(
     frequency_scenario: BandName | FeatureScenario,
 ) -> tuple[BandName, FeatureScenario]:
+    """Resolve accepted band aliases to display and feature-scenario names."""
     aliases: dict[str, tuple[BandName, FeatureScenario]] = {
         "2.4 ghz": ("2.4 GHz", "2.4 GHz"),
         "2.4ghz": ("2.4 GHz", "2.4 GHz"),
@@ -1288,6 +1330,7 @@ def _subcarrier_counts(
     groups: list,
     anchor_order: dict[str, list[str]],
 ) -> dict[str, int]:
+    """Infer one subcarrier width for each band from aligned window groups."""
     counts: dict[str, int] = {}
     for band, esp_keys in anchor_order.items():
         for esp_key in esp_keys:
@@ -1309,6 +1352,7 @@ def _print_loaded_arrays(
     manifest: dict[str, Any],
     cache_dir: Path,
 ) -> None:
+    """Print the location and shape summary of cached window arrays."""
     print(f"[window arrays cache hit] {cache_dir.resolve()}")
     _print_array_summary(arrays, manifest["anchor_order"])
 
@@ -1317,10 +1361,12 @@ def _print_array_summary(
     arrays: dict[str, np.ndarray],
     anchor_order: dict[str, list[str]],
 ) -> None:
+    """Print shapes, dtypes, and anchor order for window arrays."""
     for band, array in arrays.items():
         print(f"[window arrays] {band}: shape={tuple(array.shape)}, dtype={array.dtype}")
         print(f"[window arrays] {band} anchors: {anchor_order[band]}")
 
 
 def _band_stem(band: str) -> str:
+    """Convert a display band name to its compact cache-path stem."""
     return band.lower().replace(".", "_").replace(" ", "")

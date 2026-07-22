@@ -49,9 +49,8 @@ class WindowGroup:
     group_id: str
 
 
-# This function maps a location key to a room label (0, 1, 2, or 3)
-# based on the location's row and column.
 def room_label_for_location(location_key: str) -> int | None:
+    """Map a location key to its room label, excluding the empty-room location."""
     location = location_key.removeprefix("location_").upper()
     if location == EMPTY_ROOM_LOCATION:
         return None
@@ -75,14 +74,13 @@ def room_label_for_location(location_key: str) -> int | None:
     return None
 
 
-# This function computes statistical features for the given
-# magnitude data using a sliding window approach.
 def compute_window_features(
     magnitude: np.ndarray,
     *,
     window_size: int,
     overlap_size: int,
 ) -> np.ndarray:
+    """Compute per-subcarrier statistics for each sliding magnitude window."""
     validate_window_parameters(magnitude, window_size=window_size, overlap_size=overlap_size)
 
     subcarrier_count = magnitude.shape[1]
@@ -96,6 +94,8 @@ def compute_window_features(
 
     features = np.empty((window_count, subcarrier_count * len(FEATURE_NAMES)), dtype=float)
 
+    # Preserve the established feature order because downstream column names and
+    # cached DataFrames depend on it.
     for window_idx, window in enumerate(
         iter_magnitude_windows(
             magnitude,
@@ -117,9 +117,6 @@ def compute_window_features(
     return features
 
 
-# This function builds a feature dataframe for a given
-# frequency scenario by iterating through the magnitude
-# data and extracting features for each trial that matches the scenario.
 def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
     magnitude_data: CsiMap,
     frequency_scenario: FeatureScenario,
@@ -128,6 +125,7 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
     overlap_size: int = 30,
     require_all_esps: bool = True,
 ) -> pd.DataFrame:
+    """Create the window-level ML feature DataFrame for one frequency scenario."""
     esp_keys = _esp_keys_for_scenario(frequency_scenario)
     feature_columns: list[str] = []
     known_feature_columns: set[str] = set()
@@ -140,6 +138,8 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
         overlap_size=overlap_size,
         require_all_esps=require_all_esps,
     ):
+        # Compute each ESP independently, then truncate the combined rows to the
+        # number of windows shared by the complete recording group.
         esp_features = {
             esp_key: compute_window_features(
                 magnitude,
@@ -149,8 +149,7 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
             for esp_key, magnitude in group.magnitudes_by_esp.items()
         }
 
-        # extend the feature columns list with any new
-        # feature columns from this trial's ESPs
+        # Extend the schema when recordings expose new ESP feature columns.
         _extend_feature_columns(
             feature_columns,
             known_feature_columns,
@@ -176,8 +175,6 @@ def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
     return df
 
 
-# function that is called by the main script
-# builds three dataframes, one for each frequency scenario, and returns them as a tuple
 def build_frequency_feature_dataframes(
     magnitude_data: CsiMap,
     *,
@@ -185,6 +182,7 @@ def build_frequency_feature_dataframes(
     overlap_size: int = 30,
     require_all_esps: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build the 2.4 GHz, 5 GHz, and fusion ML feature DataFrames."""
     df_24ghz = build_frequency_feature_dataframe(
         magnitude_data,
         "2.4 GHz",
@@ -210,6 +208,7 @@ def build_frequency_feature_dataframes(
 
 
 def _esp_keys_for_scenario(frequency_scenario: FeatureScenario) -> tuple[str, ...]:
+    """Return the ordered ESP keys configured for a frequency scenario."""
     if frequency_scenario not in ESP_IDS_BY_BAND:
         msg = (
             f"Unknown frequency_scenario {frequency_scenario!r}. "
@@ -229,6 +228,7 @@ def iter_window_groups(
     overlap_size: int,
     require_all_esps: bool,
 ) -> Iterator[WindowGroup]:
+    """Yield aligned recording groups that can produce window-level examples."""
     esp_keys = _esp_keys_for_scenario(frequency_scenario)
 
     for scenario_key, locations_map in magnitude_data.items():
@@ -244,6 +244,8 @@ def iter_window_groups(
                 if not selected_esp_keys:
                     continue
 
+                # Only trials present for every selected ESP can be aligned into
+                # one multi-anchor feature or tensor example.
                 trial_sets = [
                     {
                         trial_key
@@ -275,6 +277,8 @@ def iter_window_groups(
                     if not magnitudes_by_esp:
                         continue
 
+                    # Truncate to the shortest ESP recording to maintain strict
+                    # window identity across anchors.
                     min_windows = min(window_counts)
                     if min_windows == 0:
                         continue
@@ -298,6 +302,7 @@ def _extend_feature_columns(
     known_feature_columns: set[str],
     new_feature_columns: list[str],
 ) -> None:
+    """Append previously unseen feature names while preserving discovery order."""
     for feature_column in new_feature_columns:
         if feature_column not in known_feature_columns:
             feature_columns.append(feature_column)
@@ -308,6 +313,7 @@ def _feature_columns_for_group(
     esp_keys: tuple[str, ...],
     esp_features: dict[str, np.ndarray],
 ) -> list[str]:
+    """Build ordered feature column names for the ESPs present in one group."""
     feature_columns: list[str] = []
 
     for esp_key in esp_keys:
@@ -323,6 +329,7 @@ def _feature_columns_for_group(
 
 
 def _feature_columns_for_esp(esp_key: str, subcarrier_count: int) -> list[str]:
+    """Build statistical feature column names for one ESP."""
     return [
         f"{esp_key}_{feature_name}_sc_{subcarrier_idx:02d}"
         for feature_name in FEATURE_NAMES
@@ -331,6 +338,7 @@ def _feature_columns_for_esp(esp_key: str, subcarrier_count: int) -> list[str]:
 
 
 def _subcarrier_count_from_features(features: np.ndarray) -> int:
+    """Infer the subcarrier count encoded in a window-feature matrix."""
     feature_count = len(FEATURE_NAMES)
     if features.shape[1] % feature_count != 0:
         msg = "feature width must be divisible by the number of feature names"
@@ -351,6 +359,7 @@ def _features_by_esp(  # noqa: PLR0913
     window_size: int,
     overlap_size: int,
 ) -> dict[str, np.ndarray]:
+    """Compute non-empty window-feature arrays for selected ESPs in one trial."""
     esp_features: dict[str, np.ndarray] = {}
 
     for esp_key in selected_esp_keys:
@@ -389,6 +398,7 @@ def _rows_for_group(  # noqa: PLR0913
     trial_key: str,
     label: int,
 ) -> list[dict[str, object]]:
+    """Combine aligned ESP features and recording metadata into DataFrame rows."""
     rows = []
     group_id = f"{scenario_key}_{location_key}_{user_key}_{trial_key}"
 

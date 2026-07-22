@@ -13,12 +13,10 @@ PATTERN = re.compile(
 )
 
 
-# This function scans the specified directory for CSV files that match a specific naming pattern.
-# It collects unique values for scenarios, locations, users, esps,
-# and trials found in the file names and returns them as sorted lists.
 def sort_meta_info(
     path: str,
 ) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
+    """Return sorted metadata values parsed from valid CSV filenames in ``path``."""
     base: Path = Path(path)
     scenarios_id = set()
     locations_id = set()
@@ -53,10 +51,8 @@ def sort_meta_info(
     )
 
 
-# This function scans the specified directory for CSV files that match a specific naming pattern.
-# It organizes the found files into a nested dictionary structure based on their metadata
-# (scenario, location, user, esp, trial).
 def get_csv_files(path: str) -> FileMap:
+    """Discover valid CSV files and index them by scenario, location, user, ESP, and trial."""
     files: FileMap = {}
     base: Path = Path(path)
 

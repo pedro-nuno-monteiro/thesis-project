@@ -96,6 +96,7 @@ class CacheStats:
 
     @property
     def total(self) -> int:
+        """Return the total number of processed and cache-loaded files."""
         return self.processed + self.cached
 
 
@@ -190,14 +191,10 @@ def parse_valid_packet_rows(
     return valid_csi, valid_rssi_dbm, no_match_count, no_complete_count
 
 
-def iq_values_to_complex(csi_values: np.ndarray, *, its5ghz: bool) -> np.ndarray:
+def iq_values_to_complex(csi_values: np.ndarray) -> np.ndarray:
     """Convert interleaved I/Q values to the established complex CSI ordering."""
-    if its5ghz:
-        imaginary = csi_values[:, ::2]
-        real = csi_values[:, 1::2]
-    else:
-        real = csi_values[:, 1::2]
-        imaginary = csi_values[:, ::2]
+    imaginary = csi_values[:, ::2]
+    real = csi_values[:, 1::2]
     return real + 1j * imaginary
 
 
@@ -205,6 +202,7 @@ def processing_diagnostics_frame(
     results: list[_CachedResult],
     options: _RunOptions,
 ) -> pd.DataFrame:
+    """Build one diagnostic row per loaded CSI file."""
     rows: list[dict[str, object]] = []
     for result in results:
         file_result = result.payload
@@ -319,6 +317,8 @@ def process_csv_files(  # noqa: PLR0913
     if not np.isfinite(calibration_eps) or calibration_eps <= 0:
         raise ValueError("calibration_eps must be a finite positive value.")
 
+    # Build the output shape before processing so invalid or empty files retain
+    # their expected place in the nested data map.
     magnitudes = _initialize_maps(data_files)
     jobs = list(_iter_jobs(data_files))
     options = _RunOptions(
@@ -330,6 +330,7 @@ def process_csv_files(  # noqa: PLR0913
         min_rssi_dbm=min_rssi_dbm,
         calibration_eps=calibration_eps,
     )
+    # Each file has an explicit cache boundary and can be processed independently.
     results, cache_stats = _run_jobs(jobs, _process_standard_cached, options)
 
     invalid_packets_removed = 0
@@ -362,6 +363,8 @@ def process_csv_files(  # noqa: PLR0913
 
 
 def _process_standard_file(job: _ProcessingJob, options: _RunOptions) -> _StandardFileResult:
+    """Load, parse, and preprocess one CSI CSV file without using the cache."""
+    # Parse only complete packets before converting the interleaved I/Q payload.
     csi_raw, rssi_raw, expected_length = read_csi_columns(job)
     valid_csi, valid_rssi, no_match_count, no_complete_count = parse_valid_packet_rows(
         csi_raw,
@@ -379,7 +382,8 @@ def _process_standard_file(job: _ProcessingJob, options: _RunOptions) -> _Standa
 
     csi_values = np.asarray(valid_csi, dtype=float)
     rssi_dbm = np.asarray(valid_rssi, dtype=float)
-    complex_csi = iq_values_to_complex(csi_values, its5ghz=job.its5ghz)
+    complex_csi = iq_values_to_complex(csi_values)
+    # Delegate signal processing after the CSV-specific parsing is complete.
     magnitude, invalid_packets_removed, calibration_applied = process_complex_csi(
         complex_csi,
         rssi_dbm,
@@ -399,6 +403,7 @@ def _process_standard_file(job: _ProcessingJob, options: _RunOptions) -> _Standa
 
 
 def _processor_identity(options: _RunOptions) -> str:
+    """Return the cache identity for the selected CSI processing settings."""
     return (
         f"{PROCESSOR_VERSION}-calibration-{options.calibration_mode}"
         f"-min-rssi-{options.min_rssi_dbm:g}-eps-{options.calibration_eps:g}"
@@ -406,6 +411,7 @@ def _processor_identity(options: _RunOptions) -> str:
 
 
 def _process_standard_cached(job: _ProcessingJob, options: _RunOptions) -> _CachedResult:
+    """Load a cached file result or process and cache the source CSV."""
     processor_version = _processor_identity(options)
     cache_file = csi_cache_path(job.file_path, processor_version, options.cache_dir)
     if options.use_cache and not options.force_reprocess and cache_file.exists():
@@ -424,6 +430,7 @@ def _run_jobs(
     worker: Callable[[_ProcessingJob, _RunOptions], _CachedResult],
     options: _RunOptions,
 ) -> tuple[list[_CachedResult], CacheStats]:
+    """Execute CSI file jobs and report how many results came from the cache."""
     if not jobs:
         return [], CacheStats(calibration_mode=options.calibration_mode)
 
@@ -446,6 +453,7 @@ def _run_jobs(
 
 
 def _iter_jobs(data_files: FileMap) -> Iterable[_ProcessingJob]:
+    """Yield one processing job for every non-null path in a nested file map."""
     for scenario_key, locations_map in data_files.items():
         for location_key, users_map in locations_map.items():
             for user_key, esps_map in users_map.items():
@@ -466,6 +474,7 @@ def _iter_jobs(data_files: FileMap) -> Iterable[_ProcessingJob]:
 
 
 def _initialize_maps(data_files: FileMap) -> CsiMap:
+    """Create an empty magnitude map with the discovered metadata hierarchy."""
     magnitudes: CsiMap = {}
     for scenario_key, locations_map in data_files.items():
         magnitudes[scenario_key] = {}
@@ -483,6 +492,7 @@ def _set_magnitude_entry(
     job: _ProcessingJob,
     magnitude: np.ndarray,
 ) -> None:
+    """Store one processed magnitude array at its source metadata path."""
     magnitudes[job.scenario_key][job.location_key][job.user_key][job.esp_key][
         job.trial_key
     ] = magnitude
@@ -495,6 +505,7 @@ def _empty_standard_result(
     no_complete_count: int,
     total_rows: int,
 ) -> _StandardFileResult:
+    """Return a correctly shaped empty result for a file with no valid packets."""
     subcarrier_count = 56 if job.its5ghz else 50
     return _StandardFileResult(
         magnitude=np.empty((0, subcarrier_count), dtype=float),
@@ -507,6 +518,7 @@ def _empty_standard_result(
 
 
 def _normalized_key(value: str) -> str:
+    """Remove a known metadata prefix from a nested-map key."""
     normalized = value
     for prefix in ("scenario_", "location_", "user_", "trial_"):
         normalized = normalized.removeprefix(prefix)
@@ -514,11 +526,13 @@ def _normalized_key(value: str) -> str:
 
 
 def _esp_band(esp_key: str) -> str:
+    """Return the frequency band associated with an ESP key."""
     esp_id = int(esp_key.removeprefix("esp_"))
     return "5 GHz" if FIVE_GHZ_MIN_ESP_ID <= esp_id <= FIVE_GHZ_MAX_ESP_ID else "2.4 GHz"
 
 
 def _validate_required_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
+    """Raise a clear error when a DataFrame lacks required columns."""
     missing_columns = sorted(required_columns - set(df.columns))
     if missing_columns:
         raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")

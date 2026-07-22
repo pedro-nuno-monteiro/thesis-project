@@ -278,6 +278,7 @@ def plot_floor_plan_heatmap(
 
 
 def _floor_plan_records(predictions: pd.DataFrame) -> list[dict[str, float]]:
+    """Aggregate accuracy and distance error for each valid floor-plan position."""
     records = []
     for location, group in predictions.groupby("true_location"):
         match = LOCATION_PATTERN.fullmatch(_normalize_location_label(location))
@@ -299,6 +300,7 @@ def _floor_plan_records(predictions: pd.DataFrame) -> list[dict[str, float]]:
 
 
 def _draw_floor_background(ax, n_rows: int, n_cols: int, mpatches) -> None:
+    """Draw room-colored floor-plan cells and their grid lines."""
     for col_i in range(n_cols):
         for row_i in range(n_rows):
             room = _room_id(chr(ord("A") + row_i), col_i + 1)
@@ -328,6 +330,7 @@ def _draw_floor_metric_cells(
     fmt_fn,
     mpatches,
 ) -> None:
+    """Overlay colored and optionally annotated metric cells on a floor plan."""
     for record in records:
         row_idx = record["row_idx"]
         col_idx = record["col_idx"]
@@ -359,6 +362,7 @@ def _draw_floor_metric_cells(
 
 
 def _room_id(row_letter: str, col_num: int) -> int:
+    """Map a floor-plan grid coordinate to its room identifier."""
     if row_letter in "ABCDEF" and col_num in range(1, 10):
         return 1
     if (row_letter == "A" and col_num in {13, 14}) or (
@@ -371,6 +375,7 @@ def _room_id(row_letter: str, col_num: int) -> int:
 
 
 def _location_values(*location_series: pd.Series) -> list[str]:
+    """Return unique location labels in physical grid order."""
     locations = {
         str(location)
         for series in location_series
@@ -380,6 +385,7 @@ def _location_values(*location_series: pd.Series) -> list[str]:
 
 
 def _location_sort_key(location: str) -> tuple[int, str, int | str]:
+    """Return a stable grid-aware sort key for a location label."""
     normalized = _normalize_location_label(location)
     if normalized == EMPTY_ROOM_LOCATION:
         return (1, "Z", 0)
@@ -390,18 +396,22 @@ def _location_sort_key(location: str) -> tuple[int, str, int | str]:
 
 
 def _normalize_location_label(location: object) -> str:
+    """Normalize a location value to its uppercase grid label."""
     return str(location).strip().upper().removeprefix("LOCATION_")
 
 
 def _numeric_distance_errors(predictions: pd.DataFrame) -> pd.Series:
+    """Return valid numeric distance-error values from prediction rows."""
     return pd.to_numeric(predictions["distance_error"], errors="coerce").dropna()
 
 
 def _slugify(value: str) -> str:
+    """Convert a display value to a compact filename-safe slug."""
     return value.lower().replace(".", "-").replace(" ", "-").strip("-")
 
 
 def _validate_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
+    """Raise a clear error when plotting data lacks required columns."""
     missing = sorted(required_columns - set(df.columns))
     if missing:
         msg = f"Missing required columns: {', '.join(missing)}"
@@ -409,6 +419,7 @@ def _validate_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
 
 
 def _save_and_show(fig, save_path: str | Path | None) -> None:
+    """Finalize a figure, optionally save it, and display it."""
     fig.tight_layout()
     if save_path is not None:
         output = Path(save_path).with_suffix(f".{PLOT_FORMAT}")
@@ -555,12 +566,14 @@ def save_training_curves(history: pd.DataFrame, save_path: str | Path, title: st
 
 
 def set_all_subcarrier_ticks(ax: Axes, subcarrier_count: int) -> None:
+    """Label every subcarrier index on an axis."""
     subcarrier_index = np.arange(subcarrier_count)
     ax.set_xticks(subcarrier_index)
     ax.set_xticklabels(subcarrier_index, rotation=90, fontsize=6)
 
 
 def set_sparse_index_ticks(ax: Axes, values: np.ndarray, axis: str) -> None:
+    """Add a small, evenly spaced set of index ticks to an axis."""
     if values.size == 0:
         return
     tick_count = min(8, values.size)
@@ -577,6 +590,7 @@ def set_sparse_index_ticks(ax: Axes, values: np.ndarray, axis: str) -> None:
 
 
 def magnitude_to_db(magnitude: np.ndarray, epsilon: float = DB_EPSILON) -> np.ndarray:
+    """Convert linear CSI magnitude to decibels with a numerical floor."""
     magnitude_array = np.asarray(magnitude, dtype=float)
     return 20.0 * np.log10(np.clip(magnitude_array, epsilon, None))
 
@@ -585,6 +599,7 @@ def visualization_magnitude_db(
     magnitude: np.ndarray,
     min_db: float = VISUALIZATION_MIN_DB,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Convert magnitude to dB and retain packets above the display threshold."""
     magnitude_db = magnitude_to_db(magnitude)
     if magnitude_db.ndim != MAGNITUDE_DIMS or magnitude_db.size == 0:
         return magnitude_db, np.empty(0, dtype=int)
@@ -597,6 +612,7 @@ def plot_no_visible_magnitude_data(
     label: str,
     min_db: float = VISUALIZATION_MIN_DB,
 ) -> None:
+    """Render a labelled placeholder when a magnitude plot has no valid values."""
     ax.set_title(f"{label} | no samples >= {min_db:g} dB")
     ax.text(
         0.5,
@@ -610,10 +626,12 @@ def plot_no_visible_magnitude_data(
 
 
 def plot_blank_magnitude_slot(ax: Axes) -> None:
+    """Hide an unused magnitude subplot."""
     ax.set_axis_off()
 
 
 def normalize_location_input(value: str) -> str | None:
+    """Normalize interactive location input to a nested-map key."""
     normalized_value = value.strip().replace(" ", "").upper()
     normalized_value = normalized_value.removeprefix("LOCATION_")
     match = CSI_LOCATION_PATTERN.fullmatch(normalized_value)
@@ -625,6 +643,7 @@ def normalize_location_input(value: str) -> str | None:
 
 
 def normalize_esp_input(value: str) -> str | None:
+    """Normalize interactive ESP input to a nested-map key."""
     normalized_value = value.strip().lower().removeprefix("esp_")
     if not normalized_value.isdigit():
         return None
@@ -632,15 +651,19 @@ def normalize_esp_input(value: str) -> str | None:
 
 
 def format_location_key(location_key: str) -> str:
+    """Format a location map key for display."""
     return location_key.removeprefix("location_")
 
 
 def format_esp_key(esp_key: str) -> str:
+    """Format an ESP map key for display."""
     return esp_key.removeprefix("esp_")
 
 
 def sorted_location_keys(location_keys: set[str]) -> list[str]:
+    """Sort nested-map location keys in physical grid order."""
     def sort_key(location_key: str) -> tuple[str, int]:
+        """Return the row and numeric column used for location ordering."""
         location = format_location_key(location_key)
         if location == "Z-0":
             return "Z", 0
@@ -651,10 +674,12 @@ def sorted_location_keys(location_keys: set[str]) -> list[str]:
 
 
 def sorted_esp_keys(esp_keys: set[str]) -> list[str]:
+    """Sort ESP keys by their numeric identifier."""
     return sorted(esp_keys, key=lambda esp_key: int(format_esp_key(esp_key)))
 
 
 def paired_esp_keys(esp_keys: list[str]) -> list[str]:
+    """Order 2.4 GHz and 5 GHz ESP anchors in corresponding pairs."""
     esp_by_id: dict[int, str] = {}
     unordered_esp_keys = []
     for esp_key in esp_keys:
@@ -679,6 +704,7 @@ def paired_esp_keys(esp_keys: list[str]) -> list[str]:
 
 
 def get_available_location_keys(magnitudes: CsiMap) -> list[str]:
+    """Return locations that contain at least one magnitude recording."""
     return sorted_location_keys(
         {
             location_key
@@ -689,6 +715,7 @@ def get_available_location_keys(magnitudes: CsiMap) -> list[str]:
 
 
 def get_available_esp_keys_for_location(magnitudes: CsiMap, location_key: str) -> list[str]:
+    """Return ESP keys with data for a selected location."""
     esp_keys: set[str] = set()
     for locations_map in magnitudes.values():
         users_map = locations_map.get(location_key)
@@ -700,6 +727,7 @@ def get_available_esp_keys_for_location(magnitudes: CsiMap, location_key: str) -
 
 
 def prompt_yes_no(prompt: str) -> bool:
+    """Prompt interactively until the user supplies a yes-or-no answer."""
     while True:
         answer = input(prompt).strip().lower()
         if answer in {"y", "yes", "s", "sim"}:
@@ -710,6 +738,7 @@ def prompt_yes_no(prompt: str) -> bool:
 
 
 def prompt_location_key(magnitudes: CsiMap) -> str | None:
+    """Prompt for one available location, allowing cancellation."""
     available_locations = get_available_location_keys(magnitudes)
     if not available_locations:
         print("No locations are available in magnitude_data.")
@@ -727,6 +756,7 @@ def prompt_location_key(magnitudes: CsiMap) -> str | None:
 
 
 def prompt_esp_keys(magnitudes: CsiMap, location_key: str) -> list[str]:
+    """Prompt for one or more ESPs available at a location."""
     available_esps = get_available_esp_keys_for_location(magnitudes, location_key)
     if not available_esps:
         print(f"No ESPs are available for {format_location_key(location_key)}.")
@@ -756,6 +786,7 @@ def iter_selected_magnitude_groups(
     location_key: str,
     esp_keys: list[str],
 ) -> Iterator[SelectedTrialGroup]:
+    """Yield matching magnitude recordings for selected locations and ESPs."""
     for scenario_key, locations_map in magnitudes.items():
         users_map = locations_map.get(location_key)
         if users_map is None:
@@ -786,11 +817,13 @@ def iter_selected_magnitude_groups(
 
 
 def make_subplot_grid(entry_count: int, column_count: int) -> tuple[int, int]:
+    """Return a compact row/column layout for a number of plots."""
     row_count = max(1, (entry_count + column_count - 1) // column_count)
     return row_count, column_count
 
 
 def hide_unused_axes(axes: np.ndarray, used_count: int) -> None:
+    """Hide subplot axes that were not populated."""
     for ax in axes.ravel()[used_count:]:
         ax.set_visible(False)
 
@@ -801,7 +834,10 @@ def plot_selected_magnitude_profiles(
     esp_keys: list[str],
     column_count: int = 2,
 ) -> None:
+    """Plot packet-averaged magnitude profiles for selected recordings."""
     plot_count = 0
+    # Keep each recording group in its own figure so trial and user identity stay
+    # visible while ESP profiles are compared.
     for scenario_key, _, user_key, trial_key, entries in iter_selected_magnitude_groups(
         magnitudes,
         location_key,
@@ -861,6 +897,7 @@ def plot_selected_magnitude_heatmaps(  # noqa: PLR0913
     subcarrier_stride: int = 1,
     column_count: int = 2,
 ) -> None:
+    """Plot packet-by-subcarrier magnitude heatmaps for selected recordings."""
     if packet_stride < 1 or subcarrier_stride < 1:
         raise ValueError(INVALID_STRIDE_MESSAGE)
     plot_count = 0
@@ -905,6 +942,7 @@ def plot_selected_magnitude_heatmaps(  # noqa: PLR0913
 
 
 def stack_same_width_profiles(profiles: list[np.ndarray]) -> np.ndarray:
+    """Stack profiles with the most common subcarrier width."""
     if not profiles:
         return np.empty((0, 0), dtype=float)
     width_counts: dict[int, int] = {}
@@ -920,6 +958,7 @@ def collect_user_mean_profiles_db(
     location_key: str,
     esp_key: str,
 ) -> dict[str, np.ndarray]:
+    """Collect each user's mean dB profile for one location and ESP."""
     users_map = magnitudes.get(scenario_key, {}).get(location_key, {})
     user_profiles: dict[str, np.ndarray] = {}
     for user_key, esps_map in users_map.items():
@@ -948,6 +987,7 @@ def empty_room_mean_profile_db(
     target_shape: tuple[int, ...],
     empty_room_location_key: str = EMPTY_ROOM_LOCATION_KEY,
 ) -> np.ndarray | None:
+    """Return the aggregate empty-room dB profile for one ESP when available."""
     empty_user_profiles = collect_user_mean_profiles_db(
         magnitudes,
         scenario_key,
@@ -969,6 +1009,7 @@ def plot_average_magnitude_profiles_across_users(
     empty_room_location_key: str = EMPTY_ROOM_LOCATION_KEY,
     column_count: int = 2,
 ) -> None:
+    """Compare average user profiles and optional empty-room baselines by ESP."""
     plot_count = 0
     for scenario_key in sorted(magnitudes):
         entries = []
@@ -986,6 +1027,8 @@ def plot_average_magnitude_profiles_across_users(
                 continue
             mean_profile = stacked_users.mean(axis=0)
             std_profile = stacked_users.std(axis=0)
+            # Resolve an empty-room reference only after the occupied profiles
+            # establish the compatible subcarrier shape.
             empty_profile = empty_room_mean_profile_db(
                 magnitudes,
                 scenario_key,

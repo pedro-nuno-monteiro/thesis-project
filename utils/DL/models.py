@@ -24,6 +24,7 @@ class BandEncoder(nn.Module):
         n_anchors: int,
         params: dict[str, Any] | None = None,
     ) -> None:
+        """Build the convolutional encoder for a specified number of anchors."""
         super().__init__()
         params = params or {}
         conv1_filters = int(params.get("conv1_filters", CNN_CONV1_FILTERS))
@@ -43,10 +44,12 @@ class BandEncoder(nn.Module):
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Encode a batch of band-specific CSI windows."""
         return self.features(inputs)
 
 
 def _safe_branch_name(name: str) -> str:
+    """Convert a display band name to a valid ``ModuleDict`` key."""
     return "b_" + name.replace(".", "_").replace(" ", "_").replace("-", "_")
 
 
@@ -59,6 +62,7 @@ class DualBandCNN(nn.Module):
         n_classes: int,
         params: dict[str, Any] | None = None,
     ) -> None:
+        """Build one encoder per band and the shared classification head."""
         super().__init__()
         params = params or {}
         latent_dim = int(params.get("latent_dim", CNN_LATENT_DIM))
@@ -79,6 +83,7 @@ class DualBandCNN(nn.Module):
         )
 
     def forward(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Encode each band, concatenate its latent vector, and predict logits."""
         latents = [
             self.branches[_safe_branch_name(band)](inputs[band]) for band in self._order
         ]

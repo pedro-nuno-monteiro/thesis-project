@@ -219,6 +219,7 @@ def parse_run_id(run_id: str) -> dict[str, Any]:
 
 
 def get_cache_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> Path:
+    """Return the feature-cache directory for preprocessing and feature options."""
     return (
         CACHE_DIR
         / f"preproc={make_preproc_key(preproc_opts)}"
@@ -374,6 +375,7 @@ def _band_stem(band: str) -> str:
 
 
 def _normalization_stem(normalization: str, baseline_scope: str | None) -> str:
+    """Encode normalization and optional baseline scope in a run identifier."""
     normalized = str(normalization or "none").strip().lower()
     if normalized == "empty_baseline":
         scope = str(baseline_scope or "session").strip().lower().removeprefix("per_")
@@ -388,10 +390,12 @@ def _normalization_stem(normalization: str, baseline_scope: str | None) -> str:
 
 
 def _prediction_metadata_path(path: Path) -> Path:
+    """Return the JSON sidecar path for a prediction parquet file."""
     return path.with_suffix(path.suffix + ".metadata.json")
 
 
 def _write_prediction_metadata(path: Path, metadata: dict[str, Any]) -> None:
+    """Atomically write prediction-cache metadata to its JSON sidecar."""
     metadata_path = _prediction_metadata_path(path)
     tmp = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
     tmp.write_text(json.dumps(_json_normalized(metadata), indent=2), encoding="utf-8")
@@ -403,6 +407,7 @@ def _write_prediction_parquet_with_metadata(
     path: Path,
     metadata: dict[str, Any],
 ) -> None:
+    """Write predictions with embedded metadata when PyArrow is available."""
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
@@ -420,6 +425,7 @@ def _write_prediction_parquet_with_metadata(
 
 
 def _read_prediction_metadata(path: Path) -> dict[str, Any] | None:
+    """Read prediction metadata from the JSON sidecar or parquet schema."""
     metadata_path = _prediction_metadata_path(path)
     if not metadata_path.exists():
         return _read_prediction_parquet_metadata(path)
@@ -430,6 +436,7 @@ def _read_prediction_metadata(path: Path) -> dict[str, Any] | None:
 
 
 def _read_prediction_parquet_metadata(path: Path) -> dict[str, Any] | None:
+    """Read embedded prediction metadata from a parquet schema."""
     try:
         import pyarrow.parquet as pq
     except ImportError:
@@ -445,6 +452,7 @@ def _read_prediction_parquet_metadata(path: Path) -> dict[str, Any] | None:
 
 
 def _prediction_metadata_matches(path: Path, expected_metadata: dict[str, Any]) -> bool:
+    """Return whether cached prediction metadata matches all expected values."""
     observed = _read_prediction_metadata(path)
     if observed is None:
         return False
@@ -468,10 +476,12 @@ def _prediction_metadata_matches(path: Path, expected_metadata: dict[str, Any]) 
 
 
 def _json_normalized(payload: Any) -> Any:
+    """Convert a payload to a stable JSON-compatible value."""
     return json.loads(json.dumps(payload, sort_keys=True, default=str))
 
 
 def _check_schema(df: pd.DataFrame, path: Path) -> None:
+    """Validate metadata columns and feature dtypes in a cached DataFrame."""
     missing = _EXPECTED_METADATA_COLS - set(df.columns)
     if missing:
         raise ValueError(
@@ -514,6 +524,8 @@ def get_all_dataframes(
     }
     paths = {name: cache_dir / f"{stem}.parquet" for name, stem in band_stems.items()}
 
+    # A cache hit is accepted only when all bands exist and their schemas and
+    # window inventories still match the discovered raw data.
     if all(p.exists() for p in paths.values()):
         result: dict[str, pd.DataFrame] = {}
         try:
@@ -537,6 +549,8 @@ def get_all_dataframes(
         except _StaleFeatureCache as exc:
             print(f"[cache stale] {exc} Rebuilding cached feature dataframes.")
 
+    # Rebuild the related DataFrames together so fusion and single-band caches
+    # cannot silently represent different preprocessing runs.
     print(f"[cache miss] {cache_dir}, computing...")
     df_24ghz, df_5ghz, df_fusion = builder()
     dataframes: dict[str, pd.DataFrame] = {
@@ -578,6 +592,7 @@ def _feature_cache_stale_reasons(
     expected_trials: set[str] | None,
     expected_window_inventory: dict[str, dict[str, int]] | None,
 ) -> list[str]:
+    """Describe trial or window-inventory differences in feature caches."""
     reasons: list[str] = []
     for band, frame in dataframes.items():
         observed_trials = {str(value).zfill(2) for value in frame["trial"].dropna().unique()}
@@ -622,6 +637,7 @@ def get_dataframe(
     cache_dir = get_cache_path(preproc_opts, feat_opts)
     path = cache_dir / f"{_band_stem(band)}.parquet"
 
+    # Validate a candidate cache before returning it to the ML pipeline.
     if path.exists():
         print(f"[cache hit] {path}")
         df = pd.read_parquet(path)

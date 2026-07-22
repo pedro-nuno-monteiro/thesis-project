@@ -204,6 +204,7 @@ def compute_localization_metrics(predictions_df: pd.DataFrame) -> dict[str, floa
 
 
 def _metric_column(df: pd.DataFrame, *names: str) -> pd.Series:
+    """Return the first available metric column from a list of aliases."""
     for name in names:
         if name in df.columns:
             return df[name]
@@ -211,6 +212,7 @@ def _metric_column(df: pd.DataFrame, *names: str) -> pd.Series:
 
 
 def _accuracy(left: pd.Series, right: pd.Series) -> float:
+    """Return equality accuracy for two aligned Series, or NaN when empty."""
     if left.empty:
         return np.nan
     return float((left.to_numpy() == right.to_numpy()).mean())
@@ -295,6 +297,8 @@ def build_global_predictions_dataframe(  # noqa: PLR0913
     column_spacing: float = 1.0,
 ) -> pd.DataFrame:
     """Build the shared prediction table used by ML and DL evaluation."""
+    # Derive room labels and physical errors from the position predictions so all
+    # model families use the same evaluation definitions.
     pred_rooms = np.asarray(
         [room_label_for_location(location) for location in pred_positions],
         dtype=object,
@@ -396,6 +400,7 @@ def _coord_component(
     coordinates: tuple[float, float] | None,
     axis: str,
 ) -> float:
+    """Extract an x or y value from row/column coordinates."""
     if coordinates is None:
         return np.nan
     row_coordinate, column_coordinate = coordinates
@@ -403,10 +408,12 @@ def _coord_component(
 
 
 def _normalize_location_label(location: object) -> str:
+    """Normalize a location value to its uppercase grid label."""
     return str(location).strip().upper().removeprefix("LOCATION_")
 
 
 def _validate_grid_spacing(*, row_spacing: float, column_spacing: float) -> None:
+    """Require finite, positive physical spacing along both grid axes."""
     if not np.isfinite(row_spacing) or row_spacing <= 0:
         raise ValueError("row_spacing must be a finite positive value.")
     if not np.isfinite(column_spacing) or column_spacing <= 0:
@@ -414,6 +421,7 @@ def _validate_grid_spacing(*, row_spacing: float, column_spacing: float) -> None
 
 
 def _require_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
+    """Raise a clear error when an evaluation DataFrame lacks columns."""
     missing = sorted(required_columns - set(df.columns))
     if missing:
         raise ValueError(f"Missing required columns: {', '.join(missing)}")
@@ -602,6 +610,8 @@ def derive_seed_summary(*, results_root: Path = RESULTS_ROOT) -> pd.DataFrame:
         "require_all_esps",
     ]
     rows: list[dict[str, Any]] = []
+    # Aggregate one metric per seed; LOVO rows already contain their fold-level
+    # mean and standard deviation and must not be pooled as independent samples.
     for keys, group in seeded.groupby(group_columns, dropna=False, sort=True):
         split = str(group["split"].iloc[0])
         basis = "fold_mean_per_seed" if split == "lovo" else "run_metric_per_seed"
@@ -645,8 +655,11 @@ def _upsert_rows(
     preferred_middle: list[str],
     suffix_columns: list[str],
 ) -> pd.DataFrame:
+    """Replace rows with matching keys and atomically rewrite the CSV table."""
     incoming = pd.DataFrame(rows)
     existing_middle: list[str] = []
+    # Preserve the existing table's metric-column order while replacing rows
+    # identified by the supplied stable keys.
     if path.exists():
         string_columns = {
             column: "string"
@@ -689,6 +702,8 @@ def _upsert_rows(
         combined = pd.concat([existing, incoming], ignore_index=True, sort=False)
     else:
         combined = incoming
+    # Rebuild a deterministic schema: identifiers, metrics, provenance, then any
+    # previously unknown columns.
     preferred_middle = _unique(existing_middle + preferred_middle)
     known = set(prefix_columns) | set(preferred_middle) | set(suffix_columns)
     additional_columns = [column for column in combined.columns if column not in known]
@@ -703,6 +718,7 @@ def _upsert_rows(
 
 
 def _csv_safe_mapping(values: dict[str, Any]) -> dict[str, Any]:
+    """Serialize nested values so a mapping can be stored safely in CSV cells."""
     return {
         key: (json.dumps(value, sort_keys=True, default=str) if isinstance(value, (dict, list)) else value)
         for key, value in values.items()
@@ -710,10 +726,12 @@ def _csv_safe_mapping(values: dict[str, Any]) -> dict[str, Any]:
 
 
 def _unique(values: Iterable[str]) -> list[str]:
+    """Remove duplicate strings while preserving their original order."""
     return list(dict.fromkeys(values))
 
 
 def _version(package: str) -> str:
+    """Return an installed package version or ``unknown`` when unavailable."""
     try:
         return importlib.metadata.version(package)
     except importlib.metadata.PackageNotFoundError:
@@ -744,6 +762,7 @@ def save_summary(df: pd.DataFrame, results_dir: Path, basename: str = "summary")
 # ── Reproducibility manifest ──────────────────────────────────────────────────
 
 def _git_commit() -> str | None:
+    """Return the current short Git commit when it can be determined."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -758,6 +777,7 @@ def _git_commit() -> str | None:
 
 
 def _lib_version(name: str) -> str:
+    """Return a library version or ``unknown`` when it is not installed."""
     try:
         return importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
@@ -781,6 +801,8 @@ def write_manifest(
     """Write a self-describing manifest.json to results_dir."""
     results_dir.mkdir(parents=True, exist_ok=True)
 
+    # Capture input shapes and experiment settings before merging optional
+    # tuning or LOVO metadata into the persisted manifest.
     dataset_sizes = {
         f"{_band_stem(band)}_windows": len(df)
         for band, df in feature_dataframes.items()

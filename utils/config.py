@@ -23,6 +23,8 @@ ROOM_3_EF_COLUMNS = range(10, 14)
 
 DEFAULT_WINDOW_SIZE = 60
 DEFAULT_OVERLAP_SIZE = 30
+
+# only used in paper notebook, but kept here for consistency with the paper notebook
 WINDOW_CONFIGS = [
     ("win30-step30", 30, 30),
     ("win60-step30", 60, 30),
@@ -31,15 +33,18 @@ WINDOW_CONFIGS = [
     ("win120-step120", 120, 120),
 ]
 
+# trials to use in training set
 TRIALS_FOR_TRAINING_PROTOCOLS = ("01",)
 SEEDS = (42, 43, 44)
 
+# CNN model parameters
 CUDA_BATCH_SIZE = 256
 CUDA_NUM_WORKERS = 8
 CUDA_PIN_MEMORY = True
 CUDA_PERSISTENT_WORKERS = True
 CUDA_PREFETCH_FACTOR = 4
 
+# CPU model parameters
 CPU_BATCH_SIZE = 64
 CPU_NUM_WORKERS = 0
 CPU_PIN_MEMORY = False
@@ -57,6 +62,7 @@ CNN_LATENT_DIM = 128
 CNN_HEAD_HIDDEN = 256
 CNN_DROPOUT = 0.3
 
+# Default CNN parameters used in DL notebook
 DEFAULT_CNN_PARAMS = {
     "model_label": "CNN",
     "conv1_filters": CNN_CONV1_FILTERS,
