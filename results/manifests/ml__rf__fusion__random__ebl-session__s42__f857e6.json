@@ -27,7 +27,7 @@
     }
   },
   "parsed_run_id": {
-    "band": "2_4ghz",
+    "band": "fusion",
     "baseline_scope": "session",
     "family": "ml",
     "hash6": "f857e6",
@@ -36,6 +36,6 @@
     "seed": 42,
     "split": "random"
   },
-  "run_id": "ml__rf__2_4ghz__random__ebl-session__s42__f857e6",
-  "timestamp": "2026-07-22T18:32:00.033779+00:00"
+  "run_id": "ml__rf__fusion__random__ebl-session__s42__f857e6",
+  "timestamp": "2026-07-22T18:32:11.053666+00:00"
 }
