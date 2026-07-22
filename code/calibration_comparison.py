@@ -3,16 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..utils.csi_preprocessing import process_magnitude_data
-from ..utils.feature_pipeline import build_frequency_feature_dataframes
-from ..utils.thesis_csv_processing import CacheStats, CalibrationMode, process_csv_files
+from utils.csi_processing import CalibrationMode, process_magnitude_data
+from utils.feature_pipeline import build_frequency_feature_dataframes
+from utils.load_csi import CacheStats, process_csv_files
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     import pandas as pd
 
-    from ..utils.thesis_csv_processing import CsiMap, FileMap
+    from utils.load_csi import CsiMap, FileMap
 
 DEFAULT_CALIBRATION_MODES: tuple[CalibrationMode, ...] = ("none", "packet_norm", "rssi")
 

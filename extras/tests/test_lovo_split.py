@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from utils.global_position_classifier import split_lovo_folds
+from utils.ML.ml_pipeline import split_lovo_folds
 
 
 def test_split_lovo_folds_holds_out_one_user_at_a_time() -> None:

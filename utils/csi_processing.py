@@ -1,18 +1,222 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 BaselineKey = tuple[str, ...]
+CalibrationMode = Literal["none", "packet_norm", "rssi"]
 
 DEFAULT_EPSILON = 1e-8
 EXPECTED_MAGNITUDE_DIMS = 2
 EMPTY_ROOM_LOCATION = "Z-0"
 VALID_BASELINE_SCOPES = ("per_session", "per_user", "global")
+VALID_CALIBRATION_MODES: tuple[CalibrationMode, ...] = ("none", "packet_norm", "rssi")
+
+
+def select_active_subcarriers(
+    complex_csi: np.ndarray,
+    *,
+    its5ghz: bool,
+) -> np.ndarray:
+    """Apply the existing FFT shift and active-subcarrier selection."""
+    if its5ghz:
+        return np.delete(complex_csi, [28], axis=1)
+
+    fft_csi = np.fft.fftshift(complex_csi, axes=1)
+    active_subcarriers = fft_csi[:, 6:58]
+    return np.delete(active_subcarriers, [26, 27], axis=1)
+
+
+def calculate_csi_magnitude(complex_csi: np.ndarray) -> np.ndarray:
+    """Return CSI magnitude without changing packet or subcarrier ordering."""
+    return np.abs(complex_csi)
+
+
+def process_complex_csi(
+    complex_csi: np.ndarray,
+    rssi_dbm: np.ndarray,
+    *,
+    its5ghz: bool,
+    calibration_mode: CalibrationMode = "none",
+    min_rssi_dbm: float = -95.0,
+    calibration_eps: float = 1e-12,
+) -> tuple[np.ndarray, int, bool]:
+    """Select subcarriers, filter invalid packets, calibrate, and take magnitude."""
+    selected_csi = select_active_subcarriers(complex_csi, its5ghz=its5ghz)
+    filtered_csi, filtered_rssi, invalid_packets_removed = filter_packets_for_calibration(
+        selected_csi,
+        rssi_dbm,
+        calibration_mode=calibration_mode,
+        min_rssi_dbm=min_rssi_dbm,
+        eps=calibration_eps,
+    )
+    calibrated_csi, calibration_applied = calibrate_complex_csi(
+        filtered_csi,
+        calibration_mode=calibration_mode,
+        rssi_dbm=filtered_rssi if calibration_mode == "rssi" else None,
+        eps=calibration_eps,
+    )
+    magnitude = calculate_csi_magnitude(calibrated_csi)
+    return magnitude, invalid_packets_removed, calibration_applied and magnitude.shape[0] > 0
+
+
+def filter_packets_for_calibration(
+    complex_csi: np.ndarray,
+    rssi_dbm: np.ndarray,
+    *,
+    calibration_mode: CalibrationMode,
+    min_rssi_dbm: float,
+    eps: float,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Remove packets that cannot support the requested calibration."""
+    if calibration_mode == "none":
+        return complex_csi, rssi_dbm, 0
+
+    valid_mask = valid_packet_mask(
+        complex_csi,
+        rssi_dbm=rssi_dbm,
+        calibration_mode=calibration_mode,
+        min_rssi_dbm=min_rssi_dbm,
+        eps=eps,
+    )
+    removed = int(valid_mask.size - np.count_nonzero(valid_mask))
+    return complex_csi[valid_mask], rssi_dbm[valid_mask], removed
+
+
+def valid_packet_mask(
+    complex_csi: np.ndarray,
+    *,
+    rssi_dbm: np.ndarray | None,
+    calibration_mode: CalibrationMode,
+    min_rssi_dbm: float,
+    eps: float,
+) -> np.ndarray:
+    """Return packets suitable for calibration."""
+    if calibration_mode not in VALID_CALIBRATION_MODES:
+        raise calibration_mode_error()
+    if calibration_mode == "rssi" and rssi_dbm is None:
+        raise ValueError("RSSI values are required when calibration_mode='rssi'.")
+    if rssi_dbm is not None and complex_csi.shape[0] != rssi_dbm.shape[0]:
+        msg = (
+            "Packet filtering requires one RSSI value per CSI packet: "
+            f"got {complex_csi.shape[0]} CSI packets and {rssi_dbm.shape[0]} RSSI values."
+        )
+        raise ValueError(msg)
+
+    csi_power = complex_csi_power(complex_csi)
+    mask = np.isfinite(complex_csi).all(axis=1)
+    mask &= np.isfinite(csi_power)
+    mask &= csi_power > eps
+    if calibration_mode == "rssi" and rssi_dbm is not None:
+        mask &= np.isfinite(rssi_dbm)
+        mask &= rssi_dbm >= min_rssi_dbm
+    return mask
+
+
+def calibrate_complex_csi(
+    complex_csi: np.ndarray,
+    *,
+    calibration_mode: CalibrationMode,
+    rssi_dbm: np.ndarray | None = None,
+    eps: float = 1e-12,
+) -> tuple[np.ndarray, bool]:
+    """Apply packet-power or RSSI-based magnitude compensation."""
+    if calibration_mode == "none":
+        return complex_csi, False
+    if calibration_mode == "packet_norm":
+        return _normalize_complex_csi_per_packet(complex_csi, eps=eps), True
+    if calibration_mode == "rssi":
+        if rssi_dbm is None:
+            raise ValueError("RSSI values are required when calibration_mode='rssi'.")
+        return _calibrate_complex_csi_with_rssi(complex_csi, rssi_dbm, eps=eps), True
+    raise calibration_mode_error()
+
+
+def complex_csi_power(complex_csi: np.ndarray) -> np.ndarray:
+    return np.sum(np.abs(complex_csi) ** 2, axis=1)
+
+
+def _normalize_complex_csi_per_packet(
+    complex_csi: np.ndarray,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    norm = np.sqrt(complex_csi_power(complex_csi) + eps)
+    return complex_csi / norm[:, None]
+
+
+def _calibrate_complex_csi_with_rssi(
+    complex_csi: np.ndarray,
+    rssi_dbm: np.ndarray,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    if complex_csi.shape[0] != rssi_dbm.shape[0]:
+        msg = (
+            "RSSI calibration requires one RSSI value per CSI packet: "
+            f"got {complex_csi.shape[0]} CSI packets and {rssi_dbm.shape[0]} RSSI values."
+        )
+        raise ValueError(msg)
+    rssi_mw = 10 ** (rssi_dbm / 10.0)
+    scale = np.sqrt(rssi_mw / (complex_csi_power(complex_csi) + eps))
+    return complex_csi * scale[:, None]
+
+
+def calibration_mode_error() -> ValueError:
+    return ValueError("calibration_mode must be one of: 'none', 'packet_norm', 'rssi'")
+
+
+def window_count_for_magnitude(
+    magnitude: np.ndarray,
+    *,
+    window_size: int,
+    overlap_size: int,
+) -> int:
+    """Return the number of complete sliding windows in a magnitude array."""
+    validate_window_parameters(
+        magnitude,
+        window_size=window_size,
+        overlap_size=overlap_size,
+    )
+    if magnitude.shape[0] < window_size or magnitude.shape[1] == 0:
+        return 0
+    return 1 + (magnitude.shape[0] - window_size) // (window_size - overlap_size)
+
+
+def iter_magnitude_windows(
+    magnitude: np.ndarray,
+    *,
+    window_size: int,
+    overlap_size: int,
+) -> Iterator[np.ndarray]:
+    """Yield complete magnitude windows in packet order."""
+    validate_window_parameters(
+        magnitude,
+        window_size=window_size,
+        overlap_size=overlap_size,
+    )
+    step = window_size - overlap_size
+    for start in range(0, magnitude.shape[0] - window_size + 1, step):
+        yield magnitude[start : start + window_size]
+
+
+def validate_window_parameters(
+    magnitude: np.ndarray,
+    *,
+    window_size: int,
+    overlap_size: int,
+) -> None:
+    if window_size <= 0:
+        raise ValueError("window_size must be greater than zero")
+    if overlap_size < 0:
+        raise ValueError("overlap_size cannot be negative")
+    if overlap_size >= window_size:
+        raise ValueError("overlap_size must be smaller than window_size")
+    if magnitude.ndim != EXPECTED_MAGNITUDE_DIMS:
+        raise ValueError("magnitude must be a 2D array: samples x subcarriers")
 
 
 @dataclass(frozen=True)

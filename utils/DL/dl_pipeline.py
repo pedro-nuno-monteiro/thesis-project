@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -19,17 +18,19 @@ from torch.utils.data import DataLoader, Dataset
 
 from utils.cache import (
     RESULTS_ROOT,
+    get_all_dataframes,
+    get_cache_path,
+    get_results_path,
+    load_window_array_cache,
+    load_window_arrays,
     load_predictions,
     make_run_id,
+    open_window_array_writers,
     prediction_cache_metadata,
     save_predictions,
+    save_window_array_metadata,
 )
 from utils.config import (
-    CNN_CONV1_FILTERS,
-    CNN_CONV2_FILTERS,
-    CNN_DROPOUT,
-    CNN_HEAD_HIDDEN,
-    CNN_LATENT_DIM,
     CPU_BATCH_SIZE,
     CPU_NUM_WORKERS,
     CPU_PERSISTENT_WORKERS,
@@ -40,28 +41,209 @@ from utils.config import (
     CUDA_PIN_MEMORY,
     CUDA_PREFETCH_FACTOR,
     DEFAULT_CNN_PARAMS,
-    PLOT_DPI,
-    PLOT_FORMAT,
     SEEDS,
 )
-from utils.global_position_classifier import (
+from utils.csi_processing import process_magnitude_data
+from utils.DL.models import DualBandCNN
+from utils.feature_pipeline import (
+    METADATA_COLUMNS,
+    CsiMap,
+    FeatureScenario,
+    _esp_keys_for_scenario,
+    build_frequency_feature_dataframes,
+    iter_window_groups,
+)
+from utils.import_data import get_csv_files, sort_meta_info
+from utils.load_csi import process_csv_files
+from utils.ML.ml_pipeline import (
     _window_identity_fingerprint,
-    build_global_predictions_dataframe,
-    majority_class_baselines,
     split_dataframe,
 )
-from utils.metrics import compute_localization_metrics
+from utils.plots import save_training_curves
 from utils.results import (
+    build_global_predictions_dataframe,
     build_run_row,
     checkpoint_path,
+    compute_localization_metrics,
     derive_seed_summary,
     derive_table_from_runs,
+    majority_class_baselines,
     upsert_fold_rows,
     upsert_run,
     write_run_manifest,
 )
 
 SplitMode = Literal["block", "lovo", "cross_session"]
+
+
+def prepare_dl_data(
+    data_dir: Path,
+    *,
+    calibration_mode: str,
+    csv_options: dict[str, Any],
+    preproc_opts: dict[str, Any],
+    feat_opts: dict[str, Any],
+) -> tuple[CsiMap, dict[str, pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+    """Discover, load, preprocess, and cache the data used by the CNN pipeline."""
+    data_files = get_csv_files(str(data_dir))
+    scenarios, locations, users, esps, _ = sort_meta_info(str(data_dir))
+    print(f"Scenarios present: {', '.join(scenarios) or 'none'}")
+    print(f"Locations: {len(locations)} | Users: {len(users)} | ESPs: {len(esps)}")
+    magnitude_data, csv_diagnostics = process_csv_files(
+        data_files,
+        return_diagnostics=True,
+        calibration_mode=calibration_mode,
+        **csv_options,
+    )
+    processed_magnitude_data, magnitude_summary = process_magnitude_data(
+        magnitude_data,
+        **preproc_opts,
+    )
+    feature_dataframes = get_all_dataframes(
+        preproc_opts,
+        feat_opts,
+        lambda: build_frequency_feature_dataframes(processed_magnitude_data, **feat_opts),
+    )
+    return (
+        processed_magnitude_data,
+        feature_dataframes,
+        csv_diagnostics,
+        magnitude_summary,
+    )
+
+
+def create_position_label_encoder(
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    results_dir: Path,
+    expected_classes: int | None = 52,
+) -> LabelEncoder:
+    """Fit the shared position encoder and store its class ordering."""
+    all_locations = sorted(
+        set().union(*(set(df["location"].astype(str)) for df in feature_dataframes.values()))
+    )
+    if expected_classes is not None and len(all_locations) != expected_classes:
+        msg = (
+            f"Expected {expected_classes} position classes, found {len(all_locations)}: "
+            f"{all_locations}"
+        )
+        raise RuntimeError(msg)
+    label_encoder = LabelEncoder()
+    label_encoder.fit(all_locations)
+    save_label_classes(label_encoder.classes_, results_dir)
+    return label_encoder
+
+
+def run_dl_experiments(  # noqa: PLR0913, PLR0914
+    processed_magnitude_data: CsiMap,
+    feature_dataframes: dict[str, pd.DataFrame],
+    *,
+    bands: tuple[str, ...],
+    split_modes: tuple[SplitMode, ...],
+    label_encoder: LabelEncoder,
+    device: torch.device,
+    results_dir: Path,
+    plots_dir: Path,
+    params: dict[str, Any],
+    preproc_opts: dict[str, Any],
+    feat_opts: dict[str, Any],
+    expected_subcarriers: dict[str, int],
+    expected_anchors: dict[str, int],
+    seeds: tuple[int, ...] = SEEDS,
+    test_size: float = 0.30,
+    random_state: int = 42,
+    n_blocks: int = 10,
+    val_size: float = 0.15,
+    force_retrain: bool = False,
+) -> dict[tuple[str, str, int], tuple[pd.DataFrame, dict[str, float], pd.DataFrame]]:
+    """Run the selected CNN bands and data-splitting protocols."""
+    cnn_runs: dict[
+        tuple[str, str, int],
+        tuple[pd.DataFrame, dict[str, float], pd.DataFrame],
+    ] = {}
+    for band in bands:
+        print(f"\n=== {band} ===")
+        arrays, meta = build_frequency_window_arrays(
+            processed_magnitude_data,
+            band,
+            window_size=int(feat_opts["window_size"]),
+            overlap_size=int(feat_opts["overlap_size"]),
+            require_all_esps=bool(feat_opts["require_all_esps"]),
+            preproc_opts=preproc_opts,
+        )
+        for branch_band, array in arrays.items():
+            observed_subcarriers = int(array.shape[2])
+            observed_anchors = int(array.shape[1])
+            print(
+                f"{branch_band}: anchors={observed_anchors}, "
+                f"subcarriers={observed_subcarriers}, windows={array.shape[0]}"
+            )
+            if observed_subcarriers != expected_subcarriers[branch_band]:
+                raise RuntimeError(
+                    f"{branch_band} subcarrier count changed: expected "
+                    f"{expected_subcarriers[branch_band]}, observed {observed_subcarriers}"
+                )
+            if observed_anchors != expected_anchors[branch_band]:
+                raise RuntimeError(
+                    f"{branch_band} anchor count changed: expected "
+                    f"{expected_anchors[branch_band]}, observed {observed_anchors}"
+                )
+
+        if band == "Fusion":
+            n_24 = arrays["2.4 GHz"].shape[0]
+            n_5 = arrays["5 GHz"].shape[0]
+            if n_24 != n_5 or n_24 != len(feature_dataframes[band]):
+                raise RuntimeError(
+                    f"Fusion N mismatch: 2.4={n_24}, 5={n_5}, "
+                    f"ML={len(feature_dataframes[band])}"
+                )
+            print(f"Fusion N PASS: {n_24} windows")
+
+        assert_window_identity(band=band, meta=meta, feature_df=feature_dataframes[band])
+        for split_mode in split_modes:
+            assert_split_identity(
+                band=band,
+                meta=meta,
+                feature_df=feature_dataframes[band],
+                split_mode=split_mode,
+                test_size=test_size,
+                random_state=random_state,
+                n_blocks=n_blocks,
+            )
+            seed_outputs = train_evaluate_cnn_multi_seed(
+                seeds=seeds,
+                band=band,
+                arrays=arrays,
+                meta=meta,
+                label_encoder=label_encoder,
+                device=device,
+                results_dir=results_dir,
+                plots_dir=plots_dir,
+                params=params,
+                split_mode=split_mode,
+                test_size=test_size,
+                random_state=random_state,
+                n_blocks=n_blocks,
+                val_size=val_size,
+                force_retrain=force_retrain,
+                preproc_opts=preproc_opts,
+                feat_opts=feat_opts,
+            )
+            for seed, output in seed_outputs.items():
+                cnn_runs[(band, split_mode, seed)] = output
+    return cnn_runs
+
+
+def show_dl_results(results_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load the DL run summary and the RF/CNN block-split comparison."""
+    global_summary = pd.read_csv(results_dir / "runs.csv")
+    cnn_summary = global_summary.loc[global_summary["family"].eq("dl")].copy()
+    comparison = global_summary.loc[
+        global_summary["model"].isin(["rf", "cnn"])
+        & global_summary["split"].eq("block"),
+        ["band", "model", "seed", "position_accuracy", "parameter_count"],
+    ].sort_values(["band", "model", "seed"])
+    return cnn_summary, comparison
 
 
 class RawCsiWindowDataset(Dataset):
@@ -86,71 +268,6 @@ class RawCsiWindowDataset(Dataset):
         }
         target = torch.as_tensor(self.targets[item], dtype=torch.long)
         return sample, target
-
-
-class BandEncoder(nn.Module):
-    def __init__(
-        self,
-        n_anchors: int,
-        params: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__()
-        params = params or {}
-        conv1_filters = int(params.get("conv1_filters", CNN_CONV1_FILTERS))
-        conv2_filters = int(params.get("conv2_filters", CNN_CONV2_FILTERS))
-        latent_dim = int(params.get("latent_dim", CNN_LATENT_DIM))
-        self.features = nn.Sequential(
-            nn.Conv2d(n_anchors, conv1_filters, kernel_size=3, padding=1),
-            nn.BatchNorm2d(conv1_filters),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(conv1_filters, conv2_filters, kernel_size=3, padding=1),
-            nn.BatchNorm2d(conv2_filters),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(conv2_filters, latent_dim),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.features(x)
-
-
-def _safe_branch_name(name: str) -> str:
-    return "b_" + name.replace(".", "_").replace(" ", "_").replace("-", "_")
-
-
-class DualBandCNN(nn.Module):
-    def __init__(
-        self,
-        branch_channels: dict[str, int],
-        n_classes: int,
-        params: dict[str, Any] | None = None,
-    ) -> None:
-        super().__init__()
-        params = params or {}
-        latent_dim = int(params.get("latent_dim", CNN_LATENT_DIM))
-        head_hidden = int(params.get("head_hidden", CNN_HEAD_HIDDEN))
-        dropout = float(params.get("dropout", CNN_DROPOUT))
-        self._order = list(branch_channels)
-        self.branches = nn.ModuleDict(
-            {
-                _safe_branch_name(band): BandEncoder(n_anchors, params)
-                for band, n_anchors in branch_channels.items()
-            }
-        )
-        self.head = nn.Sequential(
-            nn.Linear(latent_dim * len(branch_channels), head_hidden),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(head_hidden, n_classes),
-        )
-
-    def forward(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
-        latents = [
-            self.branches[_safe_branch_name(band)](inputs[band]) for band in self._order
-        ]
-        return self.head(torch.cat(latents, dim=1))
 
 
 def set_reproducible_seeds(seed: int) -> None:
@@ -263,27 +380,6 @@ def assert_split_identity(  # noqa: PLR0913
             f"SPLIT IDENTITY PASS: {band}/{split_mode} fold={fold_index} "
             f"train={len(meta_train)} test={len(meta_test)}"
         )
-
-
-def assert_block_split_identity(
-    *,
-    band: str,
-    meta: pd.DataFrame,
-    feature_df: pd.DataFrame,
-    test_size: float,
-    random_state: int,
-    n_blocks: int,
-) -> None:
-    """Backward-compatible alias for block split parity checks."""
-    assert_split_identity(
-        band=band,
-        meta=meta,
-        feature_df=feature_df,
-        split_mode="block",
-        test_size=test_size,
-        random_state=random_state,
-        n_blocks=n_blocks,
-    )
 
 
 def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
@@ -446,9 +542,9 @@ def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
                 else Path(plots_dir) / resolved_run_id
             )
             fold_suffix = "" if held_out_user is None else f"__fold-{held_out_user}"
-            _save_history_plot(
+            save_training_curves(
                 history,
-                plot_root / f"training_curves{fold_suffix}.{PLOT_FORMAT}",
+                plot_root / f"training_curves{fold_suffix}",
                 f"{model_label} - {band} - {split_mode}",
             )
         fold_rows.append(
@@ -581,19 +677,6 @@ def train_evaluate_cnn_multi_seed(
             "LOVO uses each seed's fold mean and keeps within-seed fold std separate."
         )
     return outputs
-
-
-def append_cnn_summary_row(
-    *,
-    summary_path: Path,
-    band: str,
-    params: dict[str, Any],
-    metrics: dict[str, float],
-) -> pd.DataFrame:
-    """Compatibility shim: regenerate the global view from ``runs.csv`` only."""
-    del summary_path, band, params, metrics
-    print("[summary] runs.csv is authoritative; regenerating tables/global_summary.*")
-    return derive_table_from_runs("global_summary", results_root=RESULTS_ROOT)
 
 
 def save_label_classes(classes: np.ndarray, results_dir: Path = RESULTS_ROOT) -> None:
@@ -1039,29 +1122,6 @@ def _load_checkpoint_metadata(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _save_history_plot(history: pd.DataFrame, save_path: Path, title: str) -> None:
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
-    axes[0].plot(history["epoch"], history["train_loss"], label="train")
-    axes[0].plot(history["epoch"], history["val_loss"], label="val")
-    axes[0].set_title(f"{title} loss")
-    axes[0].set_xlabel("epoch")
-    axes[0].set_ylabel("loss")
-    axes[0].legend()
-    axes[1].plot(history["epoch"], history["train_acc"], label="train")
-    axes[1].plot(history["epoch"], history["val_acc"], label="val")
-    axes[1].set_title(f"{title} accuracy")
-    axes[1].set_xlabel("epoch")
-    axes[1].set_ylabel("accuracy")
-    axes[1].legend()
-    fig.savefig(save_path, dpi=PLOT_DPI, format=PLOT_FORMAT)
-    plt.close(fig)
-    print(
-        f"[plots] saved {save_path} at dpi={PLOT_DPI}. PNG is raster; set "
-        "PLOT_FORMAT='pdf' for a LaTeX vector figure without other code changes."
-    )
-
-
 def _window_pairs(df: pd.DataFrame) -> pd.DataFrame:
     return df[["group_id", "window_idx"]].reset_index(drop=True)
 
@@ -1074,3 +1134,193 @@ def _version_pair(version: str) -> tuple[int, int]:
             break
         numbers.append(int(digits))
     return tuple((numbers + [0, 0])[:2])  # type: ignore[return-value]
+
+
+# DL window-array preparation.
+
+BandName = Literal["2.4 GHz", "5 GHz", "Fusion"]
+
+BAND_ANCHOR_RANGES: dict[str, tuple[str, ...]] = {
+    "2.4 GHz": _esp_keys_for_scenario("2.4 GHz"),
+    "5 GHz": _esp_keys_for_scenario("5 GHz"),
+}
+DEFAULT_PREPROC_OPTS = {
+    "normalization": "empty_baseline",
+    "baseline_scope": "per_session",
+}
+
+
+def build_frequency_window_arrays(
+    magnitude_data: CsiMap,
+    frequency_scenario: BandName | FeatureScenario,
+    *,
+    window_size: int = 60,
+    overlap_size: int = 30,
+    require_all_esps: bool = True,
+    preproc_opts: dict[str, Any] | None = None,
+    force_rebuild: bool = False,
+) -> tuple[dict[str, np.ndarray], pd.DataFrame]:
+    """Build or load mmap-backed raw CSI amplitude windows for one band config."""
+    band_name, scenario_key = _normalize_frequency_scenario(frequency_scenario)
+    feat_opts = {
+        "window_size": window_size,
+        "overlap_size": overlap_size,
+        "require_all_esps": require_all_esps,
+    }
+    feature_cache_dir = get_cache_path(preproc_opts or DEFAULT_PREPROC_OPTS, feat_opts)
+    cache_dir = feature_cache_dir / "window_arrays" / _band_stem(band_name)
+    print(f"[window arrays] cache path: {cache_dir.resolve()}")
+
+    bands = ["2.4 GHz", "5 GHz"] if band_name == "Fusion" else [band_name]
+    array_paths = {band: cache_dir / f"{_band_stem(band)}.npy" for band in bands}
+    meta_path = cache_dir / "meta.parquet"
+    manifest_path = cache_dir / "manifest.json"
+
+    if not force_rebuild:
+        cached = load_window_array_cache(array_paths, meta_path, manifest_path)
+        if cached is not None:
+            arrays, meta, manifest = cached
+            _print_loaded_arrays(arrays, manifest, cache_dir)
+            return arrays, meta
+
+    groups = list(
+        iter_window_groups(
+            magnitude_data,
+            scenario_key,
+            window_size=window_size,
+            overlap_size=overlap_size,
+            require_all_esps=require_all_esps,
+        )
+    )
+    total_windows = int(sum(group.min_windows for group in groups))
+    if total_windows == 0:
+        msg = f"No windows found for {band_name}."
+        raise ValueError(msg)
+
+    anchor_order = {band: sorted(BAND_ANCHOR_RANGES[band]) for band in bands}
+    subcarrier_counts = _subcarrier_counts(groups, anchor_order)
+    shapes = {
+        band: (
+            total_windows,
+            len(anchor_order[band]),
+            subcarrier_counts[band],
+            window_size,
+        )
+        for band in bands
+    }
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    writers = open_window_array_writers(array_paths, shapes)
+    rows: list[dict[str, object]] = []
+    step = window_size - overlap_size
+    row_idx = 0
+
+    for group in groups:
+        for window_idx in range(group.min_windows):
+            start = window_idx * step
+            for band in bands:
+                for anchor_idx, esp_key in enumerate(anchor_order[band]):
+                    magnitude = group.magnitudes_by_esp[esp_key]
+                    window = magnitude[start : start + window_size]
+                    writers[band][row_idx, anchor_idx] = window.T.astype(
+                        np.float16,
+                        copy=False,
+                    )
+            rows.append(
+                {
+                    "frequency_scenario": scenario_key,
+                    "scenario": group.scenario_key.removeprefix("scenario_"),
+                    "location": group.location_key.removeprefix("location_"),
+                    "user": group.user_key.removeprefix("user_"),
+                    "trial": group.trial_key.removeprefix("trial_"),
+                    "group_id": group.group_id,
+                    "window_idx": window_idx,
+                    "label": group.label,
+                }
+            )
+            row_idx += 1
+
+    for writer in writers.values():
+        writer.flush()
+        del writer
+
+    meta = pd.DataFrame(rows, columns=list(METADATA_COLUMNS))
+    manifest = {
+        "frequency_scenario": band_name,
+        "feature_scenario": scenario_key,
+        "window_size": window_size,
+        "overlap_size": overlap_size,
+        "require_all_esps": require_all_esps,
+        "preprocessing": preproc_opts or DEFAULT_PREPROC_OPTS,
+        "anchor_order": anchor_order,
+        "subcarrier_counts": subcarrier_counts,
+        "shapes": {band: list(shape) for band, shape in shapes.items()},
+        "dtype": "float16",
+        "meta_rows": int(len(meta)),
+    }
+    save_window_array_metadata(meta, meta_path, manifest, manifest_path)
+
+    arrays = load_window_arrays(array_paths)
+    _print_array_summary(arrays, anchor_order)
+    return arrays, meta
+
+
+def _normalize_frequency_scenario(
+    frequency_scenario: BandName | FeatureScenario,
+) -> tuple[BandName, FeatureScenario]:
+    aliases: dict[str, tuple[BandName, FeatureScenario]] = {
+        "2.4 ghz": ("2.4 GHz", "2.4 GHz"),
+        "2.4ghz": ("2.4 GHz", "2.4 GHz"),
+        "2_4ghz": ("2.4 GHz", "2.4 GHz"),
+        "5 ghz": ("5 GHz", "5 GHz"),
+        "5ghz": ("5 GHz", "5 GHz"),
+        "fusion": ("Fusion", "Fusion"),
+    }
+    key = str(frequency_scenario).strip().lower()
+    try:
+        return aliases[key]
+    except KeyError as exc:
+        msg = f"Unknown frequency scenario {frequency_scenario!r}."
+        raise ValueError(msg) from exc
+
+
+def _subcarrier_counts(
+    groups: list,
+    anchor_order: dict[str, list[str]],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for band, esp_keys in anchor_order.items():
+        for esp_key in esp_keys:
+            for group in groups:
+                magnitude = group.magnitudes_by_esp.get(esp_key)
+                if magnitude is not None:
+                    counts[band] = int(magnitude.shape[1])
+                    break
+            if band in counts:
+                break
+        if band not in counts:
+            msg = f"Could not infer subcarrier count for {band}."
+            raise ValueError(msg)
+    return counts
+
+
+def _print_loaded_arrays(
+    arrays: dict[str, np.ndarray],
+    manifest: dict[str, Any],
+    cache_dir: Path,
+) -> None:
+    print(f"[window arrays cache hit] {cache_dir.resolve()}")
+    _print_array_summary(arrays, manifest["anchor_order"])
+
+
+def _print_array_summary(
+    arrays: dict[str, np.ndarray],
+    anchor_order: dict[str, list[str]],
+) -> None:
+    for band, array in arrays.items():
+        print(f"[window arrays] {band}: shape={tuple(array.shape)}, dtype={array.dtype}")
+        print(f"[window arrays] {band} anchors: {anchor_order[band]}")
+
+
+def _band_stem(band: str) -> str:
+    return band.lower().replace(".", "_").replace(" ", "")

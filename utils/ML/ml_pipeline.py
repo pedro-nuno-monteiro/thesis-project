@@ -1,48 +1,47 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import importlib.metadata
 import itertools
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.pipeline import Pipeline
 
 from utils.cache import (
     RESULTS_ROOT,
     get_all_dataframes,
     get_cache_path,
+    get_results_path,
     load_predictions,
     make_run_id,
+    prediction_cache_metadata,
     predictions_path,
+    save_predictions,
 )
-from utils.csi_preprocessing import process_magnitude_data
-from utils.config import PLOT_DPI, PLOT_FORMAT
+from utils.config import TRIALS_FOR_TRAINING_PROTOCOLS
+from utils.csi_processing import process_magnitude_data
 from utils.feature_pipeline import build_frequency_feature_dataframes, iter_window_groups
-from utils.global_position_classifier import (
-    feature_columns,
+from utils.import_data import get_csv_files, sort_meta_info
+from utils.load_csi import process_csv_files
+from utils.ML.models import PARAM_GRIDS, build_estimator, default_params_for
+from utils.results import (
+    build_global_predictions_dataframe,
+    build_run_row,
+    compute_localization_metrics,
+    derive_table_from_runs,
     location_distance_error,
     majority_class_baselines,
     room_label_for_location,
-    run_global_lovo_experiment,
-    run_global_position_experiment,
-    split_lovo_folds,
-    split_cross_session,
-    split_dataframe,
-)
-from utils.import_data import get_csv_files, sort_meta_info
-from utils.metrics import compute_localization_metrics
-from utils.models import PARAM_GRIDS, build_estimator, default_params_for
-from utils.results import (
-    build_run_row,
-    derive_table_from_runs,
     upsert_fold_rows,
     upsert_run,
     write_run_manifest,
 )
-from utils.thesis_csv_processing import process_csv_files
 
 
 def load_raw_csi_data(
@@ -174,6 +173,36 @@ def validate_cross_session_inventory(csv_diagnostics: pd.DataFrame) -> pd.DataFr
         raise ValueError(msg)
     print("[cross_session inventory] PASS: same 19 anchors and matching subcarrier counts")
     return inventory
+
+
+def select_cross_session_trials(magnitude_data: dict[str, Any]) -> dict[str, Any]:
+    """Keep only trials 01 and 02 used by the cross-session protocol."""
+    selected: dict[str, Any] = {}
+    excluded = 0
+    for scenario_key, locations in magnitude_data.items():
+        selected_locations = {}
+        for location_key, users in locations.items():
+            selected_users = {}
+            for user_key, esps in users.items():
+                selected_esps = {}
+                for esp_key, trials in esps.items():
+                    selected_trials = {}
+                    for trial_key, magnitude in trials.items():
+                        trial = str(trial_key).removeprefix("trial_").zfill(2)
+                        if trial in {"01", "02"}:
+                            selected_trials[trial_key] = magnitude
+                        else:
+                            excluded += 1
+                    if selected_trials:
+                        selected_esps[esp_key] = selected_trials
+                if selected_esps:
+                    selected_users[user_key] = selected_esps
+            if selected_users:
+                selected_locations[location_key] = selected_users
+        if selected_locations:
+            selected[scenario_key] = selected_locations
+    print(f"[cross_session] excluded {excluded} recording(s) outside trials 01/02")
+    return selected
 
 
 def load_feature_dataframes(
@@ -418,7 +447,6 @@ def run_global_baselines(  # noqa: PLR0913
     n_blocks: int,
     n_jobs: int,
     results_dir: Path,
-    summary_dir: Path,
     preproc_opts: dict[str, Any],
     feat_opts: dict[str, Any],
     force_retrain: bool,
@@ -426,10 +454,8 @@ def run_global_baselines(  # noqa: PLR0913
     svm_fallback_seconds: float,
     row_spacing: float,
     column_spacing: float,
-    frozen_block_results_dir: Path | None = None,
 ) -> tuple[pd.DataFrame, dict[tuple[str, str, str], pd.DataFrame]]:
     """Run requested ML baselines and persist the flat, global result contract."""
-    del summary_dir
     predictions_by_key = {}
     summary_rows = []
     lovo_per_fold_rows = []
@@ -647,95 +673,7 @@ def run_global_baselines(  # noqa: PLR0913
 
     summary = pd.DataFrame(summary_rows)
     derive_table_from_runs("global_summary", results_root=results_dir)
-    if "cross_session" in split_modes and frozen_block_results_dir is not None:
-        print(
-            "[cross_session] per-user rows are stored in runs_folds.csv; no independent "
-            "summary tables are written because runs.csv is the single source of truth."
-        )
     return summary, predictions_by_key
-
-
-def _write_cross_session_reports(  # noqa: PLR0913
-    feature_dataframes: dict[str, pd.DataFrame],
-    *,
-    predictions_by_key: dict[tuple[str, str, str], pd.DataFrame],
-    summary: pd.DataFrame,
-    summary_dir: Path,
-    block_results_dir: Path,
-    row_spacing: float,
-    column_spacing: float,
-) -> None:
-    """Persist the protocol-level, per-user, and paired cross-session tables."""
-    cross_summary = summary.loc[summary["split"] == "cross_session"].copy()
-    cross_summary.to_csv(summary_dir / "cross_session_summary.csv", index=False)
-
-    per_user_rows: list[dict[str, Any]] = []
-    paired_rows: list[dict[str, Any]] = []
-    for (model, band, split_mode), predictions in predictions_by_key.items():
-        if split_mode != "cross_session":
-            continue
-        train_df, test_df = split_cross_session(feature_dataframes[band])
-        block_path = predictions_path(block_results_dir, model, band, "block")
-        block_predictions = pd.read_parquet(block_path) if block_path.exists() else None
-        if block_predictions is None:
-            print(
-                f"[cross_session paired warning] frozen block predictions not found: {block_path}"
-            )
-
-        for test_user, user_predictions in predictions.groupby("user", sort=True):
-            user_test_df = test_df.loc[test_df["user"].astype(str) == str(test_user)]
-            user_metrics = compute_localization_metrics(user_predictions)
-            user_metrics.update(
-                majority_class_baselines(
-                    train_df,
-                    user_test_df,
-                    row_spacing=row_spacing,
-                    column_spacing=column_spacing,
-                )
-            )
-            per_user_rows.append(
-                {
-                    "model": model,
-                    "dataset": band,
-                    "test_user": str(test_user).zfill(2),
-                    **user_metrics,
-                    "n_test_windows": int(len(user_predictions)),
-                }
-            )
-            if block_predictions is not None:
-                user_block = block_predictions.loc[
-                    block_predictions["user"].astype(str).str.zfill(2)
-                    == str(test_user).zfill(2)
-                ]
-                if user_block.empty:
-                    print(
-                        f"[cross_session paired warning] no frozen block rows for user={test_user}, "
-                        f"model={model}, dataset={band}"
-                    )
-                    continue
-                block_accuracy = compute_localization_metrics(user_block)["position_accuracy"]
-                cross_accuracy = user_metrics["position_accuracy"]
-                paired_rows.append(
-                    {
-                        "model": model,
-                        "dataset": band,
-                        "test_user": str(test_user).zfill(2),
-                        "block_position_accuracy": block_accuracy,
-                        "cross_session_position_accuracy": cross_accuracy,
-                        "delta_block_minus_cross_session": block_accuracy - cross_accuracy,
-                    }
-                )
-
-    pd.DataFrame(per_user_rows).to_csv(
-        summary_dir / "cross_session_per_user.csv",
-        index=False,
-    )
-    pd.DataFrame(paired_rows).to_csv(
-        summary_dir / "cross_session_paired_per_user.csv",
-        index=False,
-    )
-    print(f"[cross_session] reports saved under {summary_dir}")
-
 
 def load_all_predictions(
     results_dir: Path,
@@ -963,114 +901,6 @@ def save_lovo_analysis_table(table: pd.DataFrame, *, tables_dir: Path) -> None:
         results_root=tables_dir.parent,
     )
 
-
-def plot_lovo_fold_spread(
-    lovo_per_fold: pd.DataFrame,
-    *,
-    bands: tuple[str, ...],
-    model: str = "RF",
-    save_path: Path | None = None,
-) -> None:
-    """Plot held-out-user position accuracy spread for the selected model."""
-    import matplotlib.pyplot as plt
-
-    filtered = lovo_per_fold.loc[lovo_per_fold["model"] == model]
-    fig, ax = plt.subplots(figsize=(7, 4.2))
-    values = []
-    labels = []
-    positions = []
-    for index, band in enumerate(bands, start=1):
-        band_values = pd.to_numeric(
-            filtered.loc[filtered["dataset"] == band, "position_accuracy"],
-            errors="coerce",
-        ).dropna()
-        if band_values.empty:
-            continue
-        values.append(band_values.to_numpy(dtype=float))
-        labels.append(band)
-        positions.append(index)
-
-    if values:
-        ax.boxplot(values, positions=positions, labels=labels, widths=0.45)
-        for position, band_values in zip(positions, values):
-            offsets = np.linspace(-0.08, 0.08, num=len(band_values))
-            ax.scatter(
-                np.full(len(band_values), position) + offsets,
-                band_values,
-                color="black",
-                s=28,
-                zorder=3,
-            )
-    else:
-        ax.text(0.5, 0.5, "No LOVO fold metrics", ha="center", va="center")
-    ax.set_ylabel("Position accuracy")
-    ax.set_title(f"LOVO held-out-user spread - {model}")
-    ax.set_ylim(0, 1.02)
-    ax.grid(axis="y", alpha=0.3)
-    _save_plot(fig, save_path)
-
-
-def plot_block_vs_lovo_position_accuracy(
-    global_summary: pd.DataFrame,
-    lovo_summary: pd.DataFrame,
-    *,
-    bands: tuple[str, ...],
-    model: str = "RF",
-    save_path: Path | None = None,
-) -> None:
-    """Plot block position accuracy beside LOVO fold-mean accuracy."""
-    import matplotlib.pyplot as plt
-
-    rows = []
-    for band in bands:
-        block_row = global_summary.loc[
-            (global_summary["model"] == model)
-            & (global_summary["dataset"] == band)
-            & (global_summary["split"] == "block")
-        ]
-        lovo_row = lovo_summary.loc[
-            (lovo_summary["model"] == model) & (lovo_summary["dataset"] == band)
-        ]
-        if block_row.empty or lovo_row.empty:
-            continue
-        rows.append(
-            {
-                "dataset": band,
-                "block": float(block_row.iloc[0]["position_accuracy"]),
-                "lovo": float(lovo_row.iloc[0]["position_accuracy_mean"]),
-            }
-        )
-
-    fig, ax = plt.subplots(figsize=(7.5, 4.2))
-    if rows:
-        x = np.arange(len(rows))
-        width = 0.35
-        block_values = np.array([row["block"] for row in rows])
-        lovo_values = np.array([row["lovo"] for row in rows])
-        ax.bar(x - width / 2, block_values, width, label="Block")
-        ax.bar(x + width / 2, lovo_values, width, label="LOVO mean")
-        for idx, (block_value, lovo_value) in enumerate(zip(block_values, lovo_values)):
-            gap = block_value - lovo_value
-            ax.text(
-                idx,
-                max(block_value, lovo_value) + 0.025,
-                f"gap {gap:+.3f}",
-                ha="center",
-                va="bottom",
-                fontsize=9,
-            )
-        ax.set_xticks(x)
-        ax.set_xticklabels([row["dataset"] for row in rows])
-        ax.legend()
-    else:
-        ax.text(0.5, 0.5, "Need both block and LOVO RF results", ha="center", va="center")
-    ax.set_ylabel("Position accuracy")
-    ax.set_title(f"Block vs LOVO cross-user generalization cost - {model}")
-    ax.set_ylim(0, 1.08)
-    ax.grid(axis="y", alpha=0.3)
-    _save_plot(fig, save_path)
-
-
 def best_confusion_predictions(
     predictions: pd.DataFrame,
     results_table: pd.DataFrame,
@@ -1217,23 +1047,6 @@ def _format_mean_std(mean_value: object, std_value: object) -> str:
         return "nan"
     return f"{float(mean_float):.4f} +/- {float(std_float):.4f}"
 
-
-def _save_plot(fig, save_path: Path | None) -> None:
-    fig.tight_layout()
-    if save_path is not None:
-        output = Path(save_path).with_suffix(f".{PLOT_FORMAT}")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(
-            output,
-            bbox_inches="tight",
-            dpi=PLOT_DPI,
-            format=PLOT_FORMAT,
-        )
-    import matplotlib.pyplot as plt
-
-    plt.show()
-
-
 def _package_version(name: str) -> str:
     try:
         return importlib.metadata.version(name)
@@ -1372,3 +1185,969 @@ def _coerce_param_value(value: Any) -> Any:
         except ValueError:
             return value
     return value
+
+
+# Global position-classification experiment implementation.
+METADATA_COLUMNS = {
+    "frequency_scenario",
+    "scenario",
+    "location",
+    "user",
+    "trial",
+    "group_id",
+    "window_idx",
+    "label",
+}
+
+MIN_GROUP_SPLIT_COUNT = 2
+DEFAULT_BLOCK_COUNT = 10
+DEFAULT_ROW_SPACING = 1.0
+DEFAULT_COLUMN_SPACING = 1.0
+def feature_columns(df: pd.DataFrame) -> list[str]:
+    """Return CSI feature columns by excluding metadata columns."""
+    return [col for col in df.columns if col not in METADATA_COLUMNS]
+
+def split_lovo_folds(
+    df: pd.DataFrame,
+    *,
+    trials_for_training_protocols: tuple[str, ...] = TRIALS_FOR_TRAINING_PROTOCOLS,
+) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
+    """Return leave-one-volunteer-out folds using the user column."""
+    _validate_required_columns(df, {"user"})
+    if df.empty:
+        msg = "Cannot split an empty dataframe."
+        raise ValueError(msg)
+    if "trial" in df.columns:
+        df = filter_training_protocol_trials(
+            df,
+            trials=trials_for_training_protocols,
+            split_mode="lovo",
+        )
+    users = sorted(df["user"].dropna().unique())
+    if len(users) < 2:
+        msg = "LOVO split requires at least two users."
+        raise ValueError(msg)
+
+    folds: list[tuple[pd.DataFrame, pd.DataFrame]] = []
+    for user in users:
+        test_mask = df["user"] == user
+        train_df = df.loc[~test_mask].copy()
+        test_df = df.loc[test_mask].copy()
+        if not train_df.empty and not test_df.empty:
+            _print_protocol_split("lovo", train_df, test_df, fold=user)
+            folds.append((train_df, test_df))
+    return folds
+
+
+def split_cross_session(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Train on trial 01 and evaluate the same known users in trial 02."""
+    _validate_required_columns(df, {"trial", "user", "location"})
+    if df.empty:
+        msg = "Cannot split an empty dataframe."
+        raise ValueError(msg)
+
+    trials = _normalized_trial_values(df["trial"])
+    train_df = df.loc[trials == "01"].copy()
+    test_df = df.loc[trials == "02"].copy()
+    if train_df.empty:
+        raise ValueError("cross_session split has no trial-01 training windows.")
+    if test_df.empty:
+        raise ValueError("cross_session split has no trial-02 test windows.")
+
+    train_trials = _normalized_trial_values(train_df["trial"])
+    test_trials = _normalized_trial_values(test_df["trial"])
+    assert (test_trials == "02").all(), "cross_session test contains a non-trial-02 window"
+    assert not (train_trials == "02").any(), "trial-02 window leaked into training"
+
+    train_users = sorted(train_df["user"].astype(str).unique())
+    test_users = sorted(test_df["user"].astype(str).unique())
+    unknown_test_users = sorted(set(test_users) - set(train_users))
+    if unknown_test_users:
+        print(
+            "[cross_session warning] trial-02 contains user(s) absent from trial 01: "
+            f"{', '.join(unknown_test_users)}. Evaluation remains valid as cross-user plus "
+            "cross-session transfer."
+        )
+    train_positions = set(train_df["location"].astype(str))
+    test_positions = set(test_df["location"].astype(str))
+    missing_positions = sorted(test_positions - train_positions)
+    print(f"[cross_session] discovered trial-02 users: {', '.join(test_users)}")
+    _print_protocol_split("cross_session", train_df, test_df)
+    print(
+        f"[cross_session] n_train={len(train_df)} users={train_users} "
+        f"positions={len(train_positions)}"
+    )
+    print(
+        f"[cross_session] n_test={len(test_df)} users={test_users} "
+        f"positions={len(test_positions)}"
+    )
+    print("[cross_session] assertion passed: no trial-02 window is in training")
+    if missing_positions:
+        print(
+            f"[cross_session warning] {len(missing_positions)} test positions are absent "
+            f"from training and therefore unlearnable: {', '.join(missing_positions)}"
+        )
+    else:
+        print("[cross_session] all test positions are represented in training")
+    return train_df, test_df
+
+
+def split_dataframe(
+    df: pd.DataFrame,
+    *,
+    test_size: float = 0.3,
+    random_state: int = 42,
+    split_mode: Literal["group", "random", "block", "lovo", "cross_session"] = "group",
+    stratify_column: str | None = None,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
+    trials_for_training_protocols: tuple[str, ...] = TRIALS_FOR_TRAINING_PROTOCOLS,
+) -> tuple[pd.DataFrame, pd.DataFrame] | list[tuple[pd.DataFrame, pd.DataFrame]]:
+    """Split a feature dataframe for global position classification."""
+    if df.empty:
+        msg = "Cannot split an empty dataframe."
+        raise ValueError(msg)
+    if not 0 < test_size < 1:
+        msg = "test_size must be between 0 and 1."
+        raise ValueError(msg)
+
+    if split_mode == "cross_session":
+        return split_cross_session(df)
+
+    df = filter_training_protocol_trials(
+        df,
+        trials=trials_for_training_protocols,
+        split_mode=split_mode,
+    )
+
+    if split_mode == "lovo":
+        return split_lovo_folds(
+            df,
+            trials_for_training_protocols=trials_for_training_protocols,
+        )
+
+    _validate_required_columns(df, {"group_id"})
+
+    if split_mode == "group":
+        _validate_required_columns(df, {"label"})
+        if df["group_id"].nunique() < MIN_GROUP_SPLIT_COUNT:
+            msg = "Group split requires at least two unique group_id values."
+            raise ValueError(msg)
+        splitter = GroupShuffleSplit(
+            n_splits=1,
+            test_size=test_size,
+            random_state=random_state,
+        )
+        train_idx, test_idx = next(splitter.split(df, df["label"], groups=df["group_id"]))
+        train_df, test_df = df.iloc[train_idx].copy(), df.iloc[test_idx].copy()
+        _print_protocol_split(split_mode, train_df, test_df)
+        return train_df, test_df
+
+    if split_mode == "random":
+        stratify = None
+        if stratify_column is not None and stratify_column in df.columns:
+            col = df[stratify_column]
+            if col.nunique() >= 2 and col.value_counts().min() >= 2:
+                stratify = col
+        row_indices = list(range(len(df)))
+        train_idx, test_idx = train_test_split(
+            row_indices,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=stratify,
+        )
+        train_df, test_df = df.iloc[train_idx].copy(), df.iloc[test_idx].copy()
+        _print_protocol_split(split_mode, train_df, test_df)
+        return train_df, test_df
+
+    if split_mode == "block":
+        train_df, test_df = _split_dataframe_by_blocks(
+            df,
+            test_size=test_size,
+            random_state=random_state,
+            n_blocks=n_blocks,
+        )
+        _print_protocol_split(split_mode, train_df, test_df)
+        return train_df, test_df
+
+    msg = (
+        f"Unknown split_mode {split_mode!r}. Must be 'group', 'random', 'block', "
+        "'lovo', or 'cross_session'."
+    )
+    raise ValueError(msg)
+
+
+def run_global_position_experiment(  # noqa: PLR0913
+    df: pd.DataFrame,
+    *,
+    dataset_name: str,
+    model_name: str,
+    params: dict,
+    split_mode: Literal["group", "random", "block", "lovo", "cross_session"] = "block",
+    test_size: float = 0.3,
+    random_state: int = 42,
+    n_blocks: int = DEFAULT_BLOCK_COUNT,
+    n_jobs: int = -1,
+    results_dir: Path | str | None = None,
+    force_retrain: bool = False,
+    save_prediction_cache: bool = True,
+    svm_fallback_seconds: float = 30.0 * 60.0,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+    run_id: str | None = None,
+) -> tuple[Pipeline | None, pd.DataFrame, dict[str, float]]:
+    """Train/evaluate or load a global 52-position classical baseline."""
+    _validate_grid_spacing(row_spacing=row_spacing, column_spacing=column_spacing)
+    _validate_training_dataframe(df)
+    _validate_required_columns(df, {"location", "group_id", "label"})
+    resolved_model_name = model_name.upper()
+    resolved_params = dict(params)
+
+    if split_mode == "lovo":
+        predictions, _, metrics = run_global_lovo_experiment(
+            df,
+            dataset_name=dataset_name,
+            model_name=resolved_model_name,
+            params=resolved_params,
+            random_state=random_state,
+            n_jobs=n_jobs,
+            results_dir=results_dir,
+            force_retrain=force_retrain,
+            save_prediction_cache=save_prediction_cache,
+            svm_fallback_seconds=svm_fallback_seconds,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+            run_id=run_id,
+        )
+        return None, predictions, metrics
+
+    split_result = split_dataframe(
+        df,
+        test_size=test_size,
+        random_state=random_state,
+        split_mode=split_mode,
+        stratify_column="location",
+        n_blocks=n_blocks,
+    )
+    if isinstance(split_result, list):
+        msg = "Unexpected multi-fold split outside the LOVO dispatch path."
+        raise RuntimeError(msg)
+    train_df, test_df = split_result
+    train_fingerprint = _window_identity_fingerprint(train_df)
+    test_fingerprint = _window_identity_fingerprint(test_df)
+    majority_metrics = majority_class_baselines(
+        train_df,
+        test_df,
+        row_spacing=row_spacing,
+        column_spacing=column_spacing,
+    )
+
+    if results_dir is not None and not force_retrain:
+        expected_metadata = prediction_cache_metadata(
+            model=resolved_model_name,
+            band=dataset_name,
+            split_mode=split_mode,
+            params=resolved_params,
+            random_state=random_state,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+            train_fingerprint=train_fingerprint,
+            test_fingerprint=test_fingerprint,
+        )
+        cached_predictions = load_predictions(
+            Path(results_dir),
+            resolved_model_name,
+            dataset_name,
+            split_mode,
+            expected_metadata=expected_metadata,
+            run_id=run_id,
+        )
+        if cached_predictions is not None:
+            metrics = compute_localization_metrics(cached_predictions)
+            metrics.update(majority_metrics)
+            metrics.update(
+                {
+                    "fit_seconds": 0.0,
+                    "predict_seconds": 0.0,
+                    "wall_seconds": 0.0,
+                    "used_estimator": "cached_predictions",
+                }
+            )
+            return None, cached_predictions, metrics
+
+    columns = feature_columns(train_df)
+
+    model = build_estimator(resolved_model_name, resolved_params, random_state, n_jobs)
+    if resolved_model_name == "SVM":
+        print("[SVM] sklearn SVC is single-threaded; n_jobs is not used by SVC.")
+
+    started_at = time.perf_counter()
+    fit_started_at = time.perf_counter()
+    model.fit(train_df[columns], train_df["location"].astype(str))
+    fit_seconds = time.perf_counter() - fit_started_at
+    used_estimator = _estimator_name(model)
+
+    if (
+        resolved_model_name == "SVM"
+        and dataset_name == "Fusion"
+        and resolved_params.get("kernel", "rbf") == "rbf"
+        and fit_seconds > svm_fallback_seconds
+    ):
+        fallback_params = {**resolved_params, "kernel": "linear_svc"}
+        print(
+            "[SVM] Fusion RBF fit exceeded "
+            f"{svm_fallback_seconds:.0f}s; refitting with LinearSVC fallback."
+        )
+        model = build_estimator(resolved_model_name, fallback_params, random_state, n_jobs)
+        fit_started_at = time.perf_counter()
+        model.fit(train_df[columns], train_df["location"].astype(str))
+        fit_seconds = time.perf_counter() - fit_started_at
+        used_estimator = "LinearSVC_fallback"
+
+    predict_started_at = time.perf_counter()
+    pred_positions = model.predict(test_df[columns])
+    predict_seconds = time.perf_counter() - predict_started_at
+    predictions = build_global_predictions_dataframe(
+        test_df,
+        pred_positions,
+        dataset_name=dataset_name,
+        model_name=resolved_model_name,
+        split_mode=split_mode,
+        row_spacing=row_spacing,
+        column_spacing=column_spacing,
+    )
+    metrics = compute_localization_metrics(predictions)
+    metrics.update(majority_metrics)
+    metrics.update(
+        {
+            "fit_seconds": float(fit_seconds),
+            "predict_seconds": float(predict_seconds),
+            "wall_seconds": float(time.perf_counter() - started_at),
+            "used_estimator": used_estimator,
+        }
+    )
+
+    if results_dir is not None and save_prediction_cache:
+        save_predictions(
+            predictions,
+            Path(results_dir),
+            resolved_model_name,
+            dataset_name,
+            split_mode,
+            run_id=run_id,
+            metadata=prediction_cache_metadata(
+                model=resolved_model_name,
+                band=dataset_name,
+                split_mode=split_mode,
+                params=resolved_params,
+                random_state=random_state,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+                train_fingerprint=train_fingerprint,
+                test_fingerprint=test_fingerprint,
+            ),
+        )
+
+    return model, predictions, metrics
+
+
+def _window_identity_fingerprint(df: pd.DataFrame) -> str:
+    """Hash the exact ordered set of windows used by a prediction cache."""
+    _validate_required_columns(df, {"group_id", "window_idx", "user", "trial"})
+    identities = (
+        df[["group_id", "window_idx", "user", "trial"]]
+        .astype(str)
+        .sort_values(["group_id", "window_idx", "user", "trial"], kind="stable")
+    )
+    payload = identities.to_csv(index=False, lineterminator="\n")
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def filter_training_protocol_trials(
+    df: pd.DataFrame,
+    *,
+    trials: tuple[str, ...] = TRIALS_FOR_TRAINING_PROTOCOLS,
+    split_mode: str,
+) -> pd.DataFrame:
+    """Restrict non-cross-session protocols to their configured recording trials."""
+    _validate_required_columns(df, {"trial"})
+    normalized_trials = tuple(_normalized_trial_values(pd.Series(trials)).tolist())
+    if not normalized_trials:
+        raise ValueError("TRIALS_FOR_TRAINING_PROTOCOLS cannot be empty.")
+    observed = _normalized_trial_values(df["trial"])
+    filtered = df.loc[observed.isin(normalized_trials)].copy()
+    if filtered.empty:
+        raise ValueError(
+            f"{split_mode} trial filter emptied the dataframe; requested trials="
+            f"{list(normalized_trials)}, observed trials={sorted(observed.unique())}."
+        )
+    print(
+        f"[trial filter] split={split_mode} trials={list(normalized_trials)} "
+        f"kept={len(filtered)}/{len(df)}"
+    )
+    return filtered
+
+
+def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
+    df: pd.DataFrame,
+    *,
+    dataset_name: str,
+    model_name: str,
+    params: dict[str, Any],
+    random_state: int = 42,
+    n_jobs: int = -1,
+    results_dir: Path | str | None = None,
+    force_retrain: bool = False,
+    save_prediction_cache: bool = True,
+    svm_fallback_seconds: float = 30.0 * 60.0,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+    run_id: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
+    """Run leave-one-volunteer-out global classification for one model/band pair."""
+    _validate_grid_spacing(row_spacing=row_spacing, column_spacing=column_spacing)
+    _validate_training_dataframe(df)
+    _validate_required_columns(df, {"location", "group_id", "label", "user"})
+
+    resolved_model_name = model_name.upper()
+    resolved_params = dict(params)
+    folds = split_lovo_folds(df)
+    protocol_df = pd.concat([test_df for _, test_df in folds], axis=0).sort_index()
+    held_out_users = [_held_out_user(test_df) for _, test_df in folds]
+    result_path = Path(results_dir) if results_dir is not None else None
+
+    _print_lovo_honesty_warnings(protocol_df, folds, dataset_name=dataset_name)
+    print(
+        "[LOVO] Hyperparameter provenance: reusing block-split tuned/default "
+        "hyperparameters; no nested CV is run for LOVO."
+    )
+
+    if result_path is not None and not force_retrain:
+        cached_predictions = _load_lovo_cached_predictions(
+            result_path,
+            resolved_model_name,
+            dataset_name,
+            resolved_params,
+            held_out_users,
+            folds=folds,
+            random_state=random_state,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+            run_id=run_id,
+            save_prediction_cache=save_prediction_cache,
+        )
+        if cached_predictions is not None:
+            per_fold_metrics, aggregated_metrics = _lovo_metrics_from_predictions(
+                cached_predictions,
+                folds=folds,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+            )
+            aggregated_metrics.update(
+                {
+                    "fit_seconds": 0.0,
+                    "predict_seconds": 0.0,
+                    "wall_seconds": 0.0,
+                    "used_estimator": "cached_predictions",
+                }
+            )
+            return cached_predictions, per_fold_metrics, aggregated_metrics
+
+    if resolved_model_name == "SVM":
+        print("[SVM] sklearn SVC is single-threaded; n_jobs is not used by SVC.")
+
+    fold_prediction_frames: list[pd.DataFrame] = []
+    fold_metric_rows: list[dict[str, Any]] = []
+    total_started_at = time.perf_counter()
+
+    for fold_index, ((train_df, test_df), held_out_user) in enumerate(
+        zip(folds, held_out_users),
+        start=1,
+    ):
+        fold_label = _lovo_fold_label(held_out_user)
+        train_fingerprint = _window_identity_fingerprint(train_df)
+        test_fingerprint = _window_identity_fingerprint(test_df)
+        print(
+            f"[LOVO] {dataset_name} / {resolved_model_name} fold "
+            f"{fold_index}/{len(folds)}: held_out_user={held_out_user}"
+        )
+        columns = feature_columns(train_df)
+        model = build_estimator(resolved_model_name, resolved_params, random_state, n_jobs)
+
+        fold_started_at = time.perf_counter()
+        fit_started_at = time.perf_counter()
+        model.fit(train_df[columns], train_df["location"].astype(str))
+        fit_seconds = time.perf_counter() - fit_started_at
+        used_estimator = _estimator_name(model)
+
+        if (
+            resolved_model_name == "SVM"
+            and dataset_name == "Fusion"
+            and resolved_params.get("kernel", "rbf") == "rbf"
+            and fit_seconds > svm_fallback_seconds
+        ):
+            fallback_params = {**resolved_params, "kernel": "linear_svc"}
+            print(
+                "[SVM] Fusion RBF fit exceeded "
+                f"{svm_fallback_seconds:.0f}s; refitting with LinearSVC fallback."
+            )
+            model = build_estimator(resolved_model_name, fallback_params, random_state, n_jobs)
+            fit_started_at = time.perf_counter()
+            model.fit(train_df[columns], train_df["location"].astype(str))
+            fit_seconds = time.perf_counter() - fit_started_at
+            used_estimator = "LinearSVC_fallback"
+
+        predict_started_at = time.perf_counter()
+        pred_positions = model.predict(test_df[columns])
+        predict_seconds = time.perf_counter() - predict_started_at
+        fold_predictions = build_global_predictions_dataframe(
+            test_df,
+            pred_positions,
+            dataset_name=dataset_name,
+            model_name=resolved_model_name,
+            split_mode="lovo",
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
+        fold_predictions["held_out_user"] = held_out_user
+        fold_wall_seconds = time.perf_counter() - fold_started_at
+        fold_metrics = compute_localization_metrics(fold_predictions)
+        fold_metrics.update(
+            majority_class_baselines(
+                train_df,
+                test_df,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+            ),
+        )
+        fold_metric_rows.append(
+            {
+                "held_out_user": held_out_user,
+                **fold_metrics,
+                "n_test_windows": int(len(fold_predictions)),
+                "fit_seconds": float(fit_seconds),
+                "predict_seconds": float(predict_seconds),
+                "wall_seconds": float(fold_wall_seconds),
+                "used_estimator": used_estimator,
+            }
+        )
+        fold_prediction_frames.append(fold_predictions)
+
+        if result_path is not None and save_prediction_cache:
+            save_predictions(
+                fold_predictions,
+                result_path,
+                resolved_model_name,
+                dataset_name,
+                "lovo",
+                fold=fold_label,
+                run_id=run_id,
+                metadata=prediction_cache_metadata(
+                    model=resolved_model_name,
+                    band=dataset_name,
+                    split_mode="lovo",
+                    params=resolved_params,
+                    fold=fold_label,
+                    random_state=random_state,
+                    row_spacing=row_spacing,
+                    column_spacing=column_spacing,
+                    train_fingerprint=train_fingerprint,
+                    test_fingerprint=test_fingerprint,
+                ),
+            )
+
+        print(
+            f"[LOVO] fold {fold_index}/{len(folds)} done: "
+            f"acc={fold_metrics['position_accuracy']:.4f} "
+            f"fit={fit_seconds:.1f}s predict={predict_seconds:.1f}s "
+            f"wall={fold_wall_seconds:.1f}s"
+        )
+        del model
+        gc.collect()
+
+    predictions = pd.concat(fold_prediction_frames, ignore_index=True)
+    if len(predictions) != len(protocol_df):
+        msg = (
+            f"LOVO predictions should cover {len(protocol_df)} filtered windows, "
+            f"got {len(predictions)}."
+        )
+        raise RuntimeError(msg)
+
+    per_fold_metrics = pd.DataFrame(fold_metric_rows)
+    aggregated_metrics = _aggregate_lovo_metrics(
+        per_fold_metrics,
+        pooled_predictions=predictions,
+    )
+    aggregated_metrics.update(
+        {
+            "fit_seconds": float(per_fold_metrics["fit_seconds"].sum()),
+            "predict_seconds": float(per_fold_metrics["predict_seconds"].sum()),
+            "wall_seconds": float(time.perf_counter() - total_started_at),
+            "used_estimator": ",".join(sorted(set(per_fold_metrics["used_estimator"]))),
+        }
+    )
+
+    if result_path is not None and save_prediction_cache:
+        save_predictions(
+            predictions,
+            result_path,
+            resolved_model_name,
+            dataset_name,
+            "lovo",
+            run_id=run_id,
+            metadata=prediction_cache_metadata(
+                model=resolved_model_name,
+                band=dataset_name,
+                split_mode="lovo",
+                params=resolved_params,
+                random_state=random_state,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+                train_fingerprint=_fold_collection_fingerprint(folds, side="train"),
+                test_fingerprint=_fold_collection_fingerprint(folds, side="test"),
+            ),
+        )
+
+    print(
+        f"[LOVO] {dataset_name} / {resolved_model_name} complete: "
+        f"position_accuracy={aggregated_metrics['position_accuracy_mean']:.4f} +/- "
+        f"{aggregated_metrics['position_accuracy_std']:.4f}, "
+        f"total_wall={aggregated_metrics['wall_seconds']:.1f}s"
+    )
+    return predictions, per_fold_metrics, aggregated_metrics
+
+def _load_lovo_cached_predictions(
+    results_dir: Path,
+    model_name: str,
+    dataset_name: str,
+    params: dict[str, Any],
+    held_out_users: list[object],
+    *,
+    folds: list[tuple[pd.DataFrame, pd.DataFrame]],
+    random_state: int,
+    row_spacing: float,
+    column_spacing: float,
+    run_id: str | None,
+    save_prediction_cache: bool,
+) -> pd.DataFrame | None:
+    concat_metadata = prediction_cache_metadata(
+        model=model_name,
+        band=dataset_name,
+        split_mode="lovo",
+        params=params,
+        random_state=random_state,
+        row_spacing=row_spacing,
+        column_spacing=column_spacing,
+        train_fingerprint=_fold_collection_fingerprint(folds, side="train"),
+        test_fingerprint=_fold_collection_fingerprint(folds, side="test"),
+    )
+    cached_concat = load_predictions(
+        results_dir,
+        model_name,
+        dataset_name,
+        "lovo",
+        expected_metadata=concat_metadata,
+        run_id=run_id,
+    )
+    if cached_concat is not None:
+        if "held_out_user" not in cached_concat.columns:
+            print("[predictions cache stale] LOVO concat lacks held_out_user.")
+            return None
+        return cached_concat
+
+    fold_frames = []
+    for held_out_user, (train_df, test_df) in zip(held_out_users, folds):
+        fold_label = _lovo_fold_label(held_out_user)
+        fold_predictions = load_predictions(
+            results_dir,
+            model_name,
+            dataset_name,
+            "lovo",
+            fold=fold_label,
+            run_id=run_id,
+            expected_metadata=prediction_cache_metadata(
+                model=model_name,
+                band=dataset_name,
+                split_mode="lovo",
+                params=params,
+                fold=fold_label,
+                random_state=random_state,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+                train_fingerprint=_window_identity_fingerprint(train_df),
+                test_fingerprint=_window_identity_fingerprint(test_df),
+            ),
+        )
+        if fold_predictions is None:
+            return None
+        if "held_out_user" not in fold_predictions.columns:
+            print(f"[predictions cache stale] LOVO fold {fold_label} lacks held_out_user.")
+            return None
+        fold_frames.append(fold_predictions)
+
+    predictions = pd.concat(fold_frames, ignore_index=True)
+    if save_prediction_cache:
+        save_predictions(
+            predictions,
+            results_dir,
+            model_name,
+            dataset_name,
+            "lovo",
+            run_id=run_id,
+            metadata=concat_metadata,
+        )
+    return predictions
+
+
+def _lovo_metrics_from_predictions(
+    predictions: pd.DataFrame,
+    *,
+    folds: list[tuple[pd.DataFrame, pd.DataFrame]] | None = None,
+    row_spacing: float = DEFAULT_ROW_SPACING,
+    column_spacing: float = DEFAULT_COLUMN_SPACING,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    _validate_required_columns(predictions, {"held_out_user"})
+    majority_by_user: dict[object, dict[str, float]] = {}
+    if folds is not None:
+        majority_by_user = {
+            _held_out_user(test_df): majority_class_baselines(
+                train_df,
+                test_df,
+                row_spacing=row_spacing,
+                column_spacing=column_spacing,
+            )
+            for train_df, test_df in folds
+        }
+    rows = []
+    for held_out_user, group in predictions.groupby("held_out_user", sort=True):
+        metrics = compute_localization_metrics(group)
+        metrics.update(majority_by_user.get(held_out_user, {}))
+        rows.append(
+            {
+                "held_out_user": held_out_user,
+                **metrics,
+                "n_test_windows": int(len(group)),
+            }
+        )
+    per_fold_metrics = pd.DataFrame(rows)
+    return per_fold_metrics, _aggregate_lovo_metrics(
+        per_fold_metrics,
+        pooled_predictions=predictions,
+    )
+
+
+def _aggregate_lovo_metrics(
+    per_fold_metrics: pd.DataFrame,
+    *,
+    pooled_predictions: pd.DataFrame,
+) -> dict[str, float]:
+    metric_names = [
+        "position_accuracy",
+        "macro_f1",
+        "room_accuracy",
+        "mean_distance_error",
+        "median_distance_error",
+        "rmse_distance_error",
+        "p90_distance_error",
+        "samples",
+        "majority_position_accuracy",
+        "majority_room_accuracy",
+    ]
+    aggregated: dict[str, float] = {}
+    for metric_name in metric_names:
+        if metric_name not in per_fold_metrics.columns:
+            continue
+        values = pd.to_numeric(per_fold_metrics[metric_name], errors="coerce")
+        aggregated[f"{metric_name}_mean"] = float(values.mean())
+        aggregated[f"{metric_name}_std"] = float(values.std(ddof=1))
+        aggregated[f"{metric_name}_min"] = float(values.min())
+        aggregated[f"{metric_name}_max"] = float(values.max())
+        if metric_name in {"majority_position_accuracy", "majority_room_accuracy"}:
+            aggregated[metric_name] = aggregated[f"{metric_name}_mean"]
+
+    sample_values = pd.to_numeric(per_fold_metrics["samples"], errors="coerce")
+    aggregated["samples"] = float(sample_values.sum())
+    aggregated["n_folds"] = float(len(per_fold_metrics))
+    aggregated["n_test_windows"] = float(per_fold_metrics["n_test_windows"].sum())
+    pooled_metrics = compute_localization_metrics(pooled_predictions)
+    aggregated["position_accuracy_pooled"] = float(pooled_metrics["position_accuracy"])
+    return aggregated
+
+
+def _print_lovo_honesty_warnings(
+    df: pd.DataFrame,
+    folds: list[tuple[pd.DataFrame, pd.DataFrame]],
+    *,
+    dataset_name: str,
+) -> None:
+    location_user_counts = df.groupby("location", sort=True)["user"].nunique()
+    singleton_positions = sorted(location_user_counts[location_user_counts == 1].index.astype(str))
+    if singleton_positions:
+        affected_windows = int(df["location"].astype(str).isin(singleton_positions).sum())
+        print(
+            f"[LOVO warning] {dataset_name}: {len(singleton_positions)} positions are "
+            f"covered by exactly one user ({affected_windows} windows): "
+            f"{', '.join(singleton_positions)}"
+        )
+        print(
+            "[LOVO warning] Under block split these positions can inflate results via "
+            "user identity; under LOVO they have zero training examples in the held-out "
+            "user's fold."
+        )
+    else:
+        print(f"[LOVO check] {dataset_name}: every observed position has at least two users.")
+
+    all_positions = set(df["location"].astype(str))
+    position_count = len(all_positions)
+    for _, test_df in folds:
+        held_out_user = _held_out_user(test_df)
+        train_df = df.loc[df["user"] != held_out_user]
+        train_positions = set(train_df["location"].astype(str))
+        missing_positions = sorted(all_positions - train_positions)
+        singleton_test_windows = int(
+            test_df["location"].astype(str).isin(singleton_positions).sum()
+        )
+        print(
+            f"[LOVO check] {dataset_name}: held_out_user={held_out_user} training covers "
+            f"{len(train_positions)}/{position_count} observed positions; "
+            f"singleton-position test windows={singleton_test_windows}."
+        )
+        if missing_positions:
+            print(
+                f"[LOVO warning] held_out_user={held_out_user} missing training positions: "
+                f"{', '.join(missing_positions)}"
+            )
+
+
+def _held_out_user(test_df: pd.DataFrame) -> object:
+    users = test_df["user"].dropna().unique()
+    if len(users) != 1:
+        msg = f"Expected exactly one held-out user, got {users!r}."
+        raise ValueError(msg)
+    return users[0]
+
+
+def _lovo_fold_label(held_out_user: object) -> str:
+    return f"user-{held_out_user}"
+
+
+def _fold_collection_fingerprint(
+    folds: list[tuple[pd.DataFrame, pd.DataFrame]],
+    *,
+    side: Literal["train", "test"],
+) -> str:
+    frames = [train_df if side == "train" else test_df for train_df, test_df in folds]
+    return _window_identity_fingerprint(pd.concat(frames, ignore_index=True))
+
+
+def _split_dataframe_by_blocks(
+    df: pd.DataFrame,
+    *,
+    test_size: float,
+    random_state: int,
+    n_blocks: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if n_blocks < 1:
+        msg = "n_blocks must be at least 1 for block split mode."
+        raise ValueError(msg)
+    _validate_required_columns(df, {"window_idx"})
+    group_ids = df["group_id"].to_numpy()
+    window_idxs = df["window_idx"].to_numpy()
+    n_test_blocks = min(n_blocks, max(1, round(test_size * n_blocks)))
+
+    train_locs: list[int] = []
+    test_locs: list[int] = []
+
+    for group_id in df["group_id"].unique():
+        session_pos = np.flatnonzero(group_ids == group_id)
+        sort_order = np.argsort(window_idxs[session_pos], kind="stable")
+        session_pos_sorted = session_pos[sort_order]
+        n_windows = len(session_pos_sorted)
+
+        if n_windows < n_blocks:
+            train_locs.extend(session_pos_sorted.tolist())
+            continue
+
+        block_assignment = (np.arange(n_windows) * n_blocks) // n_windows
+        gid_int = int.from_bytes(hashlib.md5(str(group_id).encode()).digest()[:4], "big")
+        rng = np.random.RandomState((gid_int + random_state) % (2**31))
+        test_block_set = set(rng.choice(n_blocks, size=n_test_blocks, replace=False).tolist())
+        is_test = np.array([block in test_block_set for block in block_assignment])
+
+        is_boundary = np.zeros(n_windows, dtype=bool)
+        if n_windows > 1:
+            is_boundary[:-1] |= is_test[:-1] != is_test[1:]
+            is_boundary[1:] |= is_test[1:] != is_test[:-1]
+
+        for pos, test_block, boundary in zip(session_pos_sorted, is_test, is_boundary):
+            if boundary:
+                continue
+            (test_locs if test_block else train_locs).append(int(pos))
+
+    if not train_locs or not test_locs:
+        msg = "Block split produced an empty train or test set."
+        raise ValueError(msg)
+    return df.iloc[train_locs].copy(), df.iloc[test_locs].copy()
+
+
+def _estimator_name(model: Pipeline) -> str:
+    classifier = model.named_steps.get("classifier")
+    return type(classifier).__name__ if classifier is not None else type(model).__name__
+
+
+def _validate_grid_spacing(*, row_spacing: float, column_spacing: float) -> None:
+    if not np.isfinite(row_spacing) or row_spacing <= 0:
+        msg = "row_spacing must be a finite positive value."
+        raise ValueError(msg)
+    if not np.isfinite(column_spacing) or column_spacing <= 0:
+        msg = "column_spacing must be a finite positive value."
+        raise ValueError(msg)
+
+
+def _validate_training_dataframe(df: pd.DataFrame) -> None:
+    _validate_required_columns(df, METADATA_COLUMNS)
+    if df.empty:
+        msg = "Cannot train on an empty dataframe."
+        raise ValueError(msg)
+    if not feature_columns(df):
+        msg = "No CSI feature columns found."
+        raise ValueError(msg)
+
+
+def _validate_required_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
+    missing_columns = sorted(required_columns - set(df.columns))
+    if missing_columns:
+        msg = f"Missing required columns: {', '.join(missing_columns)}"
+        raise ValueError(msg)
+
+
+def _normalized_trial_values(values: pd.Series) -> pd.Series:
+    return (
+        values.astype(str)
+        .str.removeprefix("trial_")
+        .str.replace(r"\.0$", "", regex=True)
+        .str.zfill(2)
+    )
+
+
+def _print_protocol_split(
+    split_mode: str,
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    fold: object | None = None,
+) -> None:
+    combined = pd.concat([train_df, test_df], ignore_index=True)
+    trials = (
+        sorted(_normalized_trial_values(combined["trial"]).unique())
+        if "trial" in combined.columns
+        else ["unavailable"]
+    )
+    train_users = sorted(train_df["user"].dropna().astype(str).unique())
+    test_users = sorted(test_df["user"].dropna().astype(str).unique())
+    fold_text = f" fold={fold}" if fold is not None else ""
+    print(
+        f"[protocol] split={split_mode}{fold_text} trials_used={trials} "
+        f"n_train={len(train_df)} n_test={len(test_df)} "
+        f"users={sorted(set(train_users) | set(test_users))} "
+        f"train_users={train_users} test_users={test_users}"
+    )
