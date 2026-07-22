@@ -32,7 +32,7 @@ ROOM_2_BC_COLUMNS = range(10, 15)
 ROOM_3_EF_COLUMNS = range(10, 14)
 
 DEFAULT_WINDOW_SIZE = 60
-DEFAULT_OVERLAP_SIZE = 30
+DEFAULT_OVERLAP_SIZE = 0
 
 # only used in paper notebook, but kept here for consistency with the paper notebook
 WINDOW_CONFIGS = [
