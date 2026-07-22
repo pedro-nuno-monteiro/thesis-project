@@ -32,11 +32,6 @@ def select_active_subcarriers(
     return np.delete(active_subcarriers, [26, 27], axis=1)
 
 
-def calculate_csi_magnitude(complex_csi: np.ndarray) -> np.ndarray:
-    """Return CSI magnitude without changing packet or subcarrier ordering."""
-    return np.abs(complex_csi)
-
-
 def process_complex_csi(
     complex_csi: np.ndarray,
     rssi_dbm: np.ndarray,
@@ -48,6 +43,8 @@ def process_complex_csi(
 ) -> tuple[np.ndarray, int, bool]:
     """Select subcarriers, filter invalid packets, calibrate, and take magnitude."""
     selected_csi = select_active_subcarriers(complex_csi, its5ghz=its5ghz)
+
+    # no filter is applied, so all packets remain the same
     filtered_csi, filtered_rssi, invalid_packets_removed = filter_packets_for_calibration(
         selected_csi,
         rssi_dbm,
@@ -61,7 +58,9 @@ def process_complex_csi(
         rssi_dbm=filtered_rssi if calibration_mode == "rssi" else None,
         eps=calibration_eps,
     )
-    magnitude = calculate_csi_magnitude(calibrated_csi)
+
+    # magnitude is computed
+    magnitude = np.abs(calibrated_csi)
     return magnitude, invalid_packets_removed, calibration_applied and magnitude.shape[0] > 0
 
 
@@ -138,6 +137,7 @@ def calibrate_complex_csi(
 
 
 def complex_csi_power(complex_csi: np.ndarray) -> np.ndarray:
+    """Return total complex-signal power for each CSI packet."""
     return np.sum(np.abs(complex_csi) ** 2, axis=1)
 
 
@@ -145,6 +145,7 @@ def _normalize_complex_csi_per_packet(
     complex_csi: np.ndarray,
     eps: float = 1e-12,
 ) -> np.ndarray:
+    """Scale each packet to unit power while guarding against division by zero."""
     norm = np.sqrt(complex_csi_power(complex_csi) + eps)
     return complex_csi / norm[:, None]
 
@@ -154,6 +155,7 @@ def _calibrate_complex_csi_with_rssi(
     rssi_dbm: np.ndarray,
     eps: float = 1e-12,
 ) -> np.ndarray:
+    """Scale CSI packet power to the corresponding RSSI power estimate."""
     if complex_csi.shape[0] != rssi_dbm.shape[0]:
         msg = (
             "RSSI calibration requires one RSSI value per CSI packet: "
@@ -166,6 +168,7 @@ def _calibrate_complex_csi_with_rssi(
 
 
 def calibration_mode_error() -> ValueError:
+    """Build the standard error for an unsupported calibration mode."""
     return ValueError("calibration_mode must be one of: 'none', 'packet_norm', 'rssi'")
 
 
@@ -209,6 +212,7 @@ def validate_window_parameters(
     window_size: int,
     overlap_size: int,
 ) -> None:
+    """Validate magnitude shape and sliding-window size constraints."""
     if window_size <= 0:
         raise ValueError("window_size must be greater than zero")
     if overlap_size < 0:
@@ -221,6 +225,8 @@ def validate_window_parameters(
 
 @dataclass(frozen=True)
 class EmptyBaselineTables:
+    """Store empty-room baselines and the inventory used to construct them."""
+
     mean: dict[BaselineKey, np.ndarray]
     divisor: dict[BaselineKey, np.ndarray]
     clip_counts: dict[BaselineKey, int]
@@ -236,6 +242,7 @@ def _norm_none(
     baseline_absmax: np.ndarray | None,
     epsilon: float,
 ) -> np.ndarray:
+    """Return magnitude values unchanged."""
     return magnitude
 
 
@@ -246,6 +253,7 @@ def _norm_zscore(
     baseline_absmax: np.ndarray | None,
     epsilon: float,
 ) -> np.ndarray:
+    """Standardize every subcarrier over the packets in one recording."""
     return (magnitude - magnitude.mean(axis=0, keepdims=True)) / (
         magnitude.std(axis=0, keepdims=True) + epsilon
     )
@@ -258,6 +266,7 @@ def _norm_minmax(
     baseline_absmax: np.ndarray | None,
     epsilon: float,
 ) -> np.ndarray:
+    """Min-max scale each subcarrier over one recording."""
     min_values = magnitude.min(axis=0, keepdims=True)
     max_values = magnitude.max(axis=0, keepdims=True)
     return (magnitude - min_values) / (max_values - min_values + epsilon)
@@ -270,6 +279,7 @@ def _norm_packet_minmax(
     baseline_absmax: np.ndarray | None,
     epsilon: float,
 ) -> np.ndarray:
+    """Min-max scale subcarriers independently within each packet."""
     min_values = magnitude.min(axis=1, keepdims=True)
     max_values = magnitude.max(axis=1, keepdims=True)
     return (magnitude - min_values) / (max_values - min_values + epsilon)
@@ -282,6 +292,7 @@ def _norm_empty_baseline(
     baseline_absmax: np.ndarray | None,
     epsilon: float,
 ) -> np.ndarray:
+    """Center and scale a recording with its matching empty-room baseline."""
     if baseline_mean is None or baseline_absmax is None:
         msg = "empty_baseline normalization requires baseline_mean and baseline_absmax."
         raise ValueError(msg)
@@ -315,6 +326,7 @@ def normalize_magnitude(
     baseline_absmax: np.ndarray | None = None,
     epsilon: float = DEFAULT_EPSILON,
 ) -> np.ndarray:
+    """Apply a named magnitude normalization while preserving float32 output."""
     method_key = method.lower()
     if method_key not in NORMALIZERS:
         valid = ", ".join(NORMALIZERS)
@@ -342,6 +354,7 @@ def set_processed_magnitude_entry(  # noqa: PLR0913
     trial_key: str,
     magnitude: np.ndarray,
 ) -> None:
+    """Insert one processed array into the nested CSI metadata map."""
     processed_data.setdefault(scenario_key, {})
     processed_data[scenario_key].setdefault(location_key, {})
     processed_data[scenario_key][location_key].setdefault(user_key, {})
@@ -356,8 +369,11 @@ def process_magnitude_data(
     baseline_scope: str = "per_session",
     epsilon: float = DEFAULT_EPSILON,
 ) -> tuple[CsiMap, pd.DataFrame]:
+    """Normalize occupied recordings and return their processing summary."""
     normalization_key = normalization.lower()
     baseline_tables: EmptyBaselineTables | None = None
+    # Empty-room normalization needs a complete baseline inventory before any
+    # occupied recording can be processed.
     if normalization_key == "empty_baseline":
         if baseline_scope == "global":
             print(
@@ -392,6 +408,8 @@ def process_magnitude_data(
                             msg = "Magnitude entries must be 2D arrays."
                             raise ValueError(msg)
 
+                        # Resolve the recording-specific baseline before calling
+                        # the selected normalization strategy.
                         baseline_mean, baseline_absmax = _baseline_for_recording(
                             baseline_tables,
                             baseline_scope=baseline_scope,
@@ -441,6 +459,7 @@ def build_empty_baseline_tables(
     baseline_scope: str,
     print_inventory: bool = False,
 ) -> EmptyBaselineTables:
+    """Aggregate Z-0 recordings into baseline mean and scale lookup tables."""
     if baseline_scope not in VALID_BASELINE_SCOPES:
         _raise_baseline_scope_error(baseline_scope)
 
@@ -450,6 +469,7 @@ def build_empty_baseline_tables(
     trial_counts: dict[tuple[str, str, str], int] = {}
     total_files = 0
 
+    # First inventory occupied keys and collect every compatible empty-room array.
     for _, locations_map in raw_magnitude_data.items():
         for location_key, users_map in locations_map.items():
             is_empty_room = _normalized_key(location_key) == EMPTY_ROOM_LOCATION
@@ -490,6 +510,8 @@ def build_empty_baseline_tables(
                         trial_key_tuple = (user, esp, trial)
                         trial_counts[trial_key_tuple] = trial_counts.get(trial_key_tuple, 0) + 1
 
+    # Validate coverage before computing statistics so the error identifies all
+    # missing baseline keys together.
     missing = sorted(occupied_pairs - set(empty_arrays))
     missing_error: str | None = None
     if missing:
@@ -506,6 +528,7 @@ def build_empty_baseline_tables(
     mean: dict[BaselineKey, np.ndarray] = {}
     divisor: dict[BaselineKey, np.ndarray] = {}
     clip_counts: dict[BaselineKey, int] = {}
+    # Build one stable per-subcarrier baseline for each requested scope key.
     for key, arrays in empty_arrays.items():
         subcarrier_counts = {array.shape[1] for array in arrays}
         if len(subcarrier_counts) != 1:
@@ -552,6 +575,7 @@ def print_z0_inventory_report(
     baseline_scope: str,
     baseline_tables: EmptyBaselineTables,
 ) -> None:
+    """Print empty-room file counts, coverage, and clipped-subcarrier diagnostics."""
     occupied_pairs = sorted(_occupied_baseline_keys(raw_magnitude_data, baseline_scope))
     available_keys = set(baseline_tables.mean)
     satisfiable = all(key in available_keys for key in occupied_pairs)
@@ -603,6 +627,7 @@ def _baseline_for_recording(
     esp_key: str,
     magnitude: np.ndarray,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Return and validate the baseline arrays required by one recording."""
     if baseline_tables is None:
         return None, None
 
@@ -630,6 +655,7 @@ def _baseline_for_recording(
 
 
 def _occupied_baseline_keys(raw_magnitude_data: CsiMap, baseline_scope: str) -> set[BaselineKey]:
+    """Return baseline lookup keys required by occupied recordings."""
     occupied: set[BaselineKey] = set()
     for _, locations_map in raw_magnitude_data.items():
         for location_key, users_map in locations_map.items():
@@ -656,6 +682,7 @@ def _baseline_key(
     trial_key: str,
     esp_key: str,
 ) -> BaselineKey:
+    """Build the empty-room lookup key for the selected baseline scope."""
     user = _normalized_key(user_key)
     trial = _normalized_key(trial_key)
     esp = _normalized_key(esp_key)
@@ -669,12 +696,14 @@ def _baseline_key(
 
 
 def _raise_baseline_scope_error(baseline_scope: str) -> None:
+    """Raise the standard validation error for an unsupported baseline scope."""
     valid = ", ".join(VALID_BASELINE_SCOPES)
     msg = f"baseline_scope must be one of: {valid}. Got {baseline_scope!r}."
     raise ValueError(msg)
 
 
 def _normalized_key(value: str) -> str:
+    """Remove a known metadata prefix from a nested-map key."""
     normalized = value
     for prefix in ("scenario_", "location_", "user_", "esp_", "trial_"):
         normalized = normalized.removeprefix(prefix)

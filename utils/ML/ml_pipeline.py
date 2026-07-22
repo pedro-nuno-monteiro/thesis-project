@@ -86,6 +86,8 @@ def validate_cross_session_inventory(csv_diagnostics: pd.DataFrame) -> pd.DataFr
         raise ValueError("No trial-02 CSV recordings were discovered.")
     print(f"[cross_session inventory] discovered trial-02 users: {', '.join(test_users)}")
 
+    # Compare the two session inventories at both user-band and individual
+    # recording levels so a mismatch is caught before model fitting.
     rows: list[dict[str, Any]] = []
     failures: list[str] = []
     for user in test_users:
@@ -215,6 +217,7 @@ def load_feature_dataframes(
     """Build or load cached feature dataframes for every requested band."""
 
     def _build_feature_dataframes() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Process magnitude data and build all frequency feature DataFrames."""
         processed, _ = process_magnitude_data(magnitude_data, **preproc_opts)
         return build_frequency_feature_dataframes(processed, **feat_opts)
 
@@ -317,6 +320,7 @@ def load_or_build_none_reference_features(
     print(f"[normalization diagnostic] none reference cache: {none_cache_path}")
 
     def _build_none_dataframes() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Build reference DataFrames without magnitude normalization."""
         processed, _ = process_magnitude_data(magnitude_data, **none_preproc_opts)
         return build_frequency_feature_dataframes(processed, **feat_opts)
 
@@ -391,6 +395,8 @@ def run_optional_grid_search(  # noqa: PLR0913
 
     all_grid_rows = []
     best_rows = []
+    # Use one fixed block split per band, then evaluate all model combinations on
+    # that same train/test partition.
     for band in bands_to_run:
         if band not in feature_dataframes:
             msg = f"No feature dataframe found for band {band!r}."
@@ -462,6 +468,8 @@ def run_global_baselines(  # noqa: PLR0913
     lovo_summary_rows = []
     lovo_fold_user_ids: dict[str, list[str]] = {}
 
+    # Coordinate each requested band/model/protocol combination while delegating
+    # fitting and fold logic to the experiment helpers below.
     for band in bands_to_run:
         if band not in feature_dataframes:
             msg = f"No feature dataframe found for band {band!r}."
@@ -501,6 +509,8 @@ def run_global_baselines(  # noqa: PLR0913
                 )
                 write_run_manifest(run_id, full_config, results_root=results_dir)
                 if split_mode == "lovo":
+                    # LOVO owns its fold loop and returns both fold-level and
+                    # aggregate metrics for the shared result contract.
                     predictions, per_fold_metrics, metrics = run_global_lovo_experiment(
                         dataframe,
                         dataset_name=band,
@@ -571,6 +581,8 @@ def run_global_baselines(  # noqa: PLR0913
                     }
                 )
 
+                # Reconstruct protocol folds to record exact train/test counts and
+                # trial provenance beside the already computed metrics.
                 protocol_split = split_dataframe(
                     dataframe,
                     test_size=test_size,
@@ -736,6 +748,8 @@ def master_results_table(
     summary_path: Path | None = None,
 ) -> pd.DataFrame:
     """Build the model x band master metrics table from predictions."""
+    # Recompute scientific metrics from prediction rows; the optional run table
+    # contributes timing and fold-spread metadata only.
     rows = []
     for (model, band, split_mode), group in predictions.groupby(
         ["model", "dataset", "split_mode"],
@@ -947,6 +961,7 @@ def best_confusion_predictions(
 
 
 def _metrics_for_prediction_group(group: pd.DataFrame, *, split_mode: str) -> dict[str, float]:
+    """Compute shared metrics, averaging LOVO folds without pooling their weights."""
     if split_mode == "lovo" and "held_out_user" in group.columns:
         fold_rows = [
             compute_localization_metrics(fold_group)
@@ -973,6 +988,7 @@ def _metrics_for_prediction_group(group: pd.DataFrame, *, split_mode: str) -> di
 
 
 def _assert_no_empty_room_rows(df: pd.DataFrame, *, band: str) -> None:
+    """Ensure Z-0 calibration recordings did not enter an ML feature table."""
     if "location" not in df.columns:
         return
     empty_mask = df["location"].astype(str).str.upper() == "Z-0"
@@ -985,6 +1001,7 @@ def _assert_no_empty_room_rows(df: pd.DataFrame, *, band: str) -> None:
 
 
 def _format_lovo_master_rows(table: pd.DataFrame) -> pd.DataFrame:
+    """Format LOVO mean and standard deviation pairs for the master result table."""
     if table.empty or "split" not in table.columns:
         return table
     metric_names = [
@@ -1023,6 +1040,7 @@ def _build_lovo_manifest_metadata(
     bands_to_run: tuple[str, ...],
     enabled: bool,
 ) -> dict[str, Any] | None:
+    """Build manifest metadata describing LOVO folds and hyperparameters."""
     if not enabled:
         return None
     return {
@@ -1041,6 +1059,7 @@ def _build_lovo_manifest_metadata(
 
 
 def _format_mean_std(mean_value: object, std_value: object) -> str:
+    """Format a numeric mean and standard deviation for result tables."""
     mean_float = pd.to_numeric(pd.Series([mean_value]), errors="coerce").iloc[0]
     std_float = pd.to_numeric(pd.Series([std_value]), errors="coerce").iloc[0]
     if pd.isna(mean_float) or pd.isna(std_float):
@@ -1048,6 +1067,7 @@ def _format_mean_std(mean_value: object, std_value: object) -> str:
     return f"{float(mean_float):.4f} +/- {float(std_float):.4f}"
 
 def _package_version(name: str) -> str:
+    """Return an installed package version or ``unknown`` when unavailable."""
     try:
         return importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
@@ -1067,6 +1087,7 @@ def _grid_search_model_band(  # noqa: PLR0913
     row_spacing: float,
     column_spacing: float,
 ) -> list[dict[str, Any]]:
+    """Evaluate every configured parameter combination for one model and band."""
     base_params = default_params_for(model, band)
     if model == "SVM":
         base_params["kernel"] = svm_kernel
@@ -1076,6 +1097,8 @@ def _grid_search_model_band(  # noqa: PLR0913
     print(f"[grid] {band} / {model}: {len(combos)} combinations")
 
     rows = []
+    # Fit and evaluate each explicit combination on the same fixed split so the
+    # resulting rows remain directly comparable.
     for combo_idx, values in enumerate(combos, start=1):
         params = {**base_params, **dict(zip(param_names, values))}
         estimator = build_estimator(model, params, random_state, n_jobs)
@@ -1128,6 +1151,7 @@ def _single_split(
     random_state: int,
     n_blocks: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return the one block split required by the grid-search workflow."""
     split_result = split_dataframe(
         df,
         test_size=test_size,
@@ -1143,6 +1167,7 @@ def _single_split(
 
 
 def _params_from_tuned_row(row: pd.Series) -> dict[str, Any]:
+    """Extract estimator parameters from a persisted tuning-summary row."""
     metric_columns = {
         "dataset",
         "model",
@@ -1168,6 +1193,7 @@ def _params_from_tuned_row(row: pd.Series) -> dict[str, Any]:
 
 
 def _coerce_param_value(value: Any) -> Any:
+    """Restore booleans and numeric values read from a CSV parameter cell."""
     if value in (None, "", "None"):
         return None
     try:
@@ -1310,6 +1336,8 @@ def split_dataframe(
         msg = "test_size must be between 0 and 1."
         raise ValueError(msg)
 
+    # Cross-session and LOVO define complete protocols and therefore dispatch
+    # before the single-split strategies below.
     if split_mode == "cross_session":
         return split_cross_session(df)
 
@@ -1327,6 +1355,8 @@ def split_dataframe(
 
     _validate_required_columns(df, {"group_id"})
 
+    # The remaining branches differ only in how row indices are selected; each
+    # returns the same train/test DataFrame contract.
     if split_mode == "group":
         _validate_required_columns(df, {"label"})
         if df["group_id"].nunique() < MIN_GROUP_SPLIT_COUNT:
@@ -1402,6 +1432,7 @@ def run_global_position_experiment(  # noqa: PLR0913
     resolved_model_name = model_name.upper()
     resolved_params = dict(params)
 
+    # LOVO requires its own fold loop and cache aggregation path.
     if split_mode == "lovo":
         predictions, _, metrics = run_global_lovo_experiment(
             df,
@@ -1420,6 +1451,8 @@ def run_global_position_experiment(  # noqa: PLR0913
         )
         return None, predictions, metrics
 
+    # Resolve the protocol split before checking caches because the fingerprints
+    # are part of cache validity.
     split_result = split_dataframe(
         df,
         test_size=test_size,
@@ -1441,6 +1474,8 @@ def run_global_position_experiment(  # noqa: PLR0913
         column_spacing=column_spacing,
     )
 
+    # Reuse predictions only when estimator settings and both split fingerprints
+    # match the current experiment exactly.
     if results_dir is not None and not force_retrain:
         expected_metadata = prediction_cache_metadata(
             model=resolved_model_name,
@@ -1476,6 +1511,7 @@ def run_global_position_experiment(  # noqa: PLR0913
 
     columns = feature_columns(train_df)
 
+    # Construct and fit the requested classical estimator on feature columns only.
     model = build_estimator(resolved_model_name, resolved_params, random_state, n_jobs)
     if resolved_model_name == "SVM":
         print("[SVM] sklearn SVC is single-threaded; n_jobs is not used by SVC.")
@@ -1610,6 +1646,8 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
 
     resolved_model_name = model_name.upper()
     resolved_params = dict(params)
+    # Build the complete user folds once so cache fingerprints, warnings, and
+    # aggregation all refer to the same protocol.
     folds = split_lovo_folds(df)
     protocol_df = pd.concat([test_df for _, test_df in folds], axis=0).sort_index()
     held_out_users = [_held_out_user(test_df) for _, test_df in folds]
@@ -1621,6 +1659,8 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
         "hyperparameters; no nested CV is run for LOVO."
     )
 
+    # Accept cached predictions only when the complete train/test fold collection
+    # matches the current dataset.
     if result_path is not None and not force_retrain:
         cached_predictions = _load_lovo_cached_predictions(
             result_path,
@@ -1659,6 +1699,8 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
     fold_metric_rows: list[dict[str, Any]] = []
     total_started_at = time.perf_counter()
 
+    # Fit one independent estimator per held-out user and retain fold-level
+    # predictions so variation is not hidden by pooling.
     for fold_index, ((train_df, test_df), held_out_user) in enumerate(
         zip(folds, held_out_users),
         start=1,
@@ -1772,6 +1814,8 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
         )
         raise RuntimeError(msg)
 
+    # Aggregate fold statistics only after verifying every filtered window has one
+    # prediction.
     per_fold_metrics = pd.DataFrame(fold_metric_rows)
     aggregated_metrics = _aggregate_lovo_metrics(
         per_fold_metrics,
@@ -1829,6 +1873,7 @@ def _load_lovo_cached_predictions(
     run_id: str | None,
     save_prediction_cache: bool,
 ) -> pd.DataFrame | None:
+    """Load a valid concatenated LOVO cache or reconstruct it from fold caches."""
     concat_metadata = prediction_cache_metadata(
         model=model_name,
         band=dataset_name,
@@ -1840,6 +1885,8 @@ def _load_lovo_cached_predictions(
         train_fingerprint=_fold_collection_fingerprint(folds, side="train"),
         test_fingerprint=_fold_collection_fingerprint(folds, side="test"),
     )
+    # Prefer the single concatenated cache because its fingerprints cover the
+    # complete fold collection.
     cached_concat = load_predictions(
         results_dir,
         model_name,
@@ -1854,6 +1901,7 @@ def _load_lovo_cached_predictions(
             return None
         return cached_concat
 
+    # Fall back only when every individual fold cache is present and valid.
     fold_frames = []
     for held_out_user, (train_df, test_df) in zip(held_out_users, folds):
         fold_label = _lovo_fold_label(held_out_user)
@@ -1905,6 +1953,7 @@ def _lovo_metrics_from_predictions(
     row_spacing: float = DEFAULT_ROW_SPACING,
     column_spacing: float = DEFAULT_COLUMN_SPACING,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
+    """Reconstruct per-fold and aggregate LOVO metrics from prediction rows."""
     _validate_required_columns(predictions, {"held_out_user"})
     majority_by_user: dict[object, dict[str, float]] = {}
     if folds is not None:
@@ -1940,6 +1989,7 @@ def _aggregate_lovo_metrics(
     *,
     pooled_predictions: pd.DataFrame,
 ) -> dict[str, float]:
+    """Summarize fold metrics and retain a separate pooled accuracy diagnostic."""
     metric_names = [
         "position_accuracy",
         "macro_f1",
@@ -1979,6 +2029,7 @@ def _print_lovo_honesty_warnings(
     *,
     dataset_name: str,
 ) -> None:
+    """Report positions whose user coverage limits honest LOVO evaluation."""
     location_user_counts = df.groupby("location", sort=True)["user"].nunique()
     singleton_positions = sorted(location_user_counts[location_user_counts == 1].index.astype(str))
     if singleton_positions:
@@ -2019,6 +2070,7 @@ def _print_lovo_honesty_warnings(
 
 
 def _held_out_user(test_df: pd.DataFrame) -> object:
+    """Return the single user represented by a LOVO test fold."""
     users = test_df["user"].dropna().unique()
     if len(users) != 1:
         msg = f"Expected exactly one held-out user, got {users!r}."
@@ -2027,6 +2079,7 @@ def _held_out_user(test_df: pd.DataFrame) -> object:
 
 
 def _lovo_fold_label(held_out_user: object) -> str:
+    """Build the stable cache label for a held-out user."""
     return f"user-{held_out_user}"
 
 
@@ -2035,6 +2088,7 @@ def _fold_collection_fingerprint(
     *,
     side: Literal["train", "test"],
 ) -> str:
+    """Fingerprint all train or test window identities in a fold collection."""
     frames = [train_df if side == "train" else test_df for train_df, test_df in folds]
     return _window_identity_fingerprint(pd.concat(frames, ignore_index=True))
 
@@ -2046,6 +2100,7 @@ def _split_dataframe_by_blocks(
     random_state: int,
     n_blocks: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split each recording into deterministic train/test temporal blocks."""
     if n_blocks < 1:
         msg = "n_blocks must be at least 1 for block split mode."
         raise ValueError(msg)
@@ -2057,6 +2112,8 @@ def _split_dataframe_by_blocks(
     train_locs: list[int] = []
     test_locs: list[int] = []
 
+    # Assign blocks independently within each recording and remove windows at
+    # train/test boundaries to reduce overlap leakage.
     for group_id in df["group_id"].unique():
         session_pos = np.flatnonzero(group_ids == group_id)
         sort_order = np.argsort(window_idxs[session_pos], kind="stable")
@@ -2090,11 +2147,13 @@ def _split_dataframe_by_blocks(
 
 
 def _estimator_name(model: Pipeline) -> str:
+    """Return the fitted classifier class name from a scikit-learn pipeline."""
     classifier = model.named_steps.get("classifier")
     return type(classifier).__name__ if classifier is not None else type(model).__name__
 
 
 def _validate_grid_spacing(*, row_spacing: float, column_spacing: float) -> None:
+    """Require finite, positive physical spacing along both grid axes."""
     if not np.isfinite(row_spacing) or row_spacing <= 0:
         msg = "row_spacing must be a finite positive value."
         raise ValueError(msg)
@@ -2104,6 +2163,7 @@ def _validate_grid_spacing(*, row_spacing: float, column_spacing: float) -> None
 
 
 def _validate_training_dataframe(df: pd.DataFrame) -> None:
+    """Validate metadata, rows, and feature columns before model fitting."""
     _validate_required_columns(df, METADATA_COLUMNS)
     if df.empty:
         msg = "Cannot train on an empty dataframe."
@@ -2114,6 +2174,7 @@ def _validate_training_dataframe(df: pd.DataFrame) -> None:
 
 
 def _validate_required_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
+    """Raise a clear error when an ML DataFrame lacks required columns."""
     missing_columns = sorted(required_columns - set(df.columns))
     if missing_columns:
         msg = f"Missing required columns: {', '.join(missing_columns)}"
@@ -2121,6 +2182,7 @@ def _validate_required_columns(df: pd.DataFrame, required_columns: set[str]) -> 
 
 
 def _normalized_trial_values(values: pd.Series) -> pd.Series:
+    """Normalize trial identifiers to two-digit strings."""
     return (
         values.astype(str)
         .str.removeprefix("trial_")
@@ -2136,6 +2198,7 @@ def _print_protocol_split(
     *,
     fold: object | None = None,
 ) -> None:
+    """Print the users, trials, and sizes defining an experiment split."""
     combined = pd.concat([train_df, test_df], ignore_index=True)
     trials = (
         sorted(_normalized_trial_values(combined["trial"]).unique())

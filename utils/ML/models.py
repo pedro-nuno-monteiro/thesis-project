@@ -7,7 +7,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.svm import LinearSVC, SVC
+from sklearn.svm import SVC, LinearSVC
 
 DEFAULT_PARAMS: dict[str, dict[str, dict[str, Any]]] = {
     "RF": {
@@ -87,6 +87,8 @@ def build_estimator(
     model_name = name.upper()
     model_params = dict(params)
 
+    # Tree models operate directly on the statistical features, matching the
+    # established RF baseline without introducing scaling.
     if model_name == "RF":
         estimator = RandomForestClassifier(
             n_estimators=int(model_params.pop("n_estimators", 300)),
@@ -101,6 +103,8 @@ def build_estimator(
         )
         return Pipeline([("classifier", estimator)])
 
+    # Distance- and margin-based models fit their scaler inside the pipeline so
+    # test data never influences feature scaling.
     if model_name == "KNN":
         estimator = KNeighborsClassifier(
             n_neighbors=int(model_params.pop("n_neighbors", 5)),

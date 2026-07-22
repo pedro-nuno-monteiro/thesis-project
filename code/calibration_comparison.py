@@ -44,9 +44,12 @@ def build_calibration_comparison(  # noqa: PLR0913
     overlap_size: int = 30,
     require_all_esps: bool = True,
 ) -> dict[CalibrationMode, CalibrationComparisonResult]:
+    """Build comparable magnitude and feature artifacts for each calibration mode."""
     results: dict[CalibrationMode, CalibrationComparisonResult] = {}
 
     for mode in calibration_modes:
+        # Re-run the same loading and processing stages with only the CSI
+        # calibration mode changed, keeping downstream feature settings fixed.
         magnitudes, cache_stats = process_csv_files(
             data_files,
             max_workers=max_workers,
@@ -62,6 +65,8 @@ def build_calibration_comparison(  # noqa: PLR0913
             magnitudes,
             normalization="none",
         )
+        # Build every frequency view from the calibrated magnitudes so callers can
+        # compare modes without duplicating pipeline calls.
         features_24ghz, features_5ghz, features_fusion = build_frequency_feature_dataframes(
             processed_magnitudes,
             window_size=window_size,
