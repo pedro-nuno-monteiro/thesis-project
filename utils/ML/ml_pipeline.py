@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import gc
 import hashlib
-import itertools
 import time
+from math import prod
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.model_selection import (
+    GridSearchCV,
+    GroupKFold,
+    GroupShuffleSplit,
+    train_test_split,
+)
 from sklearn.pipeline import Pipeline
 
 from utils.cache import (
-    RESULTS_ROOT,
     get_all_dataframes,
     get_cache_path,
     get_results_path,
@@ -34,9 +38,7 @@ from utils.results import (
     build_run_row,
     compute_localization_metrics,
     derive_table_from_runs,
-    location_distance_error,
     majority_class_baselines,
-    room_label_for_location,
     upsert_fold_rows,
     upsert_run,
     write_run_manifest,
@@ -343,32 +345,73 @@ def median_fisher_ratio(df: pd.DataFrame) -> float:
     return float(pd.to_numeric(ratios, errors="coerce").median(skipna=True))
 
 
-def load_params_lookup(
-    tuned_summary_path: Path,
+GRID_CV_SPLITS = 5
+GRID_GROUP_COLUMN = "group_id"
+GRID_SCORING = "accuracy"
+
+
+def load_params_lookup(  # noqa: PLR0913
+    results_dir: Path,
     *,
     models_to_run: tuple[str, ...],
     bands_to_run: tuple[str, ...],
-    svm_kernel: str,
+    preproc_opts: dict[str, Any],
+    feat_opts: dict[str, Any],
+    require_tuned_params: bool,
+    test_size: float,
+    random_state: int,
+    n_blocks: int,
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    """Load tuned params when available; otherwise use model defaults."""
-    tuned = None
-    if tuned_summary_path.exists():
-        tuned = pd.read_csv(tuned_summary_path)
-        print(f"Loaded tuned hyperparameters from {tuned_summary_path}")
-    else:
-        print(f"WARNING: {tuned_summary_path} not found. Using DEFAULT_PARAMS.")
+    """Load exact grid-search parameters from runs.csv or explicitly use defaults."""
+    runs_path = Path(results_dir) / "runs.csv"
+    runs = pd.read_csv(runs_path) if runs_path.exists() else pd.DataFrame()
+    lookup: dict[tuple[str, str], dict[str, Any]] = {}
 
-    lookup = {}
     for model in models_to_run:
+        model_name = model.upper()
         for band in bands_to_run:
-            params = default_params_for(model, band)
-            if model == "SVM":
-                params["kernel"] = svm_kernel
-            if tuned is not None:
-                row = tuned.loc[(tuned["dataset"] == band) & (tuned["model"] == model)]
-                if not row.empty:
-                    params.update(_params_from_tuned_row(row.iloc[0]))
-            lookup[(model, band)] = params
+            expected_run_id, _ = _grid_search_identity(
+                model=model_name,
+                band=band,
+                preproc_opts=preproc_opts,
+                feat_opts=feat_opts,
+                test_size=test_size,
+                random_state=random_state,
+                n_blocks=n_blocks,
+            )
+            matches = (
+                runs.loc[runs["run_id"].astype(str) == expected_run_id].copy()
+                if "run_id" in runs.columns
+                else pd.DataFrame()
+            )
+            if matches.empty:
+                message = (
+                    "No tuned grid-search parameters exist for the exact current "
+                    f"configuration: model={model_name}, band={band}, "
+                    f"expected_run_id={expected_run_id}, runs_csv={runs_path}."
+                )
+                if require_tuned_params:
+                    raise LookupError(f"STRICT TUNED-PARAMETER LOOKUP FAILED: {message}")
+                border = "!" * 96
+                print(f"\n{border}")
+                print("!!! NO EXACT TUNED PARAMETERS - USING DEFAULT_PARAMS !!!")
+                print(message)
+                print(f"{border}\n")
+                lookup[(model, band)] = default_params_for(model_name, band)
+                continue
+
+            if "timestamp" in matches.columns:
+                matches = matches.sort_values("timestamp", kind="stable")
+            matched_row = matches.iloc[-1]
+            lookup[(model, band)] = _params_from_grid_search_row(
+                matched_row,
+                model=model_name,
+                band=band,
+            )
+            print(
+                f"[tuned params] exact runs.csv match: {model_name} / {band} / "
+                f"run_id={expected_run_id}"
+            )
     return lookup
 
 
@@ -376,67 +419,59 @@ def run_optional_grid_search(  # noqa: PLR0913
     feature_dataframes: dict[str, pd.DataFrame],
     *,
     run_grid_search: bool,
-    tuned_summary_path: Path,
-    grid_log_path: Path,
+    results_dir: Path,
+    preproc_opts: dict[str, Any],
+    feat_opts: dict[str, Any],
     models_to_run: tuple[str, ...],
     bands_to_run: tuple[str, ...],
-    svm_kernel: str,
     test_size: float,
     random_state: int,
     n_blocks: int,
-    n_jobs: int,
     row_spacing: float,
     column_spacing: float,
 ) -> bool:
-    """Run the gated direct test-set grid search and return True when it ran."""
+    """Run leakage-safe GroupKFold searches behind the existing notebook gate."""
     if not run_grid_search:
         return False
+    if not 0 < test_size < 1:
+        raise ValueError("test_size must be between 0 and 1.")
 
-    all_grid_rows = []
-    best_rows = []
-    # Use one fixed block split per band, then evaluate all model combinations on
-    # that same train/test partition.
     for band in bands_to_run:
         if band not in feature_dataframes:
-            msg = f"No feature dataframe found for band {band!r}."
-            raise KeyError(msg)
-        train_df, test_df = _single_split(
+            raise KeyError(f"No feature dataframe found for band {band!r}.")
+
+        # Preserve the established temporal block split as the untouched outer
+        # train/test boundary; only the outer training side enters GridSearchCV.
+        protocol_df = filter_training_protocol_trials(
             feature_dataframes[band],
+            split_mode="grid_search",
+        )
+        train_df, test_df = _split_dataframe_by_blocks(
+            protocol_df,
             test_size=test_size,
             random_state=random_state,
             n_blocks=n_blocks,
         )
+        _print_protocol_split("grid_search_outer_block", train_df, test_df)
+        _assert_block_split_integrity(protocol_df, train_df, test_df, band=band)
         columns = feature_columns(train_df)
 
         for model in models_to_run:
-            model_rows = _grid_search_model_band(
+            _grid_search_model_band(
                 train_df,
                 test_df,
                 columns,
                 band=band,
-                model=model,
-                svm_kernel=svm_kernel,
+                model=model.upper(),
+                preproc_opts=preproc_opts,
+                feat_opts=feat_opts,
+                results_dir=Path(results_dir),
+                test_size=test_size,
                 random_state=random_state,
-                n_jobs=n_jobs,
+                n_blocks=n_blocks,
                 row_spacing=row_spacing,
                 column_spacing=column_spacing,
             )
-            all_grid_rows.extend(model_rows)
-            best_rows.append(max(model_rows, key=lambda row: row["position_accuracy"]))
-            tuning_path = (
-                RESULTS_ROOT
-                / "tuning"
-                / f"{model.lower()}__{band.lower().replace('.', '_').replace(' ', '')}__grid.csv"
-            )
-            tuning_path.parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame(model_rows).to_csv(tuning_path, index=False)
-            print(f"Wrote model/band grid log to {tuning_path}")
-
-    grid_log_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(all_grid_rows).to_csv(grid_log_path, index=False)
-    pd.DataFrame(best_rows).to_csv(tuned_summary_path, index=False)
-    print(f"Wrote full grid log to {grid_log_path}")
-    print(f"Wrote tuned summary to {tuned_summary_path}")
     return True
 
 
@@ -1040,122 +1075,354 @@ def _format_mean_std(mean_value: object, std_value: object) -> str:
         return "nan"
     return f"{float(mean_float):.4f} +/- {float(std_float):.4f}"
 
-def _grid_search_model_band(  # noqa: PLR0913
+
+def _grid_search_model_band(  # noqa: PLR0913, PLR0914
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     columns: list[str],
     *,
     band: str,
     model: str,
-    svm_kernel: str,
-    random_state: int,
-    n_jobs: int,
-    row_spacing: float,
-    column_spacing: float,
-) -> list[dict[str, Any]]:
-    """Evaluate every configured parameter combination for one model and band."""
-    base_params = default_params_for(model, band)
-    if model == "SVM":
-        base_params["kernel"] = svm_kernel
-    grid = PARAM_GRIDS[model]
-    param_names = list(grid)
-    combos = list(itertools.product(*[grid[name] for name in param_names]))
-    print(f"[grid] {band} / {model}: {len(combos)} combinations")
-
-    rows = []
-    # Fit and evaluate each explicit combination on the same fixed split so the
-    # resulting rows remain directly comparable.
-    for combo_idx, values in enumerate(combos, start=1):
-        params = {**base_params, **dict(zip(param_names, values))}
-        estimator = build_estimator(model, params, random_state, n_jobs)
-        if model == "SVM":
-            print("[SVM] sklearn SVC is single-threaded; n_jobs is not used by SVC.")
-        started_at = time.perf_counter()
-        estimator.fit(train_df[columns], train_df["location"].astype(str))
-        fit_seconds = time.perf_counter() - started_at
-        pred_positions = estimator.predict(test_df[columns])
-        pred_rooms = np.array([room_label_for_location(pos) for pos in pred_positions])
-        distances = [
-            location_distance_error(
-                true_pos,
-                pred_pos,
-                row_spacing=row_spacing,
-                column_spacing=column_spacing,
-            )
-            for true_pos, pred_pos in zip(test_df["location"], pred_positions)
-        ]
-        pred_df = pd.DataFrame(
-            {
-                "true_position": test_df["location"].astype(str).to_numpy(),
-                "pred_position": pred_positions,
-                "true_room": np.array(
-                    [room_label_for_location(pos) for pos in test_df["location"]]
-                ),
-                "pred_room": pred_rooms,
-                "distance_error": distances,
-            }
-        )
-        row = {
-            "dataset": band,
-            "model": model,
-            **params,
-            **compute_localization_metrics(pred_df),
-            "fit_seconds": fit_seconds,
-        }
-        rows.append(row)
-        print(
-            f"[grid {combo_idx}/{len(combos)}] {band} / {model} "
-            f"acc={row['position_accuracy']:.4f} fit={fit_seconds:.1f}s"
-        )
-    return rows
-
-
-def _single_split(
-    df: pd.DataFrame,
-    *,
+    preproc_opts: dict[str, Any],
+    feat_opts: dict[str, Any],
+    results_dir: Path,
     test_size: float,
     random_state: int,
     n_blocks: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return the one block split required by the grid-search workflow."""
-    split_result = split_dataframe(
-        df,
+    row_spacing: float,
+    column_spacing: float,
+) -> dict[str, Any]:
+    """Tune one model with GroupKFold and evaluate its refit winner once."""
+    grid = PARAM_GRIDS[model]
+    candidate_count = prod(len(values) for values in grid.values())
+    cv = GroupKFold(n_splits=GRID_CV_SPLITS)
+    cv_fit_count = candidate_count * cv.get_n_splits()
+    refit_count = 1
+    total_fit_count = cv_fit_count + refit_count
+    print(
+        f"[grid start] {band} / {model}: candidate_count={candidate_count}, "
+        f"cv_fit_count={cv_fit_count}"
+    )
+    if model == "SVM" and band == "Fusion":
+        print(
+            "WARNING: a single Fusion SVM fit has previously taken 15+ minutes; "
+            "this GridSearchCV may take a long time. Interrupt it manually if needed."
+        )
+
+    _validate_group_kfold_class_coverage(train_df, cv, band=band, model=model)
+    estimator = build_estimator(
+        model,
+        default_params_for(model, band),
+        random_state,
+        -1,
+    )
+    prefixed_grid = {
+        f"classifier__{parameter}": values for parameter, values in grid.items()
+    }
+    search = GridSearchCV(
+        estimator,
+        param_grid=prefixed_grid,
+        cv=cv,
+        scoring=GRID_SCORING,
+        n_jobs=-1,
+        refit=True,
+    )
+
+    # Only outer-training labels participate in model selection. GridSearchCV's
+    # refit=True performs the single refit on all outer-training rows.
+    search_started = time.perf_counter()
+    search.fit(
+        train_df[columns],
+        train_df["location"].astype(str),
+        groups=train_df[GRID_GROUP_COLUMN],
+    )
+    search_wall_seconds = time.perf_counter() - search_started
+    best_mean_fit_time = float(search.cv_results_["mean_fit_time"][search.best_index_])
+    refit_time = float(search.refit_time_)
+    print(
+        f"[grid complete] {band} / {model}: refit_count={refit_count}, "
+        f"total_fit_count={total_fit_count}, total_wall_seconds={search_wall_seconds:.1f}, "
+        f"mean_fit_time={best_mean_fit_time:.3f}, refit_time={refit_time:.3f}"
+    )
+
+    parameter_names = list(grid)
+    grid_rows = []
+    for result_index, searched_params in enumerate(search.cv_results_["params"]):
+        grid_rows.append(
+            {
+                **{
+                    parameter: searched_params[f"classifier__{parameter}"]
+                    for parameter in parameter_names
+                },
+                "mean_test_score": float(search.cv_results_["mean_test_score"][result_index]),
+                "std_test_score": float(search.cv_results_["std_test_score"][result_index]),
+                "mean_fit_time": float(search.cv_results_["mean_fit_time"][result_index]),
+            }
+        )
+    tuning_path = (
+        Path(results_dir)
+        / "tuning"
+        / f"{model.lower()}__{band.lower().replace('.', '_').replace(' ', '')}__grid.csv"
+    )
+    tuning_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(grid_rows).to_csv(tuning_path, index=False)
+    print(f"[grid log] wrote {tuning_path}")
+
+    # The winning hyperparameters are fixed before test predictions or metrics
+    # are computed; test labels never influence GridSearchCV selection.
+    prediction_started = time.perf_counter()
+    pred_positions = search.best_estimator_.predict(test_df[columns])
+    predict_seconds = time.perf_counter() - prediction_started
+    predictions = build_global_predictions_dataframe(
+        test_df,
+        pred_positions,
+        dataset_name=band,
+        model_name=model,
+        split_mode="grid_search",
+        row_spacing=row_spacing,
+        column_spacing=column_spacing,
+    )
+    metrics = compute_localization_metrics(predictions)
+    metrics.update(
+        majority_class_baselines(
+            train_df,
+            test_df,
+            row_spacing=row_spacing,
+            column_spacing=column_spacing,
+        )
+    )
+    metrics.update(
+        {
+            "test_position_accuracy": metrics["position_accuracy"],
+            "cv_position_accuracy": float(search.best_score_),
+            "candidate_count": int(candidate_count),
+            "cv_fit_count": int(cv_fit_count),
+            "refit_count": refit_count,
+            "total_fit_count": int(total_fit_count),
+            "mean_fit_time": best_mean_fit_time,
+            "refit_time": refit_time,
+            "fit_seconds": float(search_wall_seconds),
+            "predict_seconds": float(predict_seconds),
+            "wall_seconds": float(search_wall_seconds + predict_seconds),
+            "used_estimator": _estimator_name(search.best_estimator_),
+        }
+    )
+    best_params = {
+        parameter: search.best_params_[f"classifier__{parameter}"]
+        for parameter in parameter_names
+    }
+    run_id, _ = _grid_search_identity(
+        model=model,
+        band=band,
+        preproc_opts=preproc_opts,
+        feat_opts=feat_opts,
         test_size=test_size,
         random_state=random_state,
-        split_mode="block",
-        stratify_column="location",
         n_blocks=n_blocks,
     )
-    if isinstance(split_result, list):
-        msg = "Grid search expects one train/test split, not LOVO folds."
-        raise RuntimeError(msg)
-    return split_result
+    trials_used = sorted(
+        {
+            str(trial).removeprefix("trial_").zfill(2)
+            for frame in (train_df, test_df)
+            for trial in frame["trial"].dropna().unique()
+        }
+    )
+    run_row = build_run_row(
+        run_id=run_id,
+        preproc_opts=preproc_opts,
+        feat_opts=feat_opts,
+        hyperparameters=best_params,
+        metrics=metrics,
+        trials_used=trials_used,
+        n_train=len(train_df),
+        n_test=len(test_df),
+        n_classes=pd.concat([train_df, test_df], ignore_index=True)["location"].nunique(),
+        device="cpu",
+    )
+    upsert_run(
+        run_row,
+        hyperparameter_columns=parameter_names,
+        results_root=Path(results_dir),
+    )
+
+    # Follow-up: use nested CV only if a future protocol needs a CV-only estimate.
+    return run_row
 
 
-def _params_from_tuned_row(row: pd.Series) -> dict[str, Any]:
-    """Extract estimator parameters from a persisted tuning-summary row."""
-    metric_columns = {
-        "dataset",
-        "model",
-        "position_accuracy",
-        "macro_f1",
-        "room_accuracy",
-        "mean_distance_error",
-        "median_distance_error",
-        "rmse_distance_error",
-        "p90_distance_error",
-        "samples",
-        "fit_seconds",
-        "used_estimator",
+def _grid_search_identity(  # noqa: PLR0913
+    *,
+    model: str,
+    band: str,
+    preproc_opts: dict[str, Any],
+    feat_opts: dict[str, Any],
+    test_size: float,
+    random_state: int,
+    n_blocks: int,
+) -> tuple[str, dict[str, Any]]:
+    """Return the winner-independent config and deterministic grid-search run ID."""
+    model_name = model.upper()
+    search_config = {
+        "model": model_name,
+        "band": band,
+        "preproc_opts": preproc_opts,
+        "feat_opts": feat_opts,
+        "parameter_grid": PARAM_GRIDS[model_name],
+        "outer_split": {
+            "type": "block",
+            "test_size": test_size,
+            "n_blocks": n_blocks,
+            "trials": list(TRIALS_FOR_TRAINING_PROTOCOLS),
+        },
+        "inner_cv": {
+            "type": "GroupKFold",
+            "n_splits": GRID_CV_SPLITS,
+            "group_column": GRID_GROUP_COLUMN,
+            "scoring": GRID_SCORING,
+            "refit": True,
+            "n_jobs": -1,
+        },
+        "random_state": random_state,
     }
-    params = {}
-    for key, value in row.items():
-        if key in metric_columns:
-            continue
-        coerced = _coerce_param_value(value)
-        if coerced is not None:
-            params[key] = coerced
-    return params
+    run_id = make_run_id(
+        family="ml",
+        model=model_name,
+        band=band,
+        split="grid_search",
+        normalization=str(preproc_opts.get("normalization", "none")),
+        baseline_scope=preproc_opts.get("baseline_scope"),
+        seed=random_state,
+        config=search_config,
+    )
+    return run_id, search_config
+
+
+def _assert_block_split_integrity(
+    source_df: pd.DataFrame,
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    *,
+    band: str,
+) -> None:
+    """Assert exact-window separation and excluded block-boundary neighbors."""
+    identity_columns = ["group_id", "window_idx"]
+    _validate_required_columns(source_df, set(identity_columns))
+
+    train_ids = set(train_df[identity_columns].itertuples(index=False, name=None))
+    test_ids = set(test_df[identity_columns].itertuples(index=False, name=None))
+    overlap = train_ids & test_ids
+    exact_pass = not overlap
+    print(
+        f"[outer block assertion] {band} (a) exact window separation: "
+        f"{'PASS' if exact_pass else 'FAIL'}"
+    )
+
+    boundary_violations: list[str] = []
+    for group_id, group in source_df.groupby("group_id", sort=False):
+        ordered = group.sort_values("window_idx", kind="stable")
+        states = []
+        for identity in ordered[identity_columns].itertuples(index=False, name=None):
+            if identity in train_ids:
+                states.append("train")
+            elif identity in test_ids:
+                states.append("test")
+            else:
+                states.append("excluded")
+        retained = [(index, state) for index, state in enumerate(states) if state != "excluded"]
+        for (left_index, left_state), (right_index, right_state) in zip(
+            retained,
+            retained[1:],
+        ):
+            if left_state == right_state:
+                continue
+            between = states[left_index + 1 : right_index]
+            if len(between) < 2 or any(state != "excluded" for state in between):
+                boundary_violations.append(str(group_id))
+                break
+
+    boundary_pass = not boundary_violations
+    print(
+        f"[outer block assertion] {band} (b) boundary-adjacent windows excluded: "
+        f"{'PASS' if boundary_pass else 'FAIL'}"
+    )
+    if not exact_pass or not boundary_pass:
+        raise ValueError(
+            f"Outer block integrity FAIL for {band}: exact_overlap_count={len(overlap)}, "
+            f"boundary_violation_groups={sorted(boundary_violations)[:10]}."
+        )
+
+
+def _validate_group_kfold_class_coverage(
+    train_df: pd.DataFrame,
+    cv: GroupKFold,
+    *,
+    band: str,
+    model: str,
+) -> None:
+    """Preflight GroupKFold sizes, group counts, and validation-class coverage."""
+    _validate_required_columns(train_df, {GRID_GROUP_COLUMN, "location"})
+    groups = train_df[GRID_GROUP_COLUMN]
+    positions = train_df["location"].astype(str)
+    n_groups = int(groups.nunique())
+    n_positions = int(positions.nunique())
+    n_splits = cv.get_n_splits()
+    if n_groups < n_splits:
+        raise ValueError(
+            f"GroupKFold preflight FAIL for {band}/{model}: n_groups={n_groups}, "
+            f"n_positions={n_positions}, required_splits={n_splits}."
+        )
+
+    for fold_index, (inner_train_index, validation_index) in enumerate(
+        cv.split(np.zeros(len(train_df)), positions, groups),
+        start=1,
+    ):
+        training_positions = set(positions.iloc[inner_train_index])
+        validation_positions = set(positions.iloc[validation_index])
+        training_groups = int(groups.iloc[inner_train_index].nunique())
+        validation_groups = int(groups.iloc[validation_index].nunique())
+        if len(inner_train_index) == 0 or len(validation_index) == 0:
+            raise ValueError(
+                f"GroupKFold preflight FAIL for {band}/{model}, fold={fold_index}: "
+                f"n_train={len(inner_train_index)}, n_validation={len(validation_index)}, "
+                f"training_positions={len(training_positions)}, "
+                f"validation_positions={len(validation_positions)}, "
+                f"training_groups={training_groups}, validation_groups={validation_groups}."
+            )
+        missing_positions = sorted(validation_positions - training_positions)
+        if missing_positions:
+            raise ValueError(
+                f"GroupKFold preflight FAIL for {band}/{model}, fold={fold_index}: "
+                f"validation positions absent from training={missing_positions}; "
+                f"training_positions={len(training_positions)}, "
+                f"validation_positions={len(validation_positions)}, "
+                f"training_groups={training_groups}, validation_groups={validation_groups}."
+            )
+    print(
+        f"[GroupKFold preflight] {band} / {model}: PASS "
+        f"({n_splits} folds, {n_groups} distinct groups)"
+    )
+
+
+def _params_from_grid_search_row(
+    row: pd.Series,
+    *,
+    model: str,
+    band: str,
+) -> dict[str, Any]:
+    """Extract only parameters belonging to the matched model's search space."""
+    parameter_space = PARAM_GRIDS.get(model)
+    if parameter_space is None:
+        parameter_space = default_params_for(model, band)
+    parameter_names = list(parameter_space)
+    missing_parameters = [name for name in parameter_names if name not in row.index]
+    if missing_parameters:
+        raise ValueError(
+            f"Matched grid-search row for {model}/{band} lacks parameters: "
+            f"{missing_parameters}."
+        )
+    return {
+        parameter: _coerce_param_value(row[parameter])
+        for parameter in parameter_names
+    }
 
 
 def _coerce_param_value(value: Any) -> Any:

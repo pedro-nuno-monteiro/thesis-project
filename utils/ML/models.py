@@ -47,18 +47,22 @@ DEFAULT_PARAMS: dict[str, dict[str, dict[str, Any]]] = {
 
 PARAM_GRIDS: dict[str, dict[str, list[Any]]] = {
     "RF": {
-        "n_estimators": [300, 500],
-        "max_features": ["sqrt", "log2"],
-        "min_samples_leaf": [1, 2],
+        "n_estimators": [200, 300, 500, 800],
+        "max_features": ["sqrt", "log2", None],
+        "max_depth": [None, 10, 20, 40],
+        "min_samples_split": [2, 5, 10],
+        "min_samples_leaf": [1, 2, 4],
+        "class_weight": ["balanced", None],
     },
     "KNN": {
-        "n_neighbors": [1, 3, 5, 7, 9],
+        "n_neighbors": [1, 3, 5, 7, 9, 11, 15, 21],
         "weights": ["uniform", "distance"],
-        "metric": ["euclidean", "manhattan"],
+        "metric": ["euclidean", "manhattan", "chebyshev"],
     },
     "SVM": {
-        "C": [1, 10, 100],
-        "gamma": ["scale", 1e-3, 1e-4],
+        "kernel": ["rbf"],
+        "C": [0.1, 1, 10, 100],
+        "gamma": ["scale", "auto", 1e-3, 1e-4],
     },
 }
 
