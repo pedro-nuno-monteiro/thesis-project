@@ -33,7 +33,7 @@ _EXPECTED_METADATA_COLS = {
 _PREDICTION_METADATA_KEY = b"thesis_prediction_cache_metadata"
 _RUN_ID_PATTERN = re.compile(
     r"^(?P<family>ml|dl)__(?P<model>[a-z0-9_]+)__(?P<band>2_4ghz|5ghz|fusion)"
-    r"__(?P<split>block|lovo|cross_session|group|random)"
+    r"__(?P<split>block|lovo|cross_session|group|random|grid_search)"
     r"__(?P<normalization>none|zscore|minmax|packet_minmax|ebl-(?:session|user|global))"
     r"(?:__s(?P<seed>\d+))?__(?P<hash6>[0-9a-f]{6})$"
 )
@@ -187,7 +187,14 @@ def make_run_id(
     if normalized_band not in {"2_4ghz", "5ghz", "fusion"}:
         raise ValueError(f"Unsupported band for run_id: {band!r}.")
     normalized_split = split.strip().lower()
-    if normalized_split not in {"block", "lovo", "cross_session", "group", "random"}:
+    if normalized_split not in {
+        "block",
+        "lovo",
+        "cross_session",
+        "group",
+        "random",
+        "grid_search",
+    }:
         raise ValueError(f"Unsupported split for run_id: {split!r}.")
     normalization_stem = _normalization_stem(normalization, baseline_scope)
     config_hash = hashlib.sha256(

@@ -70,6 +70,8 @@ RUN_PREFIX_COLUMNS = [
 
 RUN_METRIC_COLUMNS = [
     "position_accuracy",
+    "test_position_accuracy",
+    "cv_position_accuracy",
     "macro_f1",
     "room_accuracy",
     "mean_distance_error",
@@ -99,6 +101,12 @@ RUN_METRIC_COLUMNS = [
     "majority_position_accuracy_std",
     "majority_room_accuracy_mean",
     "majority_room_accuracy_std",
+    "candidate_count",
+    "cv_fit_count",
+    "refit_count",
+    "total_fit_count",
+    "mean_fit_time",
+    "refit_time",
     "fit_seconds",
     "predict_seconds",
     "wall_seconds",
