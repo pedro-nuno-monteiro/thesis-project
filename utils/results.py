@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.metadata
 import json
 import re
 import subprocess
@@ -15,7 +14,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import f1_score
 
-from utils.cache import RESULTS_ROOT, parse_run_id
+from utils.cache import RESULTS_ROOT, _lib_version, parse_run_id
 from utils.config import (
     EMPTY_ROOM_LOCATION,
     PROJECT_ROOT,
@@ -472,9 +471,9 @@ def build_run_row(  # noqa: PLR0913
         **_csv_safe_mapping(hyperparameters),
         **metrics,
         "device": device,
-        "torch_version": metrics.get("torch_version", _version("torch")),
-        "sklearn_version": metrics.get("sklearn_version", _version("scikit-learn")),
-        "numpy_version": metrics.get("numpy_version", np.__version__),
+        "torch_version": metrics.get("torch_version", _lib_version("torch")),
+        "sklearn_version": metrics.get("sklearn_version", _lib_version("scikit-learn")),
+        "numpy_version": metrics.get("numpy_version", _lib_version("numpy")),
     }
     return row
 
@@ -730,14 +729,6 @@ def _unique(values: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
-def _version(package: str) -> str:
-    """Return an installed package version or ``unknown`` when unavailable."""
-    try:
-        return importlib.metadata.version(package)
-    except importlib.metadata.PackageNotFoundError:
-        return "unknown"
-
-
 # Legacy paper result exports retained in the shared result module.
 
 def save_summary(df: pd.DataFrame, results_dir: Path, basename: str = "summary") -> None:
@@ -774,14 +765,6 @@ def _git_commit() -> str | None:
         return result.stdout.strip() if result.returncode == 0 else None
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
-
-
-def _lib_version(name: str) -> str:
-    """Return a library version or ``unknown`` when it is not installed."""
-    try:
-        return importlib.metadata.version(name)
-    except importlib.metadata.PackageNotFoundError:
-        return "unknown"
 
 
 def write_manifest(

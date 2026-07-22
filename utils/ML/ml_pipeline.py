@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import gc
 import hashlib
-import importlib.metadata
 import itertools
 import time
 from pathlib import Path
@@ -1040,14 +1039,6 @@ def _format_mean_std(mean_value: object, std_value: object) -> str:
     if pd.isna(mean_float) or pd.isna(std_float):
         return "nan"
     return f"{float(mean_float):.4f} +/- {float(std_float):.4f}"
-
-def _package_version(name: str) -> str:
-    """Return an installed package version or ``unknown`` when unavailable."""
-    try:
-        return importlib.metadata.version(name)
-    except importlib.metadata.PackageNotFoundError:
-        return "unknown"
-
 
 def _grid_search_model_band(  # noqa: PLR0913
     train_df: pd.DataFrame,

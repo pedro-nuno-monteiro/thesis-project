@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import pickle
@@ -368,6 +369,14 @@ def prediction_cache_metadata(
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _lib_version(name: str) -> str:
+    """Return an installed package version or ``unknown`` when unavailable."""
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
 
 def _band_stem(band: str) -> str:
     """'2.4 GHz' → '2_4ghz',  '5 GHz' → '5ghz',  'Fusion' → 'fusion'."""
