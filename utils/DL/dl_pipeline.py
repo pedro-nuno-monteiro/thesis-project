@@ -31,6 +31,7 @@ from utils.cache import (
     save_window_array_metadata,
 )
 from utils.config import (
+    ANCHOR_GROUPS,
     CPU_BATCH_SIZE,
     CPU_NUM_WORKERS,
     CPU_PERSISTENT_WORKERS,
@@ -49,7 +50,6 @@ from utils.feature_pipeline import (
     METADATA_COLUMNS,
     CsiMap,
     FeatureScenario,
-    _esp_keys_for_scenario,
     build_frequency_feature_dataframes,
     iter_window_groups,
 )
@@ -1178,10 +1178,6 @@ def _version_pair(version: str) -> tuple[int, int]:
 
 BandName = Literal["2.4 GHz", "5 GHz", "Fusion"]
 
-BAND_ANCHOR_RANGES: dict[str, tuple[str, ...]] = {
-    "2.4 GHz": _esp_keys_for_scenario("2.4 GHz"),
-    "5 GHz": _esp_keys_for_scenario("5 GHz"),
-}
 DEFAULT_PREPROC_OPTS = {
     "normalization": "empty_baseline",
     "baseline_scope": "per_session",
@@ -1237,7 +1233,7 @@ def build_frequency_window_arrays(
         msg = f"No windows found for {band_name}."
         raise ValueError(msg)
 
-    anchor_order = {band: sorted(BAND_ANCHOR_RANGES[band]) for band in bands}
+    anchor_order = {band: list(ANCHOR_GROUPS[band]) for band in bands}
     subcarrier_counts = _subcarrier_counts(groups, anchor_order)
     shapes = {
         band: (

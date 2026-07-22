@@ -687,6 +687,7 @@ def run_global_baselines(  # noqa: PLR0913
     derive_table_from_runs("global_summary", results_root=results_dir)
     return summary, predictions_by_key
 
+
 def load_all_predictions(
     results_dir: Path,
     *,
@@ -1030,32 +1031,6 @@ def _format_lovo_master_rows(table: pd.DataFrame) -> pd.DataFrame:
                 )
             ]
     return table
-
-
-def _build_lovo_manifest_metadata(
-    fold_user_ids: dict[str, list[str]],
-    *,
-    params_lookup: dict[tuple[str, str], dict[str, Any]],
-    models_to_run: tuple[str, ...],
-    bands_to_run: tuple[str, ...],
-    enabled: bool,
-) -> dict[str, Any] | None:
-    """Build manifest metadata describing LOVO folds and hyperparameters."""
-    if not enabled:
-        return None
-    return {
-        "timestamp": pd.Timestamp.now(tz="UTC").isoformat(),
-        "sklearn_version": _package_version("scikit-learn"),
-        "fold_user_ids": fold_user_ids,
-        "classifier_hyperparameters": {
-            f"{model}:{band}": params_lookup[(model, band)]
-            for model in models_to_run
-            for band in bands_to_run
-        },
-        "hyperparameter_provenance": (
-            "LOVO reuses block-split tuned/default hyperparameters; no nested CV."
-        ),
-    }
 
 
 def _format_mean_std(mean_value: object, std_value: object) -> str:
@@ -1540,6 +1515,8 @@ def run_global_position_experiment(  # noqa: PLR0913
         used_estimator = "LinearSVC_fallback"
 
     predict_started_at = time.perf_counter()
+
+    # inference
     pred_positions = model.predict(test_df[columns])
     predict_seconds = time.perf_counter() - predict_started_at
     predictions = build_global_predictions_dataframe(
@@ -1583,6 +1560,7 @@ def run_global_position_experiment(  # noqa: PLR0913
             ),
         )
 
+    # returns the fitted model, predictions, and metrics for the current split
     return model, predictions, metrics
 
 
@@ -1858,6 +1836,7 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
         f"total_wall={aggregated_metrics['wall_seconds']:.1f}s"
     )
     return predictions, per_fold_metrics, aggregated_metrics
+
 
 def _load_lovo_cached_predictions(
     results_dir: Path,
