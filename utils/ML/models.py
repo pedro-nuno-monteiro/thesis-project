@@ -48,7 +48,7 @@ DEFAULT_PARAMS: dict[str, dict[str, dict[str, Any]]] = {
 PARAM_GRIDS: dict[str, dict[str, list[Any]]] = {
     "RF": {
         "n_estimators": [200, 300, 500, 800],
-        "max_features": ["sqrt", "log2", None],
+        "max_features": ["sqrt", "log2"],
         "max_depth": [None, 10, 20, 40],
         "min_samples_split": [2, 5, 10],
         "min_samples_leaf": [1, 2, 4],
