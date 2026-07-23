@@ -19,6 +19,28 @@ ANCHOR_GROUPS = {
     band: [f"esp_{esp_id:02d}" for esp_id in ESP_IDS_BY_BAND[band]]
     for band in ("2.4 GHz", "5 GHz")
 }
+ROOM_ANCHOR_PAIRS: dict[str, list[tuple[str, str]]] = {
+    "Room 1": [
+        ("esp_07", "esp_17"),
+        ("esp_08", "esp_18"),
+        ("esp_09", "esp_19"),
+        ("esp_10", "esp_20"),
+    ],
+    "Room 2": [
+        ("esp_01", "esp_11"),
+        ("esp_02", "esp_12"),
+        ("esp_03", "esp_13"),
+    ],
+    "Room 3": [
+        ("esp_04", "esp_14"),
+        ("esp_05", "esp_15"),
+    ],
+}
+ROOM_CHANNEL_COUNTS = {
+    room: len(anchor_pairs)
+    for room, anchor_pairs in ROOM_ANCHOR_PAIRS.items()
+}
+
 EXPECTED_SUBCARRIERS = {"2.4 GHz": 50, "5 GHz": 56}
 EXPECTED_ANCHORS = {
     band: len(anchor_group)
@@ -48,6 +70,7 @@ TRIALS_FOR_TRAINING_PROTOCOLS = ("01",)
 SEEDS = (42, 43, 44)
 
 # CNN model parameters
+ARCHITECTURE = "band_branch"  # "band_branch" | "room_stacked"
 CUDA_BATCH_SIZE = 256
 CUDA_NUM_WORKERS = 8
 CUDA_PIN_MEMORY = True
