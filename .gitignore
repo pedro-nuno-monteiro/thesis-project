@@ -224,4 +224,5 @@ results/window_arrays/
 # but DO keep the small outputs
 !results/predictions/*.parquet
 !results/*.csv
+!results/tuning/*.csv
 !results/plots/*.pdf
