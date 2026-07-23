@@ -60,6 +60,10 @@ CPU_NUM_WORKERS = 0
 CPU_PIN_MEMORY = False
 CPU_PERSISTENT_WORKERS = False
 
+# Classical ML grid-search execution and diagnostic settings
+GRID_SEARCH_N_JOBS = 4
+GRID_SEARCH_HEARTBEAT_SECONDS = 60.0
+
 MAX_EPOCH_SECONDS = 3600.0
 
 PLOT_DPI = 200
