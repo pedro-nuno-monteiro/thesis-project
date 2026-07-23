@@ -5,6 +5,7 @@ import hashlib
 import time
 from math import prod
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any, Literal
 
 import numpy as np
@@ -13,6 +14,7 @@ from sklearn.model_selection import (
     GridSearchCV,
     GroupKFold,
     GroupShuffleSplit,
+    ParameterGrid,
     train_test_split,
 )
 from sklearn.pipeline import Pipeline
@@ -27,7 +29,11 @@ from utils.cache import (
     predictions_path,
     save_predictions,
 )
-from utils.config import TRIALS_FOR_TRAINING_PROTOCOLS
+from utils.config import (
+    GRID_SEARCH_HEARTBEAT_SECONDS,
+    GRID_SEARCH_N_JOBS,
+    TRIALS_FOR_TRAINING_PROTOCOLS,
+)
 from utils.csi_processing import process_magnitude_data
 from utils.feature_pipeline import build_frequency_feature_dataframes, iter_window_groups
 from utils.import_data import get_csv_files, sort_meta_info
@@ -348,6 +354,77 @@ def median_fisher_ratio(df: pd.DataFrame) -> float:
 GRID_CV_SPLITS = 5
 GRID_GROUP_COLUMN = "group_id"
 GRID_SCORING = "accuracy"
+
+
+class _GridSearchProgressCallback:
+    """Print the exact candidate and fold immediately before each CV fit."""
+
+    def __init__(self, *, band: str, model: str, n_splits: int) -> None:
+        """Store the labels needed to make parallel fit messages unambiguous."""
+        self.band = band
+        self.model = model
+        self.n_splits = n_splits
+        self._heartbeat_stop: Event | None = None
+        self._heartbeat_thread: Thread | None = None
+
+    def setup(self, estimator: GridSearchCV, context: Any) -> None:
+        """Leave callback setup empty because progress is written directly."""
+
+    def on_fit_task_begin(
+        self,
+        estimator: GridSearchCV,
+        context: Any,
+    ) -> None:
+        """Print a flushed START line for each candidate/fold evaluation."""
+        if context.task_name != "candidate-split-evaluation":
+            return
+        # GridSearchCV assigns consecutive task IDs to every fold of a candidate.
+        candidate_index, fold_index = divmod(context.task_id, self.n_splits)
+        parameter_grid = ParameterGrid(estimator.param_grid)
+        parameters = {
+            name.removeprefix("classifier__"): value
+            for name, value in parameter_grid[candidate_index].items()
+        }
+        active_fit = (
+            f"[grid fit START] {self.band} / {self.model}: "
+            f"candidate={candidate_index + 1}/{len(parameter_grid)}, "
+            f"fold={fold_index + 1}/{self.n_splits}, params={parameters}"
+        )
+        print(active_fit, flush=True)
+
+        # Keep naming the active candidate while a long-running fit is silent.
+        self._heartbeat_stop = Event()
+        self._heartbeat_thread = Thread(
+            target=self._print_heartbeat,
+            args=(active_fit, self._heartbeat_stop),
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def on_fit_task_end(
+        self,
+        estimator: GridSearchCV,
+        context: Any,
+    ) -> None:
+        """Stop the heartbeat and leave completion timing to verbose output."""
+        if self._heartbeat_stop is not None:
+            self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=1.0)
+        self._heartbeat_stop = None
+        self._heartbeat_thread = None
+
+    def teardown(self, estimator: GridSearchCV, context: Any) -> None:
+        """Leave callback teardown empty because it owns no external state."""
+
+    @staticmethod
+    def _print_heartbeat(active_fit: str, stop_event: Event) -> None:
+        """Repeat the active fit identity until that candidate/fold finishes."""
+        while not stop_event.wait(GRID_SEARCH_HEARTBEAT_SECONDS):
+            print(
+                active_fit.replace("[grid fit START]", "[grid fit HEARTBEAT]"),
+                flush=True,
+            )
 
 
 def load_params_lookup(  # noqa: PLR0913
@@ -1101,7 +1178,8 @@ def _grid_search_model_band(  # noqa: PLR0913, PLR0914
     total_fit_count = cv_fit_count + refit_count
     print(
         f"[grid start] {band} / {model}: candidate_count={candidate_count}, "
-        f"cv_fit_count={cv_fit_count}"
+        f"cv_fit_count={cv_fit_count}, n_jobs={GRID_SEARCH_N_JOBS}, "
+        "verbose=3, pre_dispatch=2*n_jobs"
     )
     if model == "SVM" and band == "Fusion":
         print(
@@ -1114,18 +1192,28 @@ def _grid_search_model_band(  # noqa: PLR0913, PLR0914
         model,
         default_params_for(model, band),
         random_state,
-        -1,
+        GRID_SEARCH_N_JOBS,
     )
     prefixed_grid = {
         f"classifier__{parameter}": values for parameter, values in grid.items()
     }
+    # scikit-learn 1.9 does not expose joblib's per-task timeout through
+    # GridSearchCV; pre_dispatch bounds queued work without custom process logic.
     search = GridSearchCV(
         estimator,
         param_grid=prefixed_grid,
         cv=cv,
         scoring=GRID_SCORING,
-        n_jobs=-1,
+        n_jobs=GRID_SEARCH_N_JOBS,
         refit=True,
+        verbose=3,
+        pre_dispatch="2*n_jobs",
+    ).set_callbacks(
+        _GridSearchProgressCallback(
+            band=band,
+            model=model,
+            n_splits=cv.get_n_splits(),
+        )
     )
 
     # Only outer-training labels participate in model selection. GridSearchCV's
@@ -1279,7 +1367,7 @@ def _grid_search_identity(  # noqa: PLR0913
             "group_column": GRID_GROUP_COLUMN,
             "scoring": GRID_SCORING,
             "refit": True,
-            "n_jobs": -1,
+            "n_jobs": GRID_SEARCH_N_JOBS,
         },
         "random_state": random_state,
     }
