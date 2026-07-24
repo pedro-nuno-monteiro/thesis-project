@@ -13,6 +13,7 @@ from utils.config import (
     CNN_DROPOUT,
     CNN_HEAD_HIDDEN,
     CNN_LATENT_DIM,
+    ROOM_ANCHOR_PAIRS,
 )
 
 
@@ -46,6 +47,10 @@ class BandEncoder(nn.Module):
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Encode a batch of band-specific CSI windows."""
         return self.features(inputs)
+
+
+class RoomEncoder(BandEncoder):
+    """Encode one room's anchor-pair channels with the unchanged band encoder."""
 
 
 def _safe_branch_name(name: str) -> str:
@@ -86,5 +91,55 @@ class DualBandCNN(nn.Module):
         """Encode each band, concatenate its latent vector, and predict logits."""
         latents = [
             self.branches[_safe_branch_name(band)](inputs[band]) for band in self._order
+        ]
+        return self.head(torch.cat(latents, dim=1))
+
+
+class RoomStackedCNN(nn.Module):
+    """Encode fixed room branches and fuse their latent representations."""
+
+    def __init__(
+        self,
+        branch_channels: dict[str, int],
+        n_classes: int,
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        """Build one unchanged encoder per configured room and a wider fusion head."""
+        super().__init__()
+        params = params or {}
+        expected_rooms = tuple(ROOM_ANCHOR_PAIRS)
+        observed_rooms = set(branch_channels)
+        if observed_rooms != set(expected_rooms):
+            missing = sorted(set(expected_rooms) - observed_rooms)
+            unexpected = sorted(observed_rooms - set(expected_rooms))
+            raise ValueError(
+                "RoomStackedCNN branch_channels must match ROOM_ANCHOR_PAIRS; "
+                f"missing={missing}, unexpected={unexpected}."
+            )
+
+        latent_dim = int(params.get("latent_dim", CNN_LATENT_DIM))
+        head_hidden = int(params.get("head_hidden", CNN_HEAD_HIDDEN))
+        dropout = float(params.get("dropout", CNN_DROPOUT))
+        # The configuration order is authoritative even if the runtime arrays
+        # were supplied through a mapping constructed in a different order.
+        self._order = list(expected_rooms)
+        self.branches = nn.ModuleDict(
+            {
+                _safe_branch_name(room): RoomEncoder(branch_channels[room], params)
+                for room in expected_rooms
+            }
+        )
+        self.head = nn.Sequential(
+            nn.Linear(latent_dim * len(expected_rooms), head_hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(head_hidden, n_classes),
+        )
+
+    def forward(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Concatenate room latents in configured room order and predict logits."""
+        latents = [
+            self.branches[_safe_branch_name(room)](inputs[room])
+            for room in self._order
         ]
         return self.head(torch.cat(latents, dim=1))

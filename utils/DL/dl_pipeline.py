@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import copy
 import gc
+import hashlib
 import json
 import os
 import random
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -32,6 +33,7 @@ from utils.cache import (
 )
 from utils.config import (
     ANCHOR_GROUPS,
+    ARCHITECTURE,
     CPU_BATCH_SIZE,
     CPU_NUM_WORKERS,
     CPU_PERSISTENT_WORKERS,
@@ -42,10 +44,13 @@ from utils.config import (
     CUDA_PIN_MEMORY,
     CUDA_PREFETCH_FACTOR,
     DEFAULT_CNN_PARAMS,
+    EXPECTED_SUBCARRIERS,
+    ROOM_ANCHOR_PAIRS,
+    ROOM_CHANNEL_COUNTS,
     SEEDS,
 )
 from utils.csi_processing import process_magnitude_data
-from utils.DL.models import DualBandCNN
+from utils.DL.models import DualBandCNN, RoomEncoder, RoomStackedCNN
 from utils.feature_pipeline import (
     METADATA_COLUMNS,
     CsiMap,
@@ -74,6 +79,23 @@ from utils.results import (
 )
 
 SplitMode = Literal["block", "lovo", "cross_session"]
+
+
+def resolve_dl_architecture(
+    architecture: str,
+    requested_band: str,
+) -> tuple[Callable[..., tuple[dict[str, np.ndarray], pd.DataFrame]], type[nn.Module], str]:
+    """Resolve the array builder, model class, and result label for one architecture."""
+    if architecture == "room_stacked" and requested_band != "Fusion":
+        raise ValueError(
+            "room_stacked is Fusion-only; got requested_band="
+            f"{requested_band!r}. Do not attempt room_stacked for individual bands."
+        )
+    if architecture == "band_branch":
+        return build_frequency_window_arrays, DualBandCNN, "CNN"
+    if architecture == "room_stacked":
+        return build_room_window_arrays, RoomStackedCNN, "CNN_room"
+    raise ValueError(f"Unknown ARCHITECTURE: {architecture!r}")
 
 
 def prepare_dl_data(
@@ -149,6 +171,7 @@ def run_dl_experiments(  # noqa: PLR0913, PLR0914
     feat_opts: dict[str, Any],
     expected_subcarriers: dict[str, int],
     expected_anchors: dict[str, int],
+    architecture: str = ARCHITECTURE,
     seeds: tuple[int, ...] = SEEDS,
     test_size: float = 0.30,
     random_state: int = 42,
@@ -161,44 +184,72 @@ def run_dl_experiments(  # noqa: PLR0913, PLR0914
         tuple[str, str, int],
         tuple[pd.DataFrame, dict[str, float], pd.DataFrame],
     ] = {}
-    # Build and validate one aligned raw-window representation per requested band.
-    for band in bands:
+    # The room representation is Fusion-only; the resolver remains the single
+    # authority that rejects an incompatible architecture/band request.
+    effective_bands = ("Fusion",) if architecture == "room_stacked" else bands
+    # Build and validate one aligned raw-window representation per effective band.
+    for band in effective_bands:
         print(f"\n=== {band} ===")
-        arrays, meta = build_frequency_window_arrays(
-            processed_magnitude_data,
+        build_arrays_fn, model_cls, model_label = resolve_dl_architecture(
+            architecture,
             band,
-            window_size=int(feat_opts["window_size"]),
-            overlap_size=int(feat_opts["overlap_size"]),
-            require_all_esps=bool(feat_opts["require_all_esps"]),
-            preproc_opts=preproc_opts,
         )
-        for branch_band, array in arrays.items():
-            observed_subcarriers = int(array.shape[2])
-            observed_anchors = int(array.shape[1])
-            print(
-                f"{branch_band}: anchors={observed_anchors}, "
-                f"subcarriers={observed_subcarriers}, windows={array.shape[0]}"
+        if architecture == "room_stacked":
+            # Build/load the normal Fusion representation first and pass its
+            # manifest-backed metadata as the sole room-window inventory.
+            _, fusion_meta = build_frequency_window_arrays(
+                processed_magnitude_data,
+                "Fusion",
+                window_size=int(feat_opts["window_size"]),
+                overlap_size=int(feat_opts["overlap_size"]),
+                require_all_esps=bool(feat_opts["require_all_esps"]),
+                preproc_opts=preproc_opts,
             )
-            if observed_subcarriers != expected_subcarriers[branch_band]:
-                raise RuntimeError(
-                    f"{branch_band} subcarrier count changed: expected "
-                    f"{expected_subcarriers[branch_band]}, observed {observed_subcarriers}"
+            arrays, meta = build_arrays_fn(
+                processed_magnitude_data,
+                fusion_meta=fusion_meta,
+                window_size=int(feat_opts["window_size"]),
+                overlap_size=int(feat_opts["overlap_size"]),
+                require_all_esps=bool(feat_opts["require_all_esps"]),
+                preproc_opts=preproc_opts,
+                model_params=params,
+            )
+        else:
+            arrays, meta = build_arrays_fn(
+                processed_magnitude_data,
+                band,
+                window_size=int(feat_opts["window_size"]),
+                overlap_size=int(feat_opts["overlap_size"]),
+                require_all_esps=bool(feat_opts["require_all_esps"]),
+                preproc_opts=preproc_opts,
+            )
+            for branch_band, array in arrays.items():
+                observed_subcarriers = int(array.shape[2])
+                observed_anchors = int(array.shape[1])
+                print(
+                    f"{branch_band}: anchors={observed_anchors}, "
+                    f"subcarriers={observed_subcarriers}, windows={array.shape[0]}"
                 )
-            if observed_anchors != expected_anchors[branch_band]:
-                raise RuntimeError(
-                    f"{branch_band} anchor count changed: expected "
-                    f"{expected_anchors[branch_band]}, observed {observed_anchors}"
-                )
+                if observed_subcarriers != expected_subcarriers[branch_band]:
+                    raise RuntimeError(
+                        f"{branch_band} subcarrier count changed: expected "
+                        f"{expected_subcarriers[branch_band]}, observed {observed_subcarriers}"
+                    )
+                if observed_anchors != expected_anchors[branch_band]:
+                    raise RuntimeError(
+                        f"{branch_band} anchor count changed: expected "
+                        f"{expected_anchors[branch_band]}, observed {observed_anchors}"
+                    )
 
-        if band == "Fusion":
-            n_24 = arrays["2.4 GHz"].shape[0]
-            n_5 = arrays["5 GHz"].shape[0]
-            if n_24 != n_5 or n_24 != len(feature_dataframes[band]):
-                raise RuntimeError(
-                    f"Fusion N mismatch: 2.4={n_24}, 5={n_5}, "
-                    f"ML={len(feature_dataframes[band])}"
-                )
-            print(f"Fusion N PASS: {n_24} windows")
+            if band == "Fusion":
+                n_24 = arrays["2.4 GHz"].shape[0]
+                n_5 = arrays["5 GHz"].shape[0]
+                if n_24 != n_5 or n_24 != len(feature_dataframes[band]):
+                    raise RuntimeError(
+                        f"Fusion N mismatch: 2.4={n_24}, 5={n_5}, "
+                        f"ML={len(feature_dataframes[band])}"
+                    )
+                print(f"Fusion N PASS: {n_24} windows")
 
         # Prove the raw CNN arrays and ML DataFrame describe the same windows
         # before reusing the shared split logic.
@@ -214,6 +265,7 @@ def run_dl_experiments(  # noqa: PLR0913, PLR0914
                 n_blocks=n_blocks,
             )
             # Each seed is a distinct recorded run, while band arrays are reused.
+            resolved_params = {**params, "model_label": model_label}
             seed_outputs = train_evaluate_cnn_multi_seed(
                 seeds=seeds,
                 band=band,
@@ -223,7 +275,9 @@ def run_dl_experiments(  # noqa: PLR0913, PLR0914
                 device=device,
                 results_dir=results_dir,
                 plots_dir=plots_dir,
-                params=params,
+                params=resolved_params,
+                model_cls=model_cls,
+                architecture_config=meta.attrs.get("room_representation_config"),
                 split_mode=split_mode,
                 test_size=test_size,
                 random_state=random_state,
@@ -239,11 +293,11 @@ def run_dl_experiments(  # noqa: PLR0913, PLR0914
 
 
 def show_dl_results(results_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load the DL run summary and the RF/CNN block-split comparison."""
+    """Load DL runs and the RF/band-CNN/room-CNN block-split comparison."""
     global_summary = pd.read_csv(results_dir / "runs.csv")
     cnn_summary = global_summary.loc[global_summary["family"].eq("dl")].copy()
     comparison = global_summary.loc[
-        global_summary["model"].isin(["rf", "cnn"])
+        global_summary["model"].isin(["rf", "cnn", "cnn_room"])
         & global_summary["split"].eq("block"),
         ["band", "model", "seed", "position_accuracy", "parameter_count"],
     ].sort_values(["band", "model", "seed"])
@@ -414,6 +468,8 @@ def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
     feat_opts: dict[str, Any] | None = None,
     run_id: str | None = None,
     feature_df: pd.DataFrame | None = None,
+    model_cls: type[nn.Module] = DualBandCNN,
+    architecture_config: dict[str, Any] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, float], pd.DataFrame]:
     """Train one seeded CNN run for block, LOVO, or cross-session evaluation."""
     if split_mode not in {"block", "lovo", "cross_session"}:
@@ -444,9 +500,13 @@ def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
         "seed": resolved_seed,
         "split_params": split_params,
     }
+    if architecture_config is not None:
+        # Room runs carry the complete representation identity; omitting this
+        # for band_branch keeps all existing band run identifiers unchanged.
+        full_config["architecture_config"] = architecture_config
     resolved_run_id = run_id or make_run_id(
         family="dl",
-        model="cnn",
+        model=model_label,
         band=band,
         split=split_mode,
         normalization=str(preproc["normalization"]),
@@ -534,6 +594,7 @@ def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
             device=device,
             params=resolved_params,
             model_label=model_label,
+            model_cls=model_cls,
             split_mode=split_mode,
             train_df=train_df,
             protocol_train_df=protocol_train,
@@ -749,6 +810,7 @@ def _train_predict_fold(  # noqa: PLR0913, PLR0915
     device: torch.device,
     params: dict[str, Any],
     model_label: str,
+    model_cls: type[nn.Module],
     split_mode: SplitMode,
     train_df: pd.DataFrame,
     protocol_train_df: pd.DataFrame,
@@ -773,7 +835,7 @@ def _train_predict_fold(  # noqa: PLR0913, PLR0915
     branch_channels = {
         band_name: int(array.shape[1]) for band_name, array in arrays.items()
     }
-    model = DualBandCNN(
+    model = model_cls(
         branch_channels,
         n_classes=len(label_encoder.classes_),
         params=params,
@@ -1215,6 +1277,7 @@ def build_frequency_window_arrays(
         cached = load_window_array_cache(array_paths, meta_path, manifest_path)
         if cached is not None:
             arrays, meta, manifest = cached
+            meta.attrs["window_array_manifest"] = manifest
             _print_loaded_arrays(arrays, manifest, cache_dir)
             return arrays, meta
 
@@ -1298,8 +1361,387 @@ def build_frequency_window_arrays(
     save_window_array_metadata(meta, meta_path, manifest, manifest_path)
 
     arrays = load_window_arrays(array_paths)
+    meta.attrs["window_array_manifest"] = manifest
     _print_array_summary(arrays, anchor_order)
     return arrays, meta
+
+
+def build_room_window_arrays(  # noqa: PLR0913, PLR0914
+    magnitude_data: CsiMap,
+    *,
+    fusion_meta: pd.DataFrame,
+    window_size: int = 60,
+    overlap_size: int = 0,
+    require_all_esps: bool = True,
+    preproc_opts: dict[str, Any] | None = None,
+    model_params: dict[str, Any] | None = None,
+    force_rebuild: bool = False,
+) -> tuple[dict[str, np.ndarray], pd.DataFrame]:
+    """Build room-pair tensors from the exact authoritative Fusion inventory."""
+    resolved_preproc = dict(preproc_opts or DEFAULT_PREPROC_OPTS)
+    fusion_manifest = _validated_fusion_manifest(
+        fusion_meta,
+        window_size=window_size,
+        overlap_size=overlap_size,
+        require_all_esps=require_all_esps,
+        preproc_opts=resolved_preproc,
+    )
+    kernel_height, padding_rows = _room_padding_from_encoder(model_params)
+    print(
+        "[room window arrays] padding rows="
+        f"{padding_rows}, derived from first-conv kernel_size - 1 "
+        f"({kernel_height} - 1)."
+    )
+
+    fusion_meta_fingerprint = _window_identity_fingerprint(fusion_meta)
+    representation_config = _room_representation_config(
+        window_size=window_size,
+        overlap_size=overlap_size,
+        require_all_esps=require_all_esps,
+        preproc_opts=resolved_preproc,
+        kernel_height=kernel_height,
+        padding_rows=padding_rows,
+        fusion_meta_fingerprint=fusion_meta_fingerprint,
+    )
+    config_hash = hashlib.sha256(
+        json.dumps(representation_config, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:12]
+    feat_opts = {
+        "window_size": window_size,
+        "overlap_size": overlap_size,
+        "require_all_esps": require_all_esps,
+    }
+    feature_cache_dir = get_cache_path(resolved_preproc, feat_opts)
+    cache_dir = feature_cache_dir / "window_arrays" / f"room_stacked__{config_hash}"
+    print(f"[room window arrays] cache path: {cache_dir.resolve()}")
+
+    room_order = tuple(ROOM_ANCHOR_PAIRS)
+    array_paths = {
+        room: cache_dir / f"{_band_stem(room)}.npy"
+        for room in room_order
+    }
+    meta_path = cache_dir / "meta.parquet"
+    manifest_path = cache_dir / "manifest.json"
+    expected_shapes = {
+        room: (
+            len(fusion_meta),
+            ROOM_CHANNEL_COUNTS[room],
+            EXPECTED_SUBCARRIERS["2.4 GHz"]
+            + padding_rows
+            + EXPECTED_SUBCARRIERS["5 GHz"],
+            window_size,
+        )
+        for room in room_order
+    }
+
+    if not force_rebuild:
+        cached = load_window_array_cache(array_paths, meta_path, manifest_path)
+        if cached is not None:
+            arrays, meta, manifest = cached
+            if manifest.get("cache_identity") != representation_config:
+                raise ValueError(
+                    "Cached room-array manifest does not match the requested "
+                    "room representation configuration."
+                )
+            _assert_room_meta_matches_fusion(meta, fusion_meta)
+            _validate_room_array_shapes(arrays, expected_shapes)
+            meta.attrs["window_array_manifest"] = manifest
+            meta.attrs["room_representation_config"] = representation_config
+            _print_room_array_summary(arrays, representation_config["room_anchor_pairs"])
+            return arrays, meta
+
+    if fusion_meta.empty:
+        raise ValueError("The authoritative Fusion inventory contains no windows.")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    writers = open_window_array_writers(array_paths, expected_shapes)
+    step = window_size - overlap_size
+    low_width = EXPECTED_SUBCARRIERS["2.4 GHz"]
+    high_width = EXPECTED_SUBCARRIERS["5 GHz"]
+
+    # Iterate fusion_meta itself, in its existing order. No discovery iterator is
+    # called here, so the 18 copied anchors cannot relax or redefine eligibility.
+    for row_index, row in fusion_meta.reset_index(drop=True).iterrows():
+        group_id = str(row["group_id"])
+        window_idx = int(row["window_idx"])
+        start = window_idx * step
+        for room, anchor_pairs in ROOM_ANCHOR_PAIRS.items():
+            for channel_index, (anchor_24ghz, anchor_5ghz) in enumerate(anchor_pairs):
+                magnitude_24ghz = _room_source_magnitude(
+                    magnitude_data,
+                    row,
+                    anchor_24ghz,
+                )
+                magnitude_5ghz = _room_source_magnitude(
+                    magnitude_data,
+                    row,
+                    anchor_5ghz,
+                )
+                window_24ghz = _validated_room_source_window(
+                    magnitude_24ghz,
+                    start=start,
+                    window_size=window_size,
+                    expected_subcarriers=low_width,
+                    group_id=group_id,
+                    window_idx=window_idx,
+                    esp_key=anchor_24ghz,
+                )
+                window_5ghz = _validated_room_source_window(
+                    magnitude_5ghz,
+                    start=start,
+                    window_size=window_size,
+                    expected_subcarriers=high_width,
+                    group_id=group_id,
+                    window_idx=window_idx,
+                    esp_key=anchor_5ghz,
+                )
+
+                # Each source magnitude was normalized independently by
+                # process_magnitude_data before this builder was called. Stack the
+                # two normalized windows without any whole-image normalization.
+                image = np.zeros(
+                    (low_width + padding_rows + high_width, window_size),
+                    dtype=np.float16,
+                )
+                image[:low_width] = window_24ghz.T.astype(np.float16, copy=False)
+                image[low_width + padding_rows :] = window_5ghz.T.astype(
+                    np.float16,
+                    copy=False,
+                )
+                assert np.all(
+                    image[low_width : low_width + padding_rows] == 0.0
+                ), (
+                    "Room-channel padding must remain exactly zero for "
+                    f"group_id={group_id}, window_idx={window_idx}, room={room}, "
+                    f"channel={channel_index}."
+                )
+                writers[room][row_index, channel_index] = image
+
+    for writer in writers.values():
+        writer.flush()
+        del writer
+
+    meta = fusion_meta.loc[:, list(METADATA_COLUMNS)].copy().reset_index(drop=True)
+    _assert_room_meta_matches_fusion(meta, fusion_meta)
+    manifest = {
+        "frequency_scenario": "Fusion",
+        "feature_scenario": "Fusion",
+        "window_size": window_size,
+        "overlap_size": overlap_size,
+        "require_all_esps": require_all_esps,
+        "preprocessing": resolved_preproc,
+        "cache_identity": representation_config,
+        "source_fusion_manifest": fusion_manifest,
+        "shapes": {room: list(shape) for room, shape in expected_shapes.items()},
+        "dtype": "float16",
+        "meta_rows": int(len(meta)),
+    }
+    save_window_array_metadata(meta, meta_path, manifest, manifest_path)
+    arrays = load_window_arrays(array_paths)
+    _validate_room_array_shapes(arrays, expected_shapes)
+    meta.attrs["window_array_manifest"] = manifest
+    meta.attrs["room_representation_config"] = representation_config
+    _print_room_array_summary(arrays, representation_config["room_anchor_pairs"])
+    return arrays, meta
+
+
+def _validated_fusion_manifest(
+    fusion_meta: pd.DataFrame,
+    *,
+    window_size: int,
+    overlap_size: int,
+    require_all_esps: bool,
+    preproc_opts: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the Fusion manifest after checking every eligibility setting."""
+    manifest = fusion_meta.attrs.get("window_array_manifest")
+    if not isinstance(manifest, dict):
+        raise ValueError(
+            "fusion_meta must carry its build manifest in "
+            "fusion_meta.attrs['window_array_manifest']; obtain it directly from "
+            "build_frequency_window_arrays(..., frequency_scenario='Fusion')."
+        )
+    requested = {
+        "frequency_scenario": "Fusion",
+        "window_size": window_size,
+        "overlap_size": overlap_size,
+        "require_all_esps": require_all_esps,
+        "preprocessing": preproc_opts,
+    }
+    mismatches = {
+        setting: {"fusion_meta": manifest.get(setting), "requested": value}
+        for setting, value in requested.items()
+        if manifest.get(setting) != value
+    }
+    if mismatches:
+        raise ValueError(
+            "fusion_meta build settings do not match the room-array request: "
+            f"{mismatches}."
+        )
+    return manifest
+
+
+def _room_padding_from_encoder(
+    model_params: dict[str, Any] | None,
+) -> tuple[int, int]:
+    """Read the room encoder's first convolution height and derive its padding."""
+    encoder = RoomEncoder(1, model_params)
+    first_conv = next(
+        (layer for layer in encoder.features if isinstance(layer, nn.Conv2d)),
+        None,
+    )
+    if first_conv is None:
+        raise RuntimeError("RoomEncoder must contain at least one Conv2d layer.")
+    kernel_height = int(first_conv.kernel_size[0])
+    del encoder
+    return kernel_height, kernel_height - 1
+
+
+def _room_representation_config(
+    *,
+    window_size: int,
+    overlap_size: int,
+    require_all_esps: bool,
+    preproc_opts: dict[str, Any],
+    kernel_height: int,
+    padding_rows: int,
+    fusion_meta_fingerprint: str,
+) -> dict[str, Any]:
+    """Build the complete cache and run identity for room-stacked tensors."""
+    ordered_pairs = [
+        {
+            "room": room,
+            "pairs": [list(anchor_pair) for anchor_pair in anchor_pairs],
+        }
+        for room, anchor_pairs in ROOM_ANCHOR_PAIRS.items()
+    ]
+    return {
+        "architecture": "room_stacked",
+        "room_anchor_pairs": ordered_pairs,
+        "expected_subcarriers": {
+            "2.4 GHz": EXPECTED_SUBCARRIERS["2.4 GHz"],
+            "5 GHz": EXPECTED_SUBCARRIERS["5 GHz"],
+        },
+        "padding": {
+            "kernel_height": kernel_height,
+            "padding_rows": padding_rows,
+            "derivation": "kernel_size - 1",
+        },
+        "window_size": window_size,
+        "overlap_size": overlap_size,
+        "require_all_esps": require_all_esps,
+        "preproc_opts": preproc_opts,
+        "fusion_meta_fingerprint": fusion_meta_fingerprint,
+    }
+
+
+def _assert_room_meta_matches_fusion(
+    room_meta: pd.DataFrame,
+    fusion_meta: pd.DataFrame,
+) -> None:
+    """Raise unless room metadata has the Fusion schema, count, and exact order."""
+    if tuple(room_meta.columns) != METADATA_COLUMNS:
+        raise AssertionError(
+            "Room metadata schema differs from METADATA_COLUMNS: "
+            f"observed={list(room_meta.columns)}."
+        )
+    identity_columns = ["group_id", "window_idx", "user", "trial"]
+    room_identity = room_meta.loc[:, identity_columns].reset_index(drop=True)
+    fusion_identity = fusion_meta.loc[:, identity_columns].reset_index(drop=True)
+    if len(room_meta) != len(fusion_meta) or not room_identity.equals(fusion_identity):
+        raise AssertionError(
+            "Room metadata must preserve the authoritative Fusion inventory's "
+            "window count and exact row order."
+        )
+
+
+def _room_source_magnitude(
+    magnitude_data: CsiMap,
+    row: pd.Series,
+    esp_key: str,
+) -> np.ndarray:
+    """Return one required anchor recording for an authoritative Fusion row."""
+    scenario_key = _metadata_tree_key(row["scenario"], "scenario_")
+    location_key = _metadata_tree_key(row["location"], "location_")
+    user_key = _metadata_tree_key(row["user"], "user_")
+    trial_key = _metadata_tree_key(row["trial"], "trial_")
+    try:
+        magnitude = magnitude_data[scenario_key][location_key][user_key][esp_key][trial_key]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            "Missing room-pair source data for "
+            f"group_id={row['group_id']}, window_idx={row['window_idx']}, "
+            f"esp={esp_key}."
+        ) from exc
+    if magnitude is None:
+        raise ValueError(
+            "Missing room-pair source data for "
+            f"group_id={row['group_id']}, window_idx={row['window_idx']}, "
+            f"esp={esp_key}."
+        )
+    return magnitude
+
+
+def _metadata_tree_key(value: object, prefix: str) -> str:
+    """Restore a metadata value to the prefixed key used by the CSI mapping."""
+    text = str(value)
+    return text if text.startswith(prefix) else f"{prefix}{text}"
+
+
+def _validated_room_source_window(
+    magnitude: np.ndarray,
+    *,
+    start: int,
+    window_size: int,
+    expected_subcarriers: int,
+    group_id: str,
+    window_idx: int,
+    esp_key: str,
+) -> np.ndarray:
+    """Slice one source window and raise with its identity when it is incomplete."""
+    window = magnitude[start : start + window_size]
+    if window.shape != (window_size, expected_subcarriers):
+        raise ValueError(
+            "Invalid room-pair source window for "
+            f"group_id={group_id}, window_idx={window_idx}, esp={esp_key}: "
+            f"expected shape={(window_size, expected_subcarriers)}, "
+            f"observed={tuple(window.shape)}."
+        )
+    return window
+
+
+def _validate_room_array_shapes(
+    arrays: dict[str, np.ndarray],
+    expected_shapes: dict[str, tuple[int, ...]],
+) -> None:
+    """Raise if cached or newly built room arrays have unexpected keys or shapes."""
+    if tuple(arrays) != tuple(ROOM_ANCHOR_PAIRS):
+        raise AssertionError(
+            "Room array order must match ROOM_ANCHOR_PAIRS exactly: "
+            f"observed={list(arrays)}, expected={list(ROOM_ANCHOR_PAIRS)}."
+        )
+    for room, expected_shape in expected_shapes.items():
+        if tuple(arrays[room].shape) != expected_shape:
+            raise AssertionError(
+                f"{room} array shape mismatch: expected={expected_shape}, "
+                f"observed={tuple(arrays[room].shape)}."
+            )
+
+
+def _print_room_array_summary(
+    arrays: dict[str, np.ndarray],
+    ordered_pairs: list[dict[str, Any]],
+) -> None:
+    """Print room-array shapes and the deterministic channel-pair ordering."""
+    pair_lookup = {entry["room"]: entry["pairs"] for entry in ordered_pairs}
+    for room, array in arrays.items():
+        print(
+            f"[room window arrays] {room}: shape={tuple(array.shape)}, "
+            f"dtype={array.dtype}"
+        )
+        print(f"[room window arrays] {room} anchor pairs: {pair_lookup[room]}")
 
 
 def _normalize_frequency_scenario(
