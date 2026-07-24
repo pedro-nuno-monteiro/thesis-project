@@ -2,18 +2,24 @@
 \toprule
 family & model & band & split & normalization & baseline_scope & window_size & overlap_size & require_all_esps & seed_aggregation_basis & n_seeds & position_accuracy_seed_mean & position_accuracy_seed_std & fold_position_accuracy_std_mean_across_seeds \\
 \midrule
-dl & cnn_room & fusion & block & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 3 & 0.4515 & 0.0202 & NaN \\
 dl & cnn & 2_4ghz & block & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 6 & 0.2901 & 0.0266 & NaN \\
 dl & cnn & 2_4ghz & lovo & empty_baseline & session & 60 & 0 & False & fold_mean_per_seed & 3 & 0.0547 & 0.0052 & 0.0172 \\
 dl & cnn & 5ghz & block & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 6 & 0.3022 & 0.0122 & NaN \\
 dl & cnn & 5ghz & lovo & empty_baseline & session & 60 & 0 & False & fold_mean_per_seed & 3 & 0.0826 & 0.0028 & 0.0254 \\
 dl & cnn & fusion & block & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 6 & 0.4240 & 0.0424 & NaN \\
 dl & cnn & fusion & lovo & empty_baseline & session & 60 & 0 & False & fold_mean_per_seed & 3 & 0.0981 & 0.0096 & 0.0309 \\
+dl & cnn_room & fusion & lovo & empty_baseline & session & 60 & 0 & False & fold_mean_per_seed & 3 & 0.1179 & 0.0101 & 0.0437 \\
 ml & knn & 2_4ghz & grid_search & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.2263 & NaN & NaN \\
+ml & knn & 5ghz & grid_search & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.1996 & NaN & NaN \\
+ml & knn & fusion & grid_search & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.2378 & NaN & NaN \\
 ml & rf & 2_4ghz & grid_search & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.5402 & NaN & NaN \\
 ml & rf & 2_4ghz & random & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.9371 & NaN & NaN \\
+ml & rf & 5ghz & grid_search & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.6123 & NaN & NaN \\
 ml & rf & 5ghz & random & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.9312 & NaN & NaN \\
+ml & rf & fusion & grid_search & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.6736 & NaN & NaN \\
 ml & rf & fusion & random & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.9753 & NaN & NaN \\
 ml & svm & 2_4ghz & grid_search & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.5445 & NaN & NaN \\
+ml & svm & 5ghz & grid_search & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.4059 & NaN & NaN \\
+ml & svm & fusion & grid_search & empty_baseline & session & 60 & 0 & False & run_metric_per_seed & 1 & 0.7118 & NaN & NaN \\
 \bottomrule
 \end{tabular}
