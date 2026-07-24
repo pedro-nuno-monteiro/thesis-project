@@ -1,0 +1,6 @@
+{
+  "best_val_accuracy": 0.07243589743589744,
+  "best_epoch": 8,
+  "stopped_epoch": 23,
+  "patience_triggered": true
+}
