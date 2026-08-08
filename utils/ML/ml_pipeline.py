@@ -26,6 +26,7 @@ from utils.cache import (
     save_predictions,
 )
 from utils.config import (
+    GRID_INNER_N_BLOCKS,
     GRID_SEARCH_N_JOBS,
     TRIALS_FOR_TRAINING_PROTOCOLS,
 )
@@ -463,7 +464,7 @@ def run_optional_grid_search(  # noqa: PLR0913
             outer_train,
             test_size=inner_validation_size,
             random_state=inner_random_state,
-            n_blocks=n_blocks,
+            n_blocks=GRID_INNER_N_BLOCKS,
         )
         _print_protocol_split("grid_search_inner_block", inner_train, validation)
         _assert_block_split_integrity(
@@ -1329,7 +1330,7 @@ def _grid_search_identity(  # noqa: PLR0913
             "type": "block",
             "validation_size": inner_validation_size,
             "random_state": inner_random_state,
-            "n_blocks": n_blocks,
+            "n_blocks": GRID_INNER_N_BLOCKS,
         },
         "selection_metric": "position_accuracy",
         "final_refit": "all_outer_train",
