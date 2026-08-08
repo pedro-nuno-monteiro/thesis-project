@@ -1413,9 +1413,10 @@ def _params_from_grid_search_row(
     band: str,
 ) -> dict[str, Any]:
     """Extract only parameters belonging to the matched model's search space."""
-    parameter_space = PARAM_GRIDS.get(model)
+    model_name = model.upper()
+    parameter_space = PARAM_GRIDS.get(model_name)
     if parameter_space is None:
-        parameter_space = default_params_for(model, band)
+        parameter_space = default_params_for(model_name, band)
     parameter_names = list(parameter_space)
     missing_parameters = [name for name in parameter_names if name not in row.index]
     if missing_parameters:
@@ -1423,10 +1424,34 @@ def _params_from_grid_search_row(
             f"Matched grid-search row for {model}/{band} lacks parameters: "
             f"{missing_parameters}."
         )
-    return {
+    loaded_params = {
         parameter: _coerce_param_value(row[parameter])
         for parameter in parameter_names
     }
+    return _normalize_loaded_tuned_params(loaded_params, model=model_name)
+
+
+def _normalize_loaded_tuned_params(
+    params: dict[str, Any],
+    *,
+    model: str,
+) -> dict[str, Any]:
+    """Restore model-specific Python types after pandas CSV deserialization."""
+    normalized = dict(params)
+    integer_parameters = {
+        "RF": ("n_estimators", "max_depth", "min_samples_split", "min_samples_leaf"),
+        "KNN": ("n_neighbors",),
+    }
+    for parameter in integer_parameters.get(model, ()):
+        value = normalized.get(parameter)
+        normalized[parameter] = None if value is None else int(value)
+
+    if model == "RF":
+        class_weight = normalized.get("class_weight")
+        normalized["class_weight"] = (
+            None if class_weight is None or pd.isna(class_weight) else class_weight
+        )
+    return normalized
 
 
 def _coerce_param_value(value: Any) -> Any:
