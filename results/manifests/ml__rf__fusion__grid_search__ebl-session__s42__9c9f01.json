@@ -1,0 +1,82 @@
+{
+  "config": {
+    "band": "Fusion",
+    "feat_opts": {
+      "overlap_size": 0,
+      "require_all_esps": false,
+      "window_size": 60
+    },
+    "final_refit": "all_outer_train",
+    "inner_random_state": 43,
+    "inner_split": {
+      "n_blocks": 10,
+      "random_state": 43,
+      "type": "block",
+      "validation_size": 0.3
+    },
+    "inner_validation_size": 0.3,
+    "model": "RF",
+    "n_blocks": 10,
+    "outer_split": {
+      "n_blocks": 10,
+      "random_state": 42,
+      "test_size": 0.3,
+      "trials": [
+        "01"
+      ],
+      "type": "block"
+    },
+    "parameter_grid": {
+      "class_weight": [
+        "balanced",
+        null
+      ],
+      "max_depth": [
+        null,
+        10,
+        20,
+        40
+      ],
+      "max_features": [
+        "sqrt",
+        "log2"
+      ],
+      "min_samples_leaf": [
+        1,
+        2,
+        4
+      ],
+      "min_samples_split": [
+        2,
+        5,
+        10
+      ],
+      "n_estimators": [
+        200,
+        300,
+        500,
+        800
+      ]
+    },
+    "preproc_opts": {
+      "baseline_scope": "per_session",
+      "epsilon": 1e-08,
+      "normalization": "empty_baseline"
+    },
+    "random_state": 42,
+    "selection_metric": "position_accuracy",
+    "tuning_protocol": "single_inner_block_split"
+  },
+  "parsed_run_id": {
+    "band": "fusion",
+    "baseline_scope": "session",
+    "family": "ml",
+    "hash6": "9c9f01",
+    "model": "rf",
+    "normalization": "empty_baseline",
+    "seed": 42,
+    "split": "grid_search"
+  },
+  "run_id": "ml__rf__fusion__grid_search__ebl-session__s42__9c9f01",
+  "timestamp": "2026-08-07T23:07:31.185736+00:00"
+}
