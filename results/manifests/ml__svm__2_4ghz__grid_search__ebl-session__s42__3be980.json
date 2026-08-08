@@ -1,0 +1,67 @@
+{
+  "config": {
+    "band": "2.4 GHz",
+    "feat_opts": {
+      "overlap_size": 0,
+      "require_all_esps": false,
+      "window_size": 60
+    },
+    "final_refit": "all_outer_train",
+    "inner_random_state": 43,
+    "inner_split": {
+      "n_blocks": 4,
+      "random_state": 43,
+      "type": "block",
+      "validation_size": 0.3
+    },
+    "inner_validation_size": 0.3,
+    "model": "SVM",
+    "n_blocks": 10,
+    "outer_split": {
+      "n_blocks": 10,
+      "random_state": 42,
+      "test_size": 0.3,
+      "trials": [
+        "01"
+      ],
+      "type": "block"
+    },
+    "parameter_grid": {
+      "C": [
+        0.1,
+        1,
+        10,
+        100
+      ],
+      "gamma": [
+        "scale",
+        "auto",
+        0.001,
+        0.0001
+      ],
+      "kernel": [
+        "rbf"
+      ]
+    },
+    "preproc_opts": {
+      "baseline_scope": "per_session",
+      "epsilon": 1e-08,
+      "normalization": "empty_baseline"
+    },
+    "random_state": 42,
+    "selection_metric": "position_accuracy",
+    "tuning_protocol": "single_inner_block_split"
+  },
+  "parsed_run_id": {
+    "band": "2_4ghz",
+    "baseline_scope": "session",
+    "family": "ml",
+    "hash6": "3be980",
+    "model": "svm",
+    "normalization": "empty_baseline",
+    "seed": 42,
+    "split": "grid_search"
+  },
+  "run_id": "ml__svm__2_4ghz__grid_search__ebl-session__s42__3be980",
+  "timestamp": "2026-08-08T04:14:11.950631+00:00"
+}
