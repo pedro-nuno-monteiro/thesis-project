@@ -84,6 +84,7 @@ CPU_PIN_MEMORY = False
 CPU_PERSISTENT_WORKERS = False
 
 # Classical ML grid-search execution and diagnostic settings
+GRID_INNER_N_BLOCKS = 4
 GRID_SEARCH_N_JOBS = 4
 
 MAX_EPOCH_SECONDS = 3600.0
