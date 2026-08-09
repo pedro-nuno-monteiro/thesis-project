@@ -927,11 +927,16 @@ def load_lovo_summary_tables(summary_dir: Path) -> tuple[pd.DataFrame, pd.DataFr
     run_ids = set(summary["run_id"].astype(str))
     per_fold = pd.read_csv(per_fold_path)
     per_fold = per_fold.loc[per_fold["run_id"].astype(str).isin(run_ids)].copy()
+    per_fold = per_fold.drop(columns=["model", "dataset"], errors="ignore")
     per_fold = per_fold.merge(
         summary[["run_id", "model", "dataset"]],
         on="run_id",
         how="left",
     )
+    assert "model" in per_fold.columns
+    assert "dataset" in per_fold.columns
+    assert per_fold["model"].notna().all()
+    assert per_fold["dataset"].notna().all()
     return per_fold, summary
 
 
