@@ -1,0 +1,42 @@
+{
+  "config": {
+    "feat_opts": {
+      "overlap_size": 0,
+      "require_all_esps": false,
+      "window_size": 60
+    },
+    "model_params": {
+      "class_weight": "balanced",
+      "max_depth": 40,
+      "max_features": "log2",
+      "min_samples_leaf": 1,
+      "min_samples_split": 2,
+      "n_estimators": 800
+    },
+    "preproc_opts": {
+      "baseline_scope": "per_session",
+      "epsilon": 1e-08,
+      "normalization": "empty_baseline"
+    },
+    "seed": 42,
+    "split_params": {
+      "column_spacing": 1.0,
+      "n_blocks": 10,
+      "random_state": 42,
+      "row_spacing": 1.0,
+      "test_size": 0.3
+    }
+  },
+  "parsed_run_id": {
+    "band": "2_4ghz",
+    "baseline_scope": "session",
+    "family": "ml",
+    "hash6": "447058",
+    "model": "rf",
+    "normalization": "empty_baseline",
+    "seed": 42,
+    "split": "block"
+  },
+  "run_id": "ml__rf__2_4ghz__block__ebl-session__s42__447058",
+  "timestamp": "2026-08-08T20:02:33.124452+00:00"
+}
