@@ -1,0 +1,86 @@
+{
+  "config": {
+    "feat_opts": {
+      "overlap_size": 0,
+      "require_all_esps": false,
+      "window_size": 60
+    },
+    "model_params": {
+      "anchor_groups": {
+        "2.4 GHz": [
+          "esp_01",
+          "esp_02",
+          "esp_03",
+          "esp_04",
+          "esp_05",
+          "esp_07",
+          "esp_08",
+          "esp_09",
+          "esp_10"
+        ],
+        "5 GHz": [
+          "esp_11",
+          "esp_12",
+          "esp_13",
+          "esp_14",
+          "esp_15",
+          "esp_16",
+          "esp_17",
+          "esp_18",
+          "esp_19",
+          "esp_20"
+        ]
+      },
+      "conv1_filters": 32,
+      "conv2_filters": 64,
+      "cpu_batch_size": 64,
+      "cpu_num_workers": 0,
+      "cpu_persistent_workers": false,
+      "cpu_pin_memory": false,
+      "cuda_batch_size": 256,
+      "cuda_num_workers": 8,
+      "cuda_persistent_workers": true,
+      "cuda_pin_memory": true,
+      "cuda_prefetch_factor": 4,
+      "dropout": 0.3,
+      "epochs": 70,
+      "head_hidden": 256,
+      "latent_dim": 128,
+      "lr": 0.001,
+      "max_epoch_seconds": 3600.0,
+      "model_label": "CNN",
+      "n_blocks": 10,
+      "patience": 15,
+      "random_state": 42,
+      "seed": 44,
+      "test_size": 0.3,
+      "torch_version": "2.11.0+cu128",
+      "validation_size": 0.15,
+      "weight_decay": 0.0001
+    },
+    "preproc_opts": {
+      "baseline_scope": "per_session",
+      "epsilon": 1e-08,
+      "normalization": "none"
+    },
+    "seed": 44,
+    "split_params": {
+      "n_blocks": 10,
+      "random_state": 42,
+      "test_size": 0.3,
+      "validation_size": 0.15
+    }
+  },
+  "parsed_run_id": {
+    "band": "fusion",
+    "baseline_scope": null,
+    "family": "dl",
+    "hash6": "d87d56",
+    "model": "cnn",
+    "normalization": "none",
+    "seed": 44,
+    "split": "block"
+  },
+  "run_id": "dl__cnn__fusion__block__none__s44__d87d56",
+  "timestamp": "2026-08-19T23:52:14.268430+00:00"
+}

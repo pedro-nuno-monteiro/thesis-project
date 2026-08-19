@@ -70,7 +70,7 @@ TRIALS_FOR_TRAINING_PROTOCOLS = ("01",)
 SEEDS = (42, 43, 44)
 
 # CNN model parameters
-ARCHITECTURE = "room_stacked"  # "band_branch" | "room_stacked"
+ARCHITECTURE = "band_branch"  # "band_branch" | "room_stacked"
 CUDA_BATCH_SIZE = 256
 CUDA_NUM_WORKERS = 8
 CUDA_PIN_MEMORY = True
