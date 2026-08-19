@@ -11,8 +11,8 @@ RESULTS_DIR = PROJECT_ROOT / "results"
 
 ESP_IDS_BY_BAND = {
     "2.4 GHz": (*range(1, 6), *range(7, 11)),
-    "5 GHz": tuple(range(11, 21)),
-    "Fusion": (*range(1, 6), *range(7, 21)),
+    "5 GHz": (*range(11, 18), *range(19, 21)), 
+    "Fusion": (*range(1, 6), *range(7, 18), *range(19, 21)),
 }
 BANDS_TO_RUN = tuple(ESP_IDS_BY_BAND)
 ANCHOR_GROUPS = {
@@ -22,7 +22,7 @@ ANCHOR_GROUPS = {
 ROOM_ANCHOR_PAIRS: dict[str, list[tuple[str, str]]] = {
     "Room 1": [
         ("esp_07", "esp_17"),
-        ("esp_08", "esp_18"),
+        #("esp_08", "esp_18"), 18 is out
         ("esp_09", "esp_19"),
         ("esp_10", "esp_20"),
     ],
