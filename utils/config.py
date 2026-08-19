@@ -10,8 +10,8 @@ CACHE_DIR = PROJECT_ROOT / ".cache"
 RESULTS_DIR = PROJECT_ROOT / "results"
 
 ESP_IDS_BY_BAND = {
-    "2.4 GHz": (*range(1, 6), *range(7, 11)),
-    "5 GHz": (*range(11, 18), *range(19, 21)), 
+    "2.4 GHz": (*range(1, 6), 7, *range(8, 11)),
+    "5 GHz": (*range(11, 18), *range(19, 21)),
     "Fusion": (*range(1, 6), *range(7, 18), *range(19, 21)),
 }
 BANDS_TO_RUN = tuple(ESP_IDS_BY_BAND)
