@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = "/disco1500gb/Pedro_Data"
+DATA_DIR = "/disco1500gb/Pedro_Data/RIS"
 CACHE_DIR = PROJECT_ROOT / ".cache"
 RESULTS_DIR = PROJECT_ROOT / "results"
 
