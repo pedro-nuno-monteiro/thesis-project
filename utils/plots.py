@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib import colors as mcolors
 
 from utils.config import PLOT_DPI, PLOT_FORMAT
+from utils.csi_processing import process_magnitude_data
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -28,6 +30,8 @@ ROOM_PATCH_COLORS = {
 }
 
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
+CsiStageMaps = dict[str, CsiMap]
+SelectedMagnitudeStages = dict[str, tuple[np.ndarray, np.ndarray]]
 SelectedEntry = tuple[str, np.ndarray | None]
 SelectedTrialGroup = tuple[str, str, str, str, list[SelectedEntry]]
 CSI_LOCATION_PATTERN = re.compile(
@@ -445,14 +449,24 @@ def plot_lovo_fold_spread(
     save_path: str | Path | None = None,
 ) -> None:
     """Plot held-out-user position accuracy spread for the selected model."""
-    filtered = lovo_per_fold.loc[lovo_per_fold["model"] == model]
+    _validate_columns(
+        lovo_per_fold,
+        {"model", "dataset", "held_out_user", "position_accuracy"},
+    )
+    model_key = str(model).casefold()
+    filtered = lovo_per_fold.loc[
+        lovo_per_fold["model"].astype(str).str.casefold() == model_key
+    ]
     fig, ax = plt.subplots(figsize=(7, 4.2))
     values = []
     labels = []
     positions = []
     for index, band in enumerate(bands, start=1):
         band_values = pd.to_numeric(
-            filtered.loc[filtered["dataset"] == band, "position_accuracy"],
+            filtered.loc[
+                filtered["dataset"].astype(str).str.casefold() == str(band).casefold(),
+                "position_accuracy",
+            ],
             errors="coerce",
         ).dropna()
         if band_values.empty:
@@ -490,15 +504,17 @@ def plot_block_vs_lovo_position_accuracy(
     save_path: str | Path | None = None,
 ) -> None:
     """Plot block position accuracy beside LOVO fold-mean accuracy."""
+    model_key = str(model).casefold()
     rows = []
     for band in bands:
         block_row = global_summary.loc[
-            (global_summary["model"] == model)
+            (global_summary["model"].astype(str).str.casefold() == model_key)
             & (global_summary["dataset"] == band)
             & (global_summary["split"] == "block")
         ]
         lovo_row = lovo_summary.loc[
-            (lovo_summary["model"] == model) & (lovo_summary["dataset"] == band)
+            (lovo_summary["model"].astype(str).str.casefold() == model_key)
+            & (lovo_summary["dataset"] == band)
         ]
         if block_row.empty or lovo_row.empty:
             continue
@@ -593,6 +609,441 @@ def magnitude_to_db(magnitude: np.ndarray, epsilon: float = DB_EPSILON) -> np.nd
     """Convert linear CSI magnitude to decibels with a numerical floor."""
     magnitude_array = np.asarray(magnitude, dtype=float)
     return 20.0 * np.log10(np.clip(magnitude_array, epsilon, None))
+
+
+def select_aligned_magnitude_interval(  # noqa: PLR0913
+    magnitude_stages: CsiStageMaps,
+    *,
+    position: str,
+    user: str,
+    trial: str,
+    anchor_pair: int,
+    packet_count: int,
+    packet_selection: str,
+) -> SelectedMagnitudeStages:
+    """Select one shared ordinal packet interval from three aligned CSI stages."""
+    required_stages = ("raw", "calibrated", "normalized")
+    missing_stages = [stage for stage in required_stages if stage not in magnitude_stages]
+    if missing_stages:
+        msg = f"Magnitude-stage data is missing: {', '.join(missing_stages)}."
+        raise ValueError(msg)
+    if packet_count <= 0:
+        raise ValueError("packet_count must be greater than zero.")
+
+    location_key = normalize_location_input(str(position))
+    if location_key is None:
+        raise ValueError(f"Invalid CSI position: {position!r}.")
+    user_key = _indexed_recording_key(user, "user")
+    trial_key = _indexed_recording_key(trial, "trial")
+    low_esp_key, high_esp_key = _anchor_pair_keys(anchor_pair)
+    esp_keys = (low_esp_key, high_esp_key)
+    scenario_key = _unique_recording_scenario(
+        magnitude_stages["calibrated"],
+        location_key=location_key,
+        user_key=user_key,
+        trial_key=trial_key,
+        esp_keys=esp_keys,
+    )
+
+    calibrated_pair = tuple(
+        _recording_magnitude(
+            magnitude_stages["calibrated"],
+            scenario_key=scenario_key,
+            location_key=location_key,
+            user_key=user_key,
+            esp_key=esp_key,
+            trial_key=trial_key,
+        )
+        for esp_key in esp_keys
+    )
+    available_by_anchor = [magnitude.shape[0] for magnitude in calibrated_pair]
+    common_packet_count = min(available_by_anchor)
+    if common_packet_count < packet_count:
+        msg = (
+            f"Requested {packet_count} common valid packets, but only "
+            f"{common_packet_count} are available for {low_esp_key} and {high_esp_key} "
+            f"(counts: {available_by_anchor[0]} and {available_by_anchor[1]})."
+        )
+        raise ValueError(msg)
+    start = _packet_interval_start(
+        common_packet_count,
+        packet_count=packet_count,
+        method=packet_selection,
+    )
+    packet_slice = slice(start, start + packet_count)
+
+    selected: SelectedMagnitudeStages = {}
+    for stage_name in required_stages:
+        stage_pair = []
+        for esp_index, esp_key in enumerate(esp_keys):
+            magnitude = _recording_magnitude(
+                magnitude_stages[stage_name],
+                scenario_key=scenario_key,
+                location_key=location_key,
+                user_key=user_key,
+                esp_key=esp_key,
+                trial_key=trial_key,
+            )
+            expected_shape = calibrated_pair[esp_index].shape
+            if magnitude.shape != expected_shape:
+                msg = (
+                    f"Packet alignment failed for {stage_name}/{esp_key}: expected shape "
+                    f"{expected_shape}, got {magnitude.shape}."
+                )
+                raise ValueError(msg)
+            stage_pair.append(magnitude[packet_slice])
+        selected[stage_name] = (stage_pair[0], stage_pair[1])
+    return selected
+
+
+def plot_csi_magnitude_stages(  # noqa: PLR0913
+    magnitude_stages: CsiStageMaps,
+    *,
+    position: str,
+    user: str,
+    trial: str,
+    anchor_pair: int,
+    packet_count: int,
+    packet_selection: str,
+    normalized_limit_percentile: float,
+    surface_elevation: float,
+    surface_azimuth: float,
+    save: bool,
+    output_directory: str | Path,
+) -> None:
+    """Plot paired heatmaps and 3D surfaces for raw, calibrated, and normalized CSI."""
+    if not 0 < normalized_limit_percentile <= 100:
+        raise ValueError("normalized_limit_percentile must be in (0, 100].")
+    calibrated_magnitudes = magnitude_stages.get("calibrated")
+    if calibrated_magnitudes is None:
+        raise ValueError("Magnitude-stage data is missing the calibrated CSI map.")
+
+    normalized_magnitudes, _ = process_magnitude_data(
+        calibrated_magnitudes,
+        normalization="empty_baseline",
+        baseline_scope="per_session",
+    )
+    stages_with_normalized = {
+        **magnitude_stages,
+        "normalized": normalized_magnitudes,
+    }
+    selected = select_aligned_magnitude_interval(
+        stages_with_normalized,
+        position=position,
+        user=user,
+        trial=trial,
+        anchor_pair=anchor_pair,
+        packet_count=packet_count,
+        packet_selection=packet_selection,
+    )
+
+    low_esp_key, high_esp_key = _anchor_pair_keys(anchor_pair)
+    panel_titles = (
+        f"(a) ESP {format_esp_key(low_esp_key)} — 2.4 GHz",
+        f"(b) ESP {format_esp_key(high_esp_key)} — 5 GHz",
+    )
+    subtitle = (
+        f"Position {format_location_key(normalize_location_input(str(position)) or '')} · "
+        f"User {_display_recording_id(user)} · Trial {_display_recording_id(trial)} · "
+        f"{packet_count} packets"
+    )
+    stage_settings = (
+        ("raw", "Raw CSI magnitude", "csi_raw", "CSI magnitude (dB)", True),
+        (
+            "calibrated",
+            "RSSI-calibrated CSI magnitude",
+            "csi_calibrated",
+            "CSI magnitude (dB)",
+            True,
+        ),
+        (
+            "normalized",
+            "Empty-room-normalized CSI",
+            "csi_normalized",
+            "Normalized CSI value",
+            False,
+        ),
+    )
+    for stage_name, figure_title, filename_stem, value_label, convert_to_db in stage_settings:
+        values = selected[stage_name]
+        plot_values = (
+            (magnitude_to_db(values[0]), magnitude_to_db(values[1]))
+            if convert_to_db
+            else values
+        )
+        cmap, norm = _magnitude_color_mapping(
+            plot_values,
+            normalized=not convert_to_db,
+            normalized_limit_percentile=normalized_limit_percentile,
+        )
+        heatmap_figure = _plot_magnitude_heatmap_pair(
+            plot_values,
+            panel_titles=panel_titles,
+            figure_title=figure_title,
+            subtitle=subtitle,
+            value_label=value_label,
+            cmap=cmap,
+            norm=norm,
+        )
+        _finish_magnitude_figure(
+            heatmap_figure,
+            save=save,
+            output_directory=output_directory,
+            filename=f"{filename_stem}_heatmap.png",
+        )
+        surface_figure = _plot_magnitude_surface_pair(
+            plot_values,
+            panel_titles=panel_titles,
+            figure_title=figure_title,
+            subtitle=subtitle,
+            value_label=value_label,
+            cmap=cmap,
+            norm=norm,
+            elevation=surface_elevation,
+            azimuth=surface_azimuth,
+        )
+        _finish_magnitude_figure(
+            surface_figure,
+            save=save,
+            output_directory=output_directory,
+            filename=f"{filename_stem}_3d.png",
+        )
+
+
+def _indexed_recording_key(value: object, prefix: str) -> str:
+    normalized = str(value).strip().lower().removeprefix(f"{prefix}_")
+    if not normalized.isdigit():
+        raise ValueError(f"Invalid {prefix} identifier: {value!r}.")
+    return f"{prefix}_{int(normalized):02d}"
+
+
+def _display_recording_id(value: object) -> str:
+    normalized = str(value).strip().rsplit("_", maxsplit=1)[-1]
+    return f"{int(normalized):02d}" if normalized.isdigit() else normalized
+
+
+def _anchor_pair_keys(anchor_pair: int) -> tuple[str, str]:
+    try:
+        anchor_id = int(anchor_pair)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"Invalid anchor pair: {anchor_pair!r}.") from error
+    if not 1 <= anchor_id <= 10:
+        raise ValueError("anchor_pair must identify a 2.4 GHz ESP from 1 through 10.")
+    return f"esp_{anchor_id:02d}", f"esp_{anchor_id + HIGH_FREQUENCY_ESP_OFFSET:02d}"
+
+
+def _unique_recording_scenario(
+    magnitudes: CsiMap,
+    *,
+    location_key: str,
+    user_key: str,
+    trial_key: str,
+    esp_keys: tuple[str, str],
+) -> str:
+    matching_scenarios = []
+    for scenario_key, locations_map in magnitudes.items():
+        esps_map = locations_map.get(location_key, {}).get(user_key, {})
+        if all(trial_key in esps_map.get(esp_key, {}) for esp_key in esp_keys):
+            matching_scenarios.append(scenario_key)
+    if not matching_scenarios:
+        identity = f"{location_key}/{user_key}/{trial_key}/{esp_keys[0]}+{esp_keys[1]}"
+        raise ValueError(f"No paired CSI recording was found for {identity}.")
+    if len(matching_scenarios) > 1:
+        msg = (
+            "The selected recording exists in multiple scenarios: "
+            f"{', '.join(matching_scenarios)}."
+        )
+        raise ValueError(msg)
+    return matching_scenarios[0]
+
+
+def _recording_magnitude(
+    magnitudes: CsiMap,
+    *,
+    scenario_key: str,
+    location_key: str,
+    user_key: str,
+    esp_key: str,
+    trial_key: str,
+) -> np.ndarray:
+    try:
+        magnitude = magnitudes[scenario_key][location_key][user_key][esp_key][trial_key]
+    except KeyError as error:
+        identity = f"{scenario_key}/{location_key}/{user_key}/{esp_key}/{trial_key}"
+        raise ValueError(f"CSI recording stage is missing for {identity}.") from error
+    magnitude_array = np.asarray(magnitude)
+    if magnitude_array.ndim != MAGNITUDE_DIMS:
+        raise ValueError(f"CSI magnitude for {esp_key} must be a 2D array.")
+    return magnitude_array
+
+
+def _packet_interval_start(available: int, *, packet_count: int, method: str) -> int:
+    method_key = str(method).strip().lower()
+    if method_key == "start":
+        return 0
+    if method_key == "middle":
+        return (available - packet_count) // 2
+    if method_key == "end":
+        return available - packet_count
+    raise ValueError("packet_selection must be 'start', 'middle', or 'end'.")
+
+
+def _magnitude_color_mapping(
+    values: tuple[np.ndarray, np.ndarray],
+    *,
+    normalized: bool,
+    normalized_limit_percentile: float,
+) -> tuple[mcolors.Colormap, mcolors.Normalize]:
+    finite_values = np.concatenate([value[np.isfinite(value)] for value in values])
+    if finite_values.size == 0:
+        raise ValueError("The selected CSI interval contains no finite values to plot.")
+    if normalized:
+        absolute_values = np.abs(finite_values)
+        limit = float(np.percentile(absolute_values, normalized_limit_percentile))
+        if not np.isfinite(limit) or limit <= 0:
+            limit = float(np.max(absolute_values))
+        if not np.isfinite(limit) or limit <= 0:
+            limit = float(np.finfo(float).eps)
+        colors = plt.get_cmap("coolwarm")(np.linspace(0.0, 1.0, 257))
+        colors[128] = (1.0, 1.0, 1.0, 1.0)
+        cmap = mcolors.ListedColormap(colors, name="coolwarm_zero_white")
+        return cmap, mcolors.TwoSlopeNorm(vmin=-limit, vcenter=0.0, vmax=limit)
+
+    lower = float(np.min(finite_values))
+    upper = float(np.max(finite_values))
+    if lower == upper:
+        padding = max(abs(lower), 1.0) * 1e-6
+        lower -= padding
+        upper += padding
+    return plt.get_cmap("viridis"), mcolors.Normalize(vmin=lower, vmax=upper)
+
+
+def _plot_magnitude_heatmap_pair(  # noqa: PLR0913
+    values: tuple[np.ndarray, np.ndarray],
+    *,
+    panel_titles: tuple[str, str],
+    figure_title: str,
+    subtitle: str,
+    value_label: str,
+    cmap: mcolors.Colormap,
+    norm: mcolors.Normalize,
+):
+    fig, axes = plt.subplots(1, 2, figsize=(13.2, 5.2), constrained_layout=True)
+    images = []
+    for ax, panel_values, panel_title in zip(axes, values, panel_titles):
+        packet_total, subcarrier_total = panel_values.shape
+        image = ax.imshow(
+            panel_values,
+            origin="lower",
+            aspect="auto",
+            interpolation="none",
+            cmap=cmap,
+            norm=norm,
+            extent=(-0.5, subcarrier_total - 0.5, 0.5, packet_total + 0.5),
+        )
+        images.append(image)
+        ax.set_title(panel_title, fontsize=11, pad=8)
+        ax.set_xlabel("Subcarrier index")
+        ax.set_ylabel("Packet within selected interval")
+        _set_magnitude_axis_ticks(ax, packet_total, subcarrier_total)
+        _style_magnitude_axis(ax)
+    fig.colorbar(images[0], ax=axes, label=value_label, shrink=0.86, pad=0.025)
+    fig.suptitle(f"{figure_title}\n{subtitle}", fontsize=14, linespacing=1.45)
+    fig.patch.set_facecolor("white")
+    return fig
+
+
+def _plot_magnitude_surface_pair(  # noqa: PLR0913
+    values: tuple[np.ndarray, np.ndarray],
+    *,
+    panel_titles: tuple[str, str],
+    figure_title: str,
+    subtitle: str,
+    value_label: str,
+    cmap: mcolors.Colormap,
+    norm: mcolors.Normalize,
+    elevation: float,
+    azimuth: float,
+):
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(14.0, 6.2),
+        constrained_layout=True,
+        subplot_kw={"projection": "3d"},
+    )
+    surfaces = []
+    for ax, panel_values, panel_title in zip(axes, values, panel_titles):
+        packet_total, subcarrier_total = panel_values.shape
+        subcarrier_index, packet_index = np.meshgrid(
+            np.arange(subcarrier_total),
+            np.arange(1, packet_total + 1),
+        )
+        surface = ax.plot_surface(
+            subcarrier_index,
+            packet_index,
+            panel_values,
+            rstride=1,
+            cstride=1,
+            linewidth=0,
+            cmap=cmap,
+            norm=norm,
+            antialiased=True,
+        )
+        surfaces.append(surface)
+        ax.set_title(panel_title, fontsize=11, pad=8)
+        ax.set_xlabel("Subcarrier index", labelpad=8)
+        ax.set_ylabel("Packet within selected interval", labelpad=8)
+        ax.set_zlabel(value_label, labelpad=8)
+        ax.set_zlim(norm.vmin, norm.vmax)
+        ax.view_init(elev=elevation, azim=azimuth)
+        _set_magnitude_axis_ticks(ax, packet_total, subcarrier_total)
+        _style_magnitude_axis(ax, is_3d=True)
+    fig.colorbar(surfaces[0], ax=axes, label=value_label, shrink=0.68, pad=0.035)
+    fig.suptitle(f"{figure_title}\n{subtitle}", fontsize=14, linespacing=1.45)
+    fig.patch.set_facecolor("white")
+    return fig
+
+
+def _set_magnitude_axis_ticks(ax: Axes, packet_total: int, subcarrier_total: int) -> None:
+    x_ticks = np.unique(np.linspace(0, subcarrier_total - 1, min(8, subcarrier_total), dtype=int))
+    y_ticks = np.unique(np.linspace(1, packet_total, min(7, packet_total), dtype=int))
+    ax.set_xticks(x_ticks)
+    ax.set_yticks(y_ticks)
+
+
+def _style_magnitude_axis(ax: Axes, *, is_3d: bool = False) -> None:
+    ax.set_facecolor("white")
+    ax.tick_params(colors="#262626", labelsize=8)
+    ax.xaxis.label.set_color("#262626")
+    ax.yaxis.label.set_color("#262626")
+    if is_3d:
+        ax.zaxis.label.set_color("#262626")
+        for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+            axis.pane.set_facecolor((1.0, 1.0, 1.0, 1.0))
+            axis.pane.set_edgecolor("#d9d9d9")
+            axis._axinfo["grid"]["color"] = (0.82, 0.82, 0.82, 0.55)  # noqa: SLF001
+        return
+    ax.grid(color="#d0d0d0", linewidth=0.45, alpha=0.35)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#8a8a8a")
+    ax.spines["bottom"].set_color("#8a8a8a")
+
+
+def _finish_magnitude_figure(
+    fig,
+    *,
+    save: bool,
+    output_directory: str | Path,
+    filename: str,
+) -> None:
+    if save:
+        output_path = Path(output_directory) / filename
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+        print(f"[plots] saved {output_path} at dpi=300.")
+    plt.show()
 
 
 def visualization_magnitude_db(

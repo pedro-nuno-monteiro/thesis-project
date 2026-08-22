@@ -40,11 +40,13 @@ def process_complex_csi(
     calibration_mode: CalibrationMode = "none",
     min_rssi_dbm: float = -95.0,
     calibration_eps: float = 1e-12,
-) -> tuple[np.ndarray, int, bool]:
+    return_raw_magnitude: bool = False,
+) -> tuple[np.ndarray, int, bool] | tuple[np.ndarray, int, bool, np.ndarray]:
     """Select subcarriers, filter invalid packets, calibrate, and take magnitude."""
     selected_csi = select_active_subcarriers(complex_csi, its5ghz=its5ghz)
 
-    # no filter is applied, so all packets remain the same
+    # Apply the final calibration-validity mask before exposing either stage so
+    # raw and calibrated magnitudes always refer to the same packet rows.
     filtered_csi, filtered_rssi, invalid_packets_removed = filter_packets_for_calibration(
         selected_csi,
         rssi_dbm,
@@ -52,6 +54,7 @@ def process_complex_csi(
         min_rssi_dbm=min_rssi_dbm,
         eps=calibration_eps,
     )
+    raw_magnitude = np.abs(filtered_csi)
     calibrated_csi, calibration_applied = calibrate_complex_csi(
         filtered_csi,
         calibration_mode=calibration_mode,
@@ -61,7 +64,14 @@ def process_complex_csi(
 
     # magnitude is computed
     magnitude = np.abs(calibrated_csi)
-    return magnitude, invalid_packets_removed, calibration_applied and magnitude.shape[0] > 0
+    result = (
+        magnitude,
+        invalid_packets_removed,
+        calibration_applied and magnitude.shape[0] > 0,
+    )
+    if return_raw_magnitude:
+        return (*result, raw_magnitude)
+    return result
 
 
 def filter_packets_for_calibration(
