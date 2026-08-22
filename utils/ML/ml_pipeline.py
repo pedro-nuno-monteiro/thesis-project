@@ -52,18 +52,35 @@ def load_raw_csi_data(
     *,
     calibration_mode: str,
     csv_options: dict[str, Any],
-) -> tuple[dict[str, Any], pd.DataFrame]:
-    """Load CSI CSV files and return magnitude data plus diagnostics."""
+    return_magnitude_stages: bool = False,
+) -> (
+    tuple[dict[str, Any], pd.DataFrame]
+    | tuple[dict[str, Any], pd.DataFrame, dict[str, dict[str, Any]]]
+):
+    """Load CSI data, optionally retaining aligned raw/calibrated magnitudes."""
+    if return_magnitude_stages and calibration_mode != "rssi":
+        msg = "Magnitude-stage plots require calibration_mode='rssi'."
+        raise ValueError(msg)
     all_data_files = get_csv_files(str(data_dir))
     scenarios_id, locations_id, users_id, esps_id, _ = sort_meta_info(str(data_dir))
     print(f"Scenarios present: {', '.join(scenarios_id) or 'none'}")
     print(f"Locations: {len(locations_id)} | Users: {len(users_id)} | ESPs: {len(esps_id)}")
-    magnitude_data, csv_diagnostics = process_csv_files(
+    loaded_data = process_csv_files(
         all_data_files,
         return_diagnostics=True,
+        return_raw_magnitude=return_magnitude_stages,
         calibration_mode=calibration_mode,
         **csv_options,
     )
+    if return_magnitude_stages:
+        magnitude_data, raw_magnitude_data, csv_diagnostics = loaded_data
+        magnitude_stages = {
+            "raw": raw_magnitude_data,
+            "calibrated": magnitude_data,
+        }
+        return magnitude_data, csv_diagnostics, magnitude_stages
+
+    magnitude_data, csv_diagnostics = loaded_data
     return magnitude_data, csv_diagnostics
 
 
@@ -910,7 +927,7 @@ def save_analysis_tables(
 
 
 def load_lovo_summary_tables(summary_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load LOVO rows from the two authoritative global CSV files."""
+    """Load LOVO rows with one canonical analysis schema."""
     results_root = summary_dir.parent if summary_dir.name in {"summary", "tables"} else summary_dir
     per_fold_path = results_root / "runs_folds.csv"
     summary_path = results_root / "runs.csv"
@@ -918,26 +935,167 @@ def load_lovo_summary_tables(summary_dir: Path) -> tuple[pd.DataFrame, pd.DataFr
     if missing:
         msg = "Missing LOVO summary files. Run the Global baseline cell first.\n"
         raise FileNotFoundError(msg + "\n".join(missing))
-    summary = pd.read_csv(summary_path)
-    summary = summary.loc[summary["split"].astype(str) == "lovo"].copy()
-    summary["dataset"] = summary["band"].astype(str).map(
-        {"2_4ghz": "2.4 GHz", "5ghz": "5 GHz", "fusion": "Fusion"}
+    summary = _canonicalize_lovo_columns(pd.read_csv(summary_path))
+    _validate_lovo_schema(
+        summary,
+        required={"run_id", "model", "dataset", "split"},
+        source=summary_path,
     )
+    summary = summary.loc[summary["split"].astype(str).str.casefold() == "lovo"].copy()
+    if summary.empty:
+        raise ValueError(f"No LOVO runs were found in {summary_path}.")
+    _validate_lovo_values(
+        summary,
+        required={"run_id", "model", "dataset"},
+        source=summary_path,
+    )
+    summary["run_id"] = summary["run_id"].astype(str).str.strip()
+    summary["dataset"] = summary["dataset"].map(_canonical_lovo_dataset)
     summary["model"] = summary["model"].astype(str).str.upper()
     run_ids = set(summary["run_id"].astype(str))
-    per_fold = pd.read_csv(per_fold_path)
+    per_fold = _canonicalize_lovo_columns(pd.read_csv(per_fold_path))
+    _validate_lovo_schema(
+        per_fold,
+        required={"run_id", "held_out_user", "position_accuracy"},
+        source=per_fold_path,
+    )
+    per_fold["run_id"] = per_fold["run_id"].astype(str).str.strip()
     per_fold = per_fold.loc[per_fold["run_id"].astype(str).isin(run_ids)].copy()
+    if per_fold.empty:
+        raise ValueError(
+            f"No rows in {per_fold_path} match the LOVO run_id values from {summary_path}."
+        )
+
+    run_metadata = summary[["run_id", "model", "dataset"]].drop_duplicates()
+    if run_metadata["run_id"].duplicated().any():
+        duplicate_ids = sorted(
+            run_metadata.loc[run_metadata["run_id"].duplicated(keep=False), "run_id"].unique()
+        )
+        raise ValueError(f"Conflicting LOVO metadata for run_id values: {duplicate_ids}.")
     per_fold = per_fold.drop(columns=["model", "dataset"], errors="ignore")
     per_fold = per_fold.merge(
-        summary[["run_id", "model", "dataset"]],
+        run_metadata,
         on="run_id",
         how="left",
+        validate="many_to_one",
     )
-    assert "model" in per_fold.columns
-    assert "dataset" in per_fold.columns
-    assert per_fold["model"].notna().all()
-    assert per_fold["dataset"].notna().all()
+    _validate_lovo_schema(
+        per_fold,
+        required={"model", "dataset", "held_out_user", "position_accuracy"},
+        source=per_fold_path,
+    )
+    _validate_lovo_values(
+        per_fold,
+        required={"model", "dataset", "held_out_user", "position_accuracy"},
+        source=per_fold_path,
+    )
+    per_fold["model"] = per_fold["model"].astype(str).str.upper()
+    per_fold["dataset"] = per_fold["dataset"].map(_canonical_lovo_dataset)
+    per_fold["held_out_user"] = (
+        per_fold["held_out_user"]
+        .astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .str.zfill(2)
+    )
     return per_fold, summary
+
+
+def _canonicalize_lovo_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Copy known persisted LOVO field aliases to their canonical names."""
+    canonical = dataframe.copy()
+    index_names = [name for name in canonical.index.names if name is not None]
+    if index_names:
+        index_aliases = {str(name).strip().casefold() for name in index_names}
+        if index_aliases & {"model", "classifier", "dataset", "band"}:
+            canonical = canonical.reset_index()
+
+    aliases = {
+        "run_id": ("run_id", "run id"),
+        "model": ("model", "classifier", "model_name", "model name"),
+        "dataset": (
+            "dataset",
+            "band",
+            "sensing_configuration",
+            "sensing configuration",
+            "frequency_band",
+            "frequency band",
+        ),
+        "split": ("split", "split_mode", "protocol"),
+        "held_out_user": (
+            "held_out_user",
+            "held_out_volunteer",
+            "held-out volunteer",
+            "test_user",
+        ),
+        "position_accuracy": (
+            "position_accuracy",
+            "position accuracy",
+            "accuracy",
+        ),
+    }
+    available = {str(column).strip().casefold(): column for column in canonical.columns}
+    for canonical_name, candidates in aliases.items():
+        if canonical_name in canonical.columns:
+            continue
+        source_column = next(
+            (available[candidate] for candidate in candidates if candidate in available),
+            None,
+        )
+        if source_column is not None:
+            canonical[canonical_name] = canonical[source_column]
+    return canonical
+
+
+def _canonical_lovo_dataset(value: object) -> str:
+    """Return the display label for a persisted sensing-configuration value."""
+    raw_value = str(value).strip()
+    normalized = raw_value.casefold().replace(".", "_").replace(" ", "")
+    return {
+        "2_4ghz": "2.4 GHz",
+        "5ghz": "5 GHz",
+        "fusion": "Fusion",
+    }.get(normalized, raw_value)
+
+
+def _validate_lovo_schema(
+    dataframe: pd.DataFrame,
+    *,
+    required: set[str],
+    source: Path,
+) -> None:
+    """Raise an informative error for missing canonical LOVO columns."""
+    missing = sorted(required - set(dataframe.columns))
+    if not missing:
+        return
+    available = ", ".join(str(column) for column in dataframe.columns) or "(none)"
+    raise ValueError(
+        f"LOVO schema in {source} is missing required canonical columns: "
+        f"{', '.join(missing)}. Available columns: {available}."
+    )
+
+
+def _validate_lovo_values(
+    dataframe: pd.DataFrame,
+    *,
+    required: set[str],
+    source: Path,
+) -> None:
+    """Raise an informative error when required LOVO fields contain empty values."""
+    empty_columns = []
+    for column in sorted(required):
+        values = dataframe[column]
+        empty_mask = values.isna() | values.astype(str).str.strip().str.casefold().isin(
+            {"", "nan", "none"}
+        )
+        if empty_mask.any():
+            empty_columns.append(column)
+    if not empty_columns:
+        return
+    available = ", ".join(str(column) for column in dataframe.columns) or "(none)"
+    raise ValueError(
+        f"LOVO schema in {source} has empty required fields: {', '.join(empty_columns)}. "
+        f"Available columns: {available}."
+    )
 
 
 def lovo_aggregated_analysis_table(lovo_summary: pd.DataFrame) -> pd.DataFrame:

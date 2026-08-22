@@ -109,6 +109,7 @@ class _RunOptions:
     calibration_mode: CalibrationMode = "none"
     min_rssi_dbm: float = -95.0
     calibration_eps: float = 1e-12
+    return_raw_magnitude: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ class _StandardFileResult:
     total_rows: int
     invalid_packets_removed: int
     calibration_applied: bool
+    raw_magnitude: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -303,13 +305,14 @@ def process_csv_files(  # noqa: PLR0913
     calibration_mode: CalibrationMode = "none",
     min_rssi_dbm: float = -95.0,
     calibration_eps: float = 1e-12,
+    return_raw_magnitude: bool = False,
 ) -> (
     CsiMap
     | tuple[CsiMap, CacheStats]
     | tuple[CsiMap, pd.DataFrame]
     | tuple[CsiMap, CacheStats, pd.DataFrame]
 ):
-    """Load all mapped CSV files and return their processed magnitude arrays."""
+    """Load CSV files, optionally exposing aligned pre-calibration magnitudes."""
     if calibration_mode not in VALID_CALIBRATION_MODES:
         raise calibration_mode_error()
     if not np.isfinite(min_rssi_dbm):
@@ -320,6 +323,7 @@ def process_csv_files(  # noqa: PLR0913
     # Build the output shape before processing so invalid or empty files retain
     # their expected place in the nested data map.
     magnitudes = _initialize_maps(data_files)
+    raw_magnitudes = _initialize_maps(data_files) if return_raw_magnitude else None
     jobs = list(_iter_jobs(data_files))
     options = _RunOptions(
         max_workers=max_workers,
@@ -329,6 +333,7 @@ def process_csv_files(  # noqa: PLR0913
         calibration_mode=calibration_mode,
         min_rssi_dbm=min_rssi_dbm,
         calibration_eps=calibration_eps,
+        return_raw_magnitude=return_raw_magnitude,
     )
     # Each file has an explicit cache boundary and can be processed independently.
     results, cache_stats = _run_jobs(jobs, _process_standard_cached, options)
@@ -337,6 +342,12 @@ def process_csv_files(  # noqa: PLR0913
     calibration_applied_files = 0
     for result in results:
         _set_magnitude_entry(magnitudes, result.job, result.payload.magnitude)
+        if raw_magnitudes is not None:
+            raw_magnitude = result.payload.raw_magnitude
+            if raw_magnitude is None:
+                msg = "Raw CSI magnitude was requested but is missing from a processed result."
+                raise RuntimeError(msg)
+            _set_magnitude_entry(raw_magnitudes, result.job, raw_magnitude)
         invalid_packets_removed += result.payload.invalid_packets_removed
         calibration_applied_files += int(result.payload.calibration_applied)
 
@@ -349,17 +360,18 @@ def process_csv_files(  # noqa: PLR0913
         calibration_applied_files=calibration_applied_files,
     )
 
-    if return_stats and return_diagnostics:
-        return magnitudes, stats, diagnostics if diagnostics is not None else pd.DataFrame(
-            columns=PROCESSING_DIAGNOSTIC_COLUMNS
-        )
+    output: list[object] = [magnitudes]
+    if raw_magnitudes is not None:
+        output.append(raw_magnitudes)
     if return_stats:
-        return magnitudes, stats
+        output.append(stats)
     if return_diagnostics:
-        return magnitudes, diagnostics if diagnostics is not None else pd.DataFrame(
-            columns=PROCESSING_DIAGNOSTIC_COLUMNS
+        output.append(
+            diagnostics
+            if diagnostics is not None
+            else pd.DataFrame(columns=PROCESSING_DIAGNOSTIC_COLUMNS)
         )
-    return magnitudes
+    return output[0] if len(output) == 1 else tuple(output)
 
 
 def _process_standard_file(job: _ProcessingJob, options: _RunOptions) -> _StandardFileResult:
@@ -378,20 +390,24 @@ def _process_standard_file(job: _ProcessingJob, options: _RunOptions) -> _Standa
             no_match_count=no_match_count,
             no_complete_count=no_complete_count,
             total_rows=len(csi_raw),
+            return_raw_magnitude=options.return_raw_magnitude,
         )
 
     csi_values = np.asarray(valid_csi, dtype=float)
     rssi_dbm = np.asarray(valid_rssi, dtype=float)
     complex_csi = iq_values_to_complex(csi_values)
     # Delegate signal processing after the CSV-specific parsing is complete.
-    magnitude, invalid_packets_removed, calibration_applied = process_complex_csi(
+    processed = process_complex_csi(
         complex_csi,
         rssi_dbm,
         its5ghz=job.its5ghz,
         calibration_mode=options.calibration_mode,
         min_rssi_dbm=options.min_rssi_dbm,
         calibration_eps=options.calibration_eps,
+        return_raw_magnitude=options.return_raw_magnitude,
     )
+    magnitude, invalid_packets_removed, calibration_applied = processed[:3]
+    raw_magnitude = processed[3] if options.return_raw_magnitude else None
     return _StandardFileResult(
         magnitude=magnitude,
         no_match_count=no_match_count,
@@ -399,15 +415,17 @@ def _process_standard_file(job: _ProcessingJob, options: _RunOptions) -> _Standa
         total_rows=len(csi_raw),
         invalid_packets_removed=invalid_packets_removed,
         calibration_applied=calibration_applied,
+        raw_magnitude=raw_magnitude,
     )
 
 
 def _processor_identity(options: _RunOptions) -> str:
     """Return the cache identity for the selected CSI processing settings."""
-    return (
+    identity = (
         f"{PROCESSOR_VERSION}-calibration-{options.calibration_mode}"
         f"-min-rssi-{options.min_rssi_dbm:g}-eps-{options.calibration_eps:g}"
     )
+    return f"{identity}-with-raw" if options.return_raw_magnitude else identity
 
 
 def _process_standard_cached(job: _ProcessingJob, options: _RunOptions) -> _CachedResult:
@@ -504,6 +522,7 @@ def _empty_standard_result(
     no_match_count: int,
     no_complete_count: int,
     total_rows: int,
+    return_raw_magnitude: bool = False,
 ) -> _StandardFileResult:
     """Return a correctly shaped empty result for a file with no valid packets."""
     subcarrier_count = 56 if job.its5ghz else 50
@@ -514,6 +533,9 @@ def _empty_standard_result(
         total_rows=total_rows,
         invalid_packets_removed=0,
         calibration_applied=False,
+        raw_magnitude=(
+            np.empty((0, subcarrier_count), dtype=float) if return_raw_magnitude else None
+        ),
     )
 
 
