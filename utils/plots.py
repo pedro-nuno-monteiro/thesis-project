@@ -933,18 +933,18 @@ def _plot_magnitude_heatmap_pair(  # noqa: PLR0913
     for ax, panel_values, panel_title in zip(axes, values, panel_titles):
         packet_total, subcarrier_total = panel_values.shape
         image = ax.imshow(
-            panel_values,
+            panel_values.T,
             origin="lower",
             aspect="auto",
             interpolation="none",
             cmap=cmap,
             norm=norm,
-            extent=(-0.5, subcarrier_total - 0.5, 0.5, packet_total + 0.5),
+            extent=(0.5, packet_total + 0.5, -0.5, subcarrier_total - 0.5),
         )
         images.append(image)
         ax.set_title(panel_title, fontsize=11, pad=8)
-        ax.set_xlabel("Subcarrier index")
-        ax.set_ylabel("Packet within selected interval")
+        ax.set_xlabel("Packet index within window")
+        ax.set_ylabel("Retained subcarrier index")
         _set_magnitude_axis_ticks(ax, packet_total, subcarrier_total)
         _style_magnitude_axis(ax)
     fig.colorbar(images[0], ax=axes, label=value_label, shrink=0.86, pad=0.025)
@@ -975,14 +975,14 @@ def _plot_magnitude_surface_pair(  # noqa: PLR0913
     surfaces = []
     for ax, panel_values, panel_title in zip(axes, values, panel_titles):
         packet_total, subcarrier_total = panel_values.shape
-        subcarrier_index, packet_index = np.meshgrid(
-            np.arange(subcarrier_total),
+        packet_index, subcarrier_index = np.meshgrid(
             np.arange(1, packet_total + 1),
+            np.arange(subcarrier_total),
         )
         surface = ax.plot_surface(
-            subcarrier_index,
             packet_index,
-            panel_values,
+            subcarrier_index,
+            panel_values.T,
             rstride=1,
             cstride=1,
             linewidth=0,
@@ -992,8 +992,8 @@ def _plot_magnitude_surface_pair(  # noqa: PLR0913
         )
         surfaces.append(surface)
         ax.set_title(panel_title, fontsize=11, pad=8)
-        ax.set_xlabel("Subcarrier index", labelpad=8)
-        ax.set_ylabel("Packet within selected interval", labelpad=8)
+        ax.set_xlabel("Packet index within window", labelpad=8)
+        ax.set_ylabel("Retained subcarrier index", labelpad=8)
         ax.set_zlabel(value_label, labelpad=8)
         ax.set_zlim(norm.vmin, norm.vmax)
         ax.view_init(elev=elevation, azim=azimuth)
@@ -1006,8 +1006,8 @@ def _plot_magnitude_surface_pair(  # noqa: PLR0913
 
 
 def _set_magnitude_axis_ticks(ax: Axes, packet_total: int, subcarrier_total: int) -> None:
-    x_ticks = np.unique(np.linspace(0, subcarrier_total - 1, min(8, subcarrier_total), dtype=int))
-    y_ticks = np.unique(np.linspace(1, packet_total, min(7, packet_total), dtype=int))
+    x_ticks = np.unique(np.linspace(1, packet_total, min(7, packet_total), dtype=int))
+    y_ticks = np.unique(np.linspace(0, subcarrier_total - 1, min(8, subcarrier_total), dtype=int))
     ax.set_xticks(x_ticks)
     ax.set_yticks(y_ticks)
 
