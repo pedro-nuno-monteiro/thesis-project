@@ -152,7 +152,8 @@ def plot_model_band_error_boxplot(
                 values.append(errors.to_numpy(dtype=float))
 
     if values:
-        ax.boxplot(values, labels=labels, showmeans=True, meanline=True)
+        ax.boxplot(values, showmeans=True, meanline=True)
+        ax.set_xticks(np.arange(1, len(labels) + 1), labels)
     else:
         ax.text(0.5, 0.5, "No distance errors", ha="center", va="center")
     ax.set_ylabel("Distance error (m)")
@@ -476,7 +477,8 @@ def plot_lovo_fold_spread(
         positions.append(index)
 
     if values:
-        ax.boxplot(values, positions=positions, labels=labels, widths=0.45)
+        ax.boxplot(values, positions=positions, widths=0.45)
+        ax.set_xticks(positions, labels)
         for position, band_values in zip(positions, values):
             offsets = np.linspace(-0.08, 0.08, num=len(band_values))
             ax.scatter(

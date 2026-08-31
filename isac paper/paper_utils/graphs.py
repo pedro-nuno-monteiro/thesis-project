@@ -2672,7 +2672,8 @@ def plot_distance_error_boxplot(predictions: pd.DataFrame) -> None:
     if groups:
         labels = [str(dataset_name) for dataset_name, _ in groups]
         error_values = [errors.to_numpy(dtype=float) for _, errors in groups]
-        ax.boxplot(error_values, labels=labels, showmeans=True)
+        ax.boxplot(error_values, showmeans=True)
+        ax.set_xticks(np.arange(1, len(labels) + 1), labels)
     else:
         ax.text(0.5, 0.5, "No valid distance errors to plot.",
                 ha="center", va="center", transform=ax.transAxes)
@@ -3035,7 +3036,8 @@ def plot_band_error_boxplot(
             data.append(errors.to_numpy(dtype=float))
 
         if data:
-            ax.boxplot(data, labels=labels, showmeans=True, meanline=True)
+            ax.boxplot(data, showmeans=True, meanline=True)
+            ax.set_xticks(np.arange(1, len(labels) + 1), labels)
         else:
             ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
 
