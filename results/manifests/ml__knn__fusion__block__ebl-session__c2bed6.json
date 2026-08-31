@@ -1,0 +1,39 @@
+{
+  "config": {
+    "feat_opts": {
+      "overlap_size": 0,
+      "require_all_esps": false,
+      "window_size": 60
+    },
+    "model_params": {
+      "metric": "manhattan",
+      "n_neighbors": 5,
+      "weights": "distance"
+    },
+    "preproc_opts": {
+      "baseline_scope": "per_session",
+      "epsilon": 1e-08,
+      "normalization": "empty_baseline"
+    },
+    "seed": null,
+    "split_params": {
+      "column_spacing": 1.0,
+      "n_blocks": 10,
+      "random_state": 42,
+      "row_spacing": 1.0,
+      "test_size": 0.3
+    }
+  },
+  "parsed_run_id": {
+    "band": "fusion",
+    "baseline_scope": "session",
+    "family": "ml",
+    "hash6": "c2bed6",
+    "model": "knn",
+    "normalization": "empty_baseline",
+    "seed": null,
+    "split": "block"
+  },
+  "run_id": "ml__knn__fusion__block__ebl-session__c2bed6",
+  "timestamp": "2026-08-31T10:59:25.614311+00:00"
+}
