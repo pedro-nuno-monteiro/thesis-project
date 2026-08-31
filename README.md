@@ -189,10 +189,10 @@ All active reusable implementation is in `utils/`.
 
 ### `utils/DL/models.py`
 - CNN model definitions used by the DL pipeline:
-  - `SimpleCNN`
-  - `CrossSessionCNN`
-  - `BandFusionCNN`
-  - `RoomPairCNN`
+  - `BandEncoder`
+  - `RoomEncoder`
+  - `DualBandCNN`
+  - `RoomStackedCNN`
 
 ### `utils/DL/dl_pipeline.py`
 - `resolve_dl_architecture`: Resolve array builder, model class, and labels for selected architecture.
