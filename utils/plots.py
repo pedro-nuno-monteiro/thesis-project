@@ -448,6 +448,7 @@ def plot_lovo_fold_spread(
     bands: Sequence[str],
     model: str = "RF",
     save_path: str | Path | None = None,
+    ax: Axes | None = None,
 ) -> None:
     """Plot held-out-user position accuracy spread for the selected model."""
     _validate_columns(
@@ -458,7 +459,11 @@ def plot_lovo_fold_spread(
     filtered = lovo_per_fold.loc[
         lovo_per_fold["model"].astype(str).str.casefold() == model_key
     ]
-    fig, ax = plt.subplots(figsize=(7, 4.2))
+    supplied_ax = ax is not None
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7, 4.2))
+    else:
+        fig = ax.figure
     values = []
     labels = []
     positions = []
@@ -494,7 +499,8 @@ def plot_lovo_fold_spread(
     ax.set_title(f"LOVO held-out-user spread - {model}")
     ax.set_ylim(0, 1.02)
     ax.grid(axis="y", alpha=0.3)
-    _save_and_show(fig, save_path)
+    if not supplied_ax:
+        _save_and_show(fig, save_path)
 
 
 def plot_block_vs_lovo_position_accuracy(
