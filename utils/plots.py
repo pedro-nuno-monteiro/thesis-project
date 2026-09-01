@@ -32,6 +32,10 @@ ROOM_PATCH_COLORS = {
 # for both, so low accuracy / high error share the dark end of their own map.
 FLOOR_PLAN_ACCURACY_CMAP = "viridis"
 FLOOR_PLAN_ERROR_CMAP = "viridis_r"
+# Diverging map for Block-minus-LOVO accuracy differences, reversed so a large
+# positive value (severe LOVO degradation relative to Block) reads as red, zero as
+# white, and LOVO outperforming Block as blue.
+FLOOR_PLAN_DIFF_CMAP = "RdBu_r"
 # Okabe-Ito colour-blind-safe qualitative palette (orange, sky blue, bluish green,
 # vermillion, blue, reddish purple) paired with distinct marker shapes so series
 # stay distinguishable without relying on colour alone.
@@ -325,8 +329,10 @@ def plot_floor_plan_heatmap(
     max_col = max(record["col_idx"] for record in records)
     n_rows = len(FLOOR_PLAN_ROWS)
     n_cols = max_col + 1
+    # Use the true maximum so the colour bar always spans every plotted cell; a
+    # percentile cap would visually clip outlier positions off the top of the scale.
     all_errors = [record["mean_error"] for record in records if not np.isnan(record["mean_error"])]
-    error_vmax = float(np.percentile(all_errors, 95)) if all_errors else 1.0
+    error_vmax = float(np.nanmax(all_errors)) if all_errors else 1.0
     metrics = [
         (
             "accuracy",
@@ -1132,7 +1138,7 @@ def plot_block_vs_lovo_accuracy_diff(
     fig = _render_floor_plan_panel(
         diff_records,
         metric_key="accuracy_diff_pp",
-        cmap_name="RdBu",
+        cmap_name=FLOOR_PLAN_DIFF_CMAP,
         norm=norm,
         metric_label="Accuracy difference (percentage points)",
         fmt_fn=lambda value: f"{value:+.0f} pp",
@@ -1192,7 +1198,7 @@ def plot_block_vs_lovo_floor_plan(
         (
             diff_records,
             "accuracy_diff_pp",
-            "RdBu",
+            FLOOR_PLAN_DIFF_CMAP,
             mcolors.TwoSlopeNorm(vmin=-diff_limit, vcenter=0.0, vmax=diff_limit),
             "Accuracy difference (pp)",
             lambda value: f"{value:+.0f} pp",
