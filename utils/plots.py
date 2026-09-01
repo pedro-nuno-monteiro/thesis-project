@@ -52,6 +52,7 @@ def plot_localization_error_cdf_by_model(
     *,
     dataset: str,
     save_path: str | Path | None = None,
+    show: bool = True,
 ) -> None:
     """Plot one distance-error CDF curve per model for a single band."""
     _validate_columns(predictions, {"dataset", "model", "distance_error"})
@@ -77,7 +78,7 @@ def plot_localization_error_cdf_by_model(
     ax.set_ylabel("Cumulative probability")
     ax.set_ylim(0, 1.02)
     ax.grid(visible=True, alpha=0.3)
-    _save_and_show(fig, save_path)
+    _save_and_show(fig, save_path, show=show)
 
 
 def plot_band_error_cdf(
@@ -87,6 +88,7 @@ def plot_band_error_cdf(
     split_modes: tuple[str, ...],
     band_order: Sequence[str] = BAND_ORDER,
     save_path: str | Path | None = None,
+    show: bool = True,
 ) -> None:
     """Plot one distance-error CDF curve per band for a single model."""
     _validate_columns(predictions, {"dataset", "split", "distance_error"})
@@ -124,7 +126,7 @@ def plot_band_error_cdf(
                 Path(save_path)
                 / f"cdf_{_slugify(model_label)}_all-bands_{split}.{PLOT_FORMAT}"
             )
-        _save_and_show(fig, output)
+        _save_and_show(fig, output, show=show)
 
 
 def plot_model_band_error_boxplot(
@@ -133,6 +135,7 @@ def plot_model_band_error_boxplot(
     models: Sequence[str],
     bands: Sequence[str],
     save_path: str | Path | None = None,
+    show: bool = True,
 ) -> None:
     """Plot distance-error boxplots grouped by model and band."""
     _validate_columns(predictions, {"model", "dataset", "distance_error"})
@@ -158,7 +161,7 @@ def plot_model_band_error_boxplot(
         ax.text(0.5, 0.5, "No distance errors", ha="center", va="center")
     ax.set_ylabel("Distance error (m)")
     ax.grid(axis="y", alpha=0.3)
-    _save_and_show(fig, save_path)
+    _save_and_show(fig, save_path, show=show)
 
 
 def plot_global_position_confusion_matrix(
@@ -167,6 +170,7 @@ def plot_global_position_confusion_matrix(
     dataset: str,
     normalize: str | None = None,
     save_path: str | Path | None = None,
+    show: bool = True,
 ) -> None:
     """Plot true vs predicted position labels for a global classifier."""
     from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
@@ -196,7 +200,7 @@ def plot_global_position_confusion_matrix(
     )
     ax.set_title(f"{dataset} - global position confusion matrix")
     ax.tick_params(axis="x", labelrotation=45)
-    _save_and_show(fig, save_path)
+    _save_and_show(fig, save_path, show=show)
 
 
 def plot_position_confusion_by_true_room(
@@ -205,6 +209,7 @@ def plot_position_confusion_by_true_room(
     dataset: str,
     normalize: str | None = None,
     save_path: str | Path | None = None,
+    show: bool = True,
 ) -> None:
     """Plot one position confusion matrix per true room."""
     _validate_columns(predictions, {"dataset", "true_room"})
@@ -225,6 +230,7 @@ def plot_position_confusion_by_true_room(
             dataset=dataset,
             normalize=normalize,
             save_path=output,
+            show=show,
         )
 
 
@@ -234,6 +240,7 @@ def plot_floor_plan_heatmap(
     title: str = "",
     annotate: bool = True,
     save_path: str | Path | None = None,
+    show: bool = True,
 ) -> None:
     """Overlay per-grid-point accuracy and mean distance error on the room layout."""
     import matplotlib.patches as mpatches
@@ -251,13 +258,20 @@ def plot_floor_plan_heatmap(
     all_errors = [record["mean_error"] for record in records if not np.isnan(record["mean_error"])]
     error_vmax = float(np.percentile(all_errors, 95)) if all_errors else 1.0
     metrics = [
-        ("accuracy", "RdYlGn", 0.0, 1.0, "Accuracy", lambda value: f"{value:.0%}"),
-        ("mean_error", "RdYlGn_r", 0.0, error_vmax, "Mean error (m)", lambda value: f"{value:.2f}"),
+        ("accuracy", "RdYlGn", 0.0, 1.0, "Position accuracy", lambda value: f"{value:.0%}"),
+        (
+            "mean_error",
+            "RdYlGn_r",
+            0.0,
+            error_vmax,
+            "Mean localization error (m)",
+            lambda value: f"{value:.2f}",
+        ),
     ]
     fig, axes = plt.subplots(
         1,
         2,
-        figsize=(max(14, n_cols * 1.1 * 2 + 2), max(5, n_rows * 1.2 + 1)),
+        figsize=(max(15, n_cols * 1.15 * 2 + 2.5), max(5.5, n_rows * 1.3 + 1.2)),
     )
 
     for ax, (metric_key, cmap_name, vmin, vmax, metric_label, fmt_fn) in zip(axes, metrics):
@@ -268,18 +282,26 @@ def plot_floor_plan_heatmap(
         _draw_floor_background(ax, n_rows, n_cols, mpatches)
         _draw_floor_metric_cells(ax, records, metric_key, cmap, norm, annotate, fmt_fn, mpatches)
         ax.set_xticks(range(n_cols))
-        ax.set_xticklabels([str(index + 1) for index in range(n_cols)])
+        ax.set_xticklabels([str(index + 1) for index in range(n_cols)], fontsize=9)
         ax.set_yticks(range(n_rows))
-        ax.set_yticklabels(list(FLOOR_PLAN_ROWS))
-        ax.set_xlabel("Column")
-        ax.set_ylabel("Row")
-        ax.set_title(metric_label)
+        ax.set_yticklabels(list(FLOOR_PLAN_ROWS), fontsize=9)
+        ax.set_xlabel("Column", fontsize=10.5)
+        ax.set_ylabel("Row", fontsize=10.5)
+        ax.set_title(metric_label, fontsize=12.5, pad=10)
+        ax.set_aspect("equal")
         scalar_mappable = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         scalar_mappable.set_array([])
-        fig.colorbar(scalar_mappable, ax=ax, label=metric_label, shrink=0.8)
+        colorbar = fig.colorbar(scalar_mappable, ax=ax, shrink=0.82, pad=0.02)
+        colorbar.set_label(metric_label, fontsize=10)
+        colorbar.ax.tick_params(labelsize=9)
 
-    fig.suptitle(title or "Floor plan - per-position accuracy and mean distance error")
-    _save_and_show(fig, save_path)
+    fig.suptitle(
+        title or "Floor plan - position accuracy and mean localization error",
+        fontsize=14,
+        y=1.02,
+    )
+    fig.subplots_adjust(wspace=0.32)
+    _save_and_show(fig, save_path, show=show)
 
 
 def _floor_plan_records(predictions: pd.DataFrame) -> list[dict[str, float]]:
@@ -423,8 +445,8 @@ def _validate_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
         raise ValueError(msg)
 
 
-def _save_and_show(fig, save_path: str | Path | None) -> None:
-    """Finalize a figure, optionally save it, and display it."""
+def _save_and_show(fig, save_path: str | Path | None, *, show: bool = True) -> None:
+    """Finalize a figure, optionally save it, and either display or close it."""
     fig.tight_layout()
     if save_path is not None:
         output = Path(save_path).with_suffix(f".{PLOT_FORMAT}")
@@ -439,7 +461,11 @@ def _save_and_show(fig, save_path: str | Path | None) -> None:
             f"[plots] saved {output} at dpi={PLOT_DPI}. PNG is raster; set "
             "PLOT_FORMAT='pdf' for a LaTeX vector figure without other changes."
         )
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        # Non-interactive/batch runs must not accumulate open figures.
+        plt.close(fig)
 
 
 def plot_lovo_fold_spread(
@@ -562,6 +588,420 @@ def plot_block_vs_lovo_position_accuracy(
     ax.set_ylim(0, 1.08)
     ax.grid(axis="y", alpha=0.3)
     _save_and_show(fig, save_path)
+
+
+def _fold_cdf_mean_std(
+    errors_by_fold: dict[str, np.ndarray],
+    grid: np.ndarray,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Average independent per-fold empirical CDFs on a shared error grid."""
+    fold_cdfs = []
+    for fold_errors in errors_by_fold.values():
+        if fold_errors.size == 0:
+            continue
+        sorted_errors = np.sort(fold_errors)
+        counts = np.searchsorted(sorted_errors, grid, side="right")
+        fold_cdfs.append(counts / sorted_errors.size)
+    if not fold_cdfs:
+        return None, None
+    stacked = np.vstack(fold_cdfs)
+    return stacked.mean(axis=0), stacked.std(axis=0)
+
+
+def plot_lovo_cdf_triptych(
+    predictions: pd.DataFrame,
+    *,
+    models: Sequence[str],
+    band_order: Sequence[str] = BAND_ORDER,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Plot one LOVO CDF panel per model, comparing bands on common axes.
+
+    When per-row ``held_out_user`` labels are available, each panel shows the
+    equally weighted mean CDF across held-out volunteers with a +/-1 SD band.
+    Otherwise it falls back to the pooled CDF across all LOVO predictions.
+    """
+    _validate_columns(predictions, {"dataset", "model", "distance_error", "split_mode"})
+    lovo_predictions = predictions.loc[predictions["split_mode"].astype(str) == "lovo"]
+    all_errors = _numeric_distance_errors(lovo_predictions)
+    if lovo_predictions.empty or all_errors.empty:
+        print("No LOVO predictions available for the CDF triptych.")
+        return
+
+    has_fold_errors = "held_out_user" in lovo_predictions.columns
+    x_max = float(all_errors.max()) * 1.02
+    grid = np.linspace(0.0, x_max, 250)
+    band_colors = dict(
+        zip(band_order, plt.rcParams["axes.prop_cycle"].by_key()["color"])
+    )
+
+    fig, axes = plt.subplots(
+        1,
+        len(models),
+        figsize=(4.6 * len(models), 4.7),
+        sharex=True,
+        sharey=True,
+    )
+    axes = np.atleast_1d(axes)
+    legend_handles: dict[str, object] = {}
+    any_plotted = False
+
+    for ax, model in zip(axes, models):
+        model_predictions = lovo_predictions.loc[lovo_predictions["model"] == model]
+        panel_plotted = False
+        for band in band_order:
+            band_predictions = model_predictions.loc[model_predictions["dataset"] == band]
+            if band_predictions.empty:
+                continue
+            color = band_colors.get(band)
+            if has_fold_errors:
+                errors_by_fold = {
+                    str(fold): _numeric_distance_errors(fold_group).to_numpy(dtype=float)
+                    for fold, fold_group in band_predictions.groupby("held_out_user", sort=True)
+                }
+                mean_cdf, std_cdf = _fold_cdf_mean_std(errors_by_fold, grid)
+                if mean_cdf is None:
+                    continue
+                (line,) = ax.plot(grid, mean_cdf, linewidth=2, label=band, color=color)
+                ax.fill_between(
+                    grid,
+                    np.clip(mean_cdf - std_cdf, 0.0, 1.0),
+                    np.clip(mean_cdf + std_cdf, 0.0, 1.0),
+                    color=line.get_color(),
+                    alpha=0.18,
+                    linewidth=0,
+                )
+            else:
+                errors = _numeric_distance_errors(band_predictions)
+                if errors.empty:
+                    continue
+                values = np.sort(errors.to_numpy(dtype=float))
+                cdf = np.arange(1, values.size + 1) / values.size
+                (line,) = ax.plot(
+                    values, cdf, linewidth=2, label=f"{band} (pooled)", color=color
+                )
+            legend_handles.setdefault(band, line)
+            panel_plotted = True
+            any_plotted = True
+        ax.set_title(model, fontsize=11.5)
+        if not panel_plotted:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        ax.set_xlabel("Distance error (m)")
+        ax.grid(alpha=0.3)
+
+    if not any_plotted:
+        plt.close(fig)
+        print("No LOVO predictions available for the CDF triptych.")
+        return
+
+    axes[0].set_ylabel("Cumulative probability")
+    axes[0].set_ylim(0, 1.02)
+    axes[0].set_xlim(0, x_max)
+
+    pooled_note = "" if has_fold_errors else " - pooled across the six folds"
+    fig.suptitle(
+        f"LOVO localization error CDF by frequency band{pooled_note}",
+        fontsize=13.5,
+        y=1.04,
+    )
+    fig.legend(
+        legend_handles.values(),
+        legend_handles.keys(),
+        title="Band",
+        loc="lower center",
+        ncol=len(legend_handles) or 1,
+        bbox_to_anchor=(0.5, -0.14),
+        frameon=False,
+    )
+    fig.tight_layout(rect=(0, 0.16, 1, 0.94))
+    _save_and_show(fig, save_path, show=show)
+
+
+def plot_lovo_volunteer_variability(
+    lovo_per_fold: pd.DataFrame,
+    *,
+    bands: Sequence[str],
+    model: str = "RF",
+    save_path: str | Path | None = None,
+    show: bool = True,
+    ax: Axes | None = None,
+) -> None:
+    """Plot each held-out volunteer's position accuracy across bands as a slope plot."""
+    _validate_columns(
+        lovo_per_fold,
+        {"model", "dataset", "held_out_user", "position_accuracy"},
+    )
+    model_key = str(model).casefold()
+    filtered = lovo_per_fold.loc[
+        lovo_per_fold["model"].astype(str).str.casefold() == model_key
+    ]
+    band_labels = [band for band in bands if band in set(filtered["dataset"])]
+    supplied_ax = ax is not None
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    else:
+        fig = ax.figure
+
+    if not band_labels:
+        ax.text(0.5, 0.5, "No LOVO fold metrics", ha="center", va="center")
+        ax.set_title(f"LOVO held-out-volunteer variability - {model}")
+        if not supplied_ax:
+            _save_and_show(fig, save_path, show=show)
+        return
+
+    x_positions = np.arange(len(band_labels))
+    pivot = (
+        filtered.pivot_table(
+            index="held_out_user", columns="dataset", values="position_accuracy"
+        )
+        .reindex(columns=band_labels)
+    )
+    volunteers = sorted(pivot.index, key=str)
+    cmap = plt.get_cmap("tab10")
+    for volunteer_idx, volunteer in enumerate(volunteers):
+        values = pivot.loc[volunteer].to_numpy(dtype=float)
+        valid = ~np.isnan(values)
+        ax.plot(
+            x_positions[valid],
+            values[valid],
+            marker="o",
+            markersize=6,
+            linewidth=1.3,
+            alpha=0.8,
+            color=cmap(volunteer_idx % 10),
+            label=f"Volunteer {volunteer}",
+        )
+
+    means = pivot.mean(axis=0).to_numpy(dtype=float)
+    stds = pivot.std(axis=0).to_numpy(dtype=float)
+    ax.errorbar(
+        x_positions,
+        means,
+        yerr=stds,
+        marker="D",
+        markersize=8,
+        linewidth=2.4,
+        color="black",
+        capsize=4,
+        label="Mean +/- 1 SD",
+        zorder=5,
+    )
+
+    finite_values = pivot.to_numpy(dtype=float)
+    finite_values = finite_values[~np.isnan(finite_values)]
+    if finite_values.size:
+        data_min, data_max = float(finite_values.min()), float(finite_values.max())
+        padding = max((data_max - data_min) * 0.18, 0.01)
+        ax.set_ylim(max(0.0, data_min - padding), data_max + padding)
+
+    ax.set_xticks(x_positions, band_labels)
+    ax.set_xlim(-0.4, len(band_labels) - 0.6)
+    ax.set_ylabel("Position accuracy")
+    ax.set_title(f"LOVO held-out-volunteer variability - {model}")
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(fontsize=8, ncol=2, loc="best")
+    if not supplied_ax:
+        _save_and_show(fig, save_path, show=show)
+
+
+def plot_block_vs_lovo_metrics(
+    global_summary: pd.DataFrame,
+    lovo_summary: pd.DataFrame,
+    *,
+    bands: Sequence[str],
+    model: str = "RF",
+    metrics: Sequence[tuple[str, str]] = (
+        ("position_accuracy", "Position accuracy"),
+        ("mean_distance_error", "Mean localization error (m)"),
+    ),
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Plot block metrics beside LOVO fold-mean metrics, with LOVO fold-SD error bars."""
+    model_key = str(model).casefold()
+    block_rows = global_summary.loc[
+        (global_summary["model"].astype(str).str.casefold() == model_key)
+        & (global_summary["split"] == "block")
+    ]
+    lovo_rows = lovo_summary.loc[
+        lovo_summary["model"].astype(str).str.casefold() == model_key
+    ]
+
+    fig, axes = plt.subplots(1, len(metrics), figsize=(6.4 * len(metrics), 4.4))
+    axes = np.atleast_1d(axes)
+    any_plotted = False
+
+    for ax, (metric_key, metric_label) in zip(axes, metrics):
+        band_labels: list[str] = []
+        block_values: list[float] = []
+        lovo_means: list[float] = []
+        lovo_stds: list[float] = []
+        for band in bands:
+            block_row = block_rows.loc[block_rows["dataset"] == band]
+            lovo_row = lovo_rows.loc[lovo_rows["dataset"] == band]
+            if block_row.empty or lovo_row.empty:
+                continue
+            block_value = pd.to_numeric(
+                pd.Series([block_row.iloc[0].get(metric_key)]), errors="coerce"
+            ).iloc[0]
+            lovo_mean = pd.to_numeric(
+                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_mean")]), errors="coerce"
+            ).iloc[0]
+            lovo_std = pd.to_numeric(
+                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_std")]), errors="coerce"
+            ).iloc[0]
+            if pd.isna(block_value) or pd.isna(lovo_mean):
+                continue
+            band_labels.append(band)
+            block_values.append(float(block_value))
+            lovo_means.append(float(lovo_mean))
+            lovo_stds.append(0.0 if pd.isna(lovo_std) else float(lovo_std))
+
+        if band_labels:
+            x = np.arange(len(band_labels))
+            width = 0.35
+            ax.bar(x - width / 2, block_values, width, label="Block", color="#4c72b0")
+            ax.bar(
+                x + width / 2,
+                lovo_means,
+                width,
+                yerr=lovo_stds,
+                capsize=4,
+                label="LOVO (fold mean +/- SD)",
+                color="#dd8452",
+            )
+            ax.set_xticks(x, band_labels)
+            any_plotted = True
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "Need both Block and LOVO results",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+        ax.set_ylabel(metric_label)
+        ax.set_title(metric_label, fontsize=11.5)
+        ax.grid(axis="y", alpha=0.3)
+
+    if not any_plotted:
+        plt.close(fig)
+        print(f"Block vs LOVO metrics unavailable for {model}.")
+        return
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=2, bbox_to_anchor=(0.5, -0.05))
+    fig.suptitle(f"Temporal Block vs LOVO generalization - {model}", fontsize=13.5)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
+    _save_and_show(fig, save_path, show=show)
+
+
+def plot_block_vs_lovo_floor_plan(
+    block_predictions: pd.DataFrame,
+    lovo_predictions: pd.DataFrame,
+    *,
+    title: str = "",
+    annotate: bool = True,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Compare block and LOVO per-position accuracy and their difference on the floor plan."""
+    import matplotlib.patches as mpatches
+
+    _validate_columns(block_predictions, {"true_location", "pred_location", "distance_error"})
+    _validate_columns(lovo_predictions, {"true_location", "pred_location", "distance_error"})
+    block_by_key = {
+        (record["row_idx"], record["col_idx"]): record
+        for record in _floor_plan_records(block_predictions)
+    }
+    lovo_by_key = {
+        (record["row_idx"], record["col_idx"]): record
+        for record in _floor_plan_records(lovo_predictions)
+    }
+    shared_keys = sorted(set(block_by_key) & set(lovo_by_key))
+    if not shared_keys:
+        print("No shared floor-plan positions between block and LOVO predictions.")
+        return
+
+    diff_records = [
+        {
+            "row_idx": row_idx,
+            "col_idx": col_idx,
+            "accuracy_diff": (
+                block_by_key[(row_idx, col_idx)]["accuracy"]
+                - lovo_by_key[(row_idx, col_idx)]["accuracy"]
+            ),
+        }
+        for row_idx, col_idx in shared_keys
+    ]
+    block_records = [block_by_key[key] for key in shared_keys]
+    lovo_records = [lovo_by_key[key] for key in shared_keys]
+
+    n_rows = len(FLOOR_PLAN_ROWS)
+    n_cols = max(col_idx for _, col_idx in shared_keys) + 1
+    max_abs_diff = max((abs(record["accuracy_diff"]) for record in diff_records), default=0.0)
+    diff_limit = max(max_abs_diff, 0.05)
+
+    panels = [
+        (
+            block_records,
+            "accuracy",
+            "RdYlGn",
+            mcolors.Normalize(vmin=0.0, vmax=1.0),
+            "Block accuracy",
+            lambda value: f"{value:.0%}",
+        ),
+        (
+            lovo_records,
+            "accuracy",
+            "RdYlGn",
+            mcolors.Normalize(vmin=0.0, vmax=1.0),
+            "LOVO accuracy",
+            lambda value: f"{value:.0%}",
+        ),
+        (
+            diff_records,
+            "accuracy_diff",
+            "RdBu",
+            mcolors.TwoSlopeNorm(vmin=-diff_limit, vcenter=0.0, vmax=diff_limit),
+            "ΔA = Block − LOVO",
+            lambda value: f"{value:+.0%}",
+        ),
+    ]
+
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=(max(19, n_cols * 1.1 * 3 + 3.5), max(5.5, n_rows * 1.25 + 1.2)),
+    )
+    for ax, (records, metric_key, cmap_name, norm, panel_label, fmt_fn) in zip(axes, panels):
+        cmap = plt.colormaps[cmap_name]
+        ax.set_xlim(-0.5, n_cols - 0.5)
+        ax.set_ylim(n_rows - 0.5, -0.5)
+        _draw_floor_background(ax, n_rows, n_cols, mpatches)
+        _draw_floor_metric_cells(ax, records, metric_key, cmap, norm, annotate, fmt_fn, mpatches)
+        ax.set_xticks(range(n_cols))
+        ax.set_xticklabels([str(index + 1) for index in range(n_cols)], fontsize=9)
+        ax.set_yticks(range(n_rows))
+        ax.set_yticklabels(list(FLOOR_PLAN_ROWS), fontsize=9)
+        ax.set_xlabel("Column", fontsize=10)
+        ax.set_ylabel("Row", fontsize=10)
+        ax.set_title(panel_label, fontsize=12, pad=10)
+        ax.set_aspect("equal")
+        scalar_mappable = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        scalar_mappable.set_array([])
+        colorbar = fig.colorbar(scalar_mappable, ax=ax, shrink=0.8, pad=0.02)
+        colorbar.ax.tick_params(labelsize=9)
+
+    fig.suptitle(
+        title or "Temporal Block vs LOVO spatial position accuracy",
+        fontsize=14,
+        y=1.03,
+    )
+    fig.subplots_adjust(wspace=0.35)
+    _save_and_show(fig, save_path, show=show)
 
 
 def save_training_curves(history: pd.DataFrame, save_path: str | Path, title: str) -> None:
