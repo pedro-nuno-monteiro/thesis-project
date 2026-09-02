@@ -541,7 +541,10 @@ def _validate_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
 
 def _save_and_show(fig, save_path: str | Path | None, *, show: bool = True) -> None:
     """Finalize a figure, optionally save it, and either display or close it."""
-    fig.tight_layout()
+    # constrained_layout already resolves spacing (and is required for a colour bar
+    # shared across multiple axes); calling tight_layout on top of it only warns.
+    if not fig.get_constrained_layout():
+        fig.tight_layout()
     if save_path is not None:
         output = Path(save_path).with_suffix(f".{PLOT_FORMAT}")
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -1231,6 +1234,553 @@ def plot_block_vs_lovo_floor_plan(
 
     fig.subplots_adjust(wspace=0.35)
     _save_and_show(fig, save_path, show=show)
+
+
+# ---------------------------------------------------------------------------
+# DL (CNN) analysis figures. Each figure treats the training seed as an
+# explicit resampling dimension: Block curves/points are seed means (+/- SD
+# across seeds), and LOVO curves/points first average seeds within each
+# held-out volunteer, then average volunteers with equal weight, so no
+# volunteer's window count dominates the aggregate.
+# ---------------------------------------------------------------------------
+
+
+def plot_dl_cdf_comparison(  # noqa: PLR0913
+    predictions: pd.DataFrame,
+    *,
+    split: str,
+    seeds: Sequence[int],
+    band_order: Sequence[str] = BAND_ORDER,
+    band_model: str = "CNN",
+    room_model: str = "CNN_room",
+    room_band: str = "Fusion",
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Plot Band CNN CDFs by frequency band and Band CNN vs Room CNN CDFs.
+
+    Panel (a) compares 2.4 GHz / 5 GHz / Fusion for the Band CNN; panel (b)
+    compares Band CNN and Room CNN at Fusion. Every curve is the mean CDF
+    across seeds with a light +/-1 SD band. For ``split="lovo"`` the SD instead
+    reflects the spread between each volunteer's own seed-mean CDF, matching
+    equal-volunteer-weighted LOVO evaluation.
+    """
+    _validate_columns(
+        predictions, {"dataset", "model", "distance_error", "split_mode", "seed"}
+    )
+    split_predictions = predictions.loc[predictions["split_mode"].astype(str) == split]
+    all_errors = _numeric_distance_errors(split_predictions)
+    if split_predictions.empty or all_errors.empty:
+        print(f"No {split} DL predictions available for the CDF comparison.")
+        return
+
+    has_folds = (
+        split == "lovo"
+        and "held_out_user" in split_predictions.columns
+        and split_predictions["held_out_user"].notna().any()
+    )
+    x_max = float(all_errors.max()) * 1.02
+    grid = np.linspace(0.0, x_max, 250)
+    band_colors = _band_color_map(band_order)
+    any_plotted = False
+
+    def _curve_mean_std(curve_predictions: pd.DataFrame) -> tuple[np.ndarray, np.ndarray] | None:
+        if curve_predictions.empty:
+            return None
+        if has_folds:
+            volunteer_mean_cdfs = []
+            for _, volunteer_group in curve_predictions.groupby("held_out_user", sort=True):
+                errors_by_seed = {
+                    seed: _numeric_distance_errors(
+                        volunteer_group.loc[volunteer_group["seed"] == seed]
+                    ).to_numpy(dtype=float)
+                    for seed in seeds
+                }
+                volunteer_mean_cdf, _ = _fold_cdf_mean_std(errors_by_seed, grid)
+                if volunteer_mean_cdf is not None:
+                    volunteer_mean_cdfs.append(volunteer_mean_cdf)
+            if not volunteer_mean_cdfs:
+                return None
+            stacked = np.vstack(volunteer_mean_cdfs)
+            return stacked.mean(axis=0), stacked.std(axis=0)
+        errors_by_seed = {
+            seed: _numeric_distance_errors(
+                curve_predictions.loc[curve_predictions["seed"] == seed]
+            ).to_numpy(dtype=float)
+            for seed in seeds
+        }
+        return _fold_cdf_mean_std(errors_by_seed, grid)
+
+    def _draw_curve(ax: Axes, label: str, curve_predictions: pd.DataFrame, color: str) -> None:
+        nonlocal any_plotted
+        result = _curve_mean_std(curve_predictions)
+        if result is None or result[0] is None:
+            return
+        mean_cdf, std_cdf = result
+        ax.plot(grid, mean_cdf, linewidth=2, label=label, color=color)
+        ax.fill_between(
+            grid,
+            np.clip(mean_cdf - std_cdf, 0.0, 1.0),
+            np.clip(mean_cdf + std_cdf, 0.0, 1.0),
+            color=color,
+            alpha=0.18,
+            linewidth=0,
+        )
+        any_plotted = True
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.6, 4.6), sharey=True)
+    for band in band_order:
+        curve_predictions = split_predictions.loc[
+            (split_predictions["model"] == band_model) & (split_predictions["dataset"] == band)
+        ]
+        _draw_curve(axes[0], band, curve_predictions, band_colors.get(band))
+
+    band_cnn_predictions = split_predictions.loc[
+        (split_predictions["model"] == band_model) & (split_predictions["dataset"] == room_band)
+    ]
+    room_cnn_predictions = split_predictions.loc[
+        (split_predictions["model"] == room_model) & (split_predictions["dataset"] == room_band)
+    ]
+    _draw_curve(axes[1], "Band CNN", band_cnn_predictions, "#4c72b0")
+    _draw_curve(axes[1], "Room CNN", room_cnn_predictions, "#dd8452")
+
+    if not any_plotted:
+        plt.close(fig)
+        print(f"No {split} DL predictions available for the CDF comparison.")
+        return
+
+    axes[0].set_title("(a) Band CNN by frequency band", fontsize=11)
+    axes[1].set_title("(b) Band CNN vs Room CNN (Fusion)", fontsize=11)
+    for ax in axes:
+        ax.set_xlabel("Distance error (m)")
+        ax.set_xlim(0, x_max)
+        ax.grid(alpha=0.3)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, labels, fontsize=9, loc="lower right")
+    axes[0].set_ylabel("Cumulative probability")
+    axes[0].set_ylim(0, 1.02)
+    fig.tight_layout()
+    _save_and_show(fig, save_path, show=show)
+
+
+def _dl_volunteer_seed_means(curve_predictions: pd.DataFrame, seeds: Sequence[int]) -> dict[str, float]:
+    """Return {volunteer: seed-averaged position accuracy in %} for one DL curve."""
+    result: dict[str, float] = {}
+    for volunteer, volunteer_group in curve_predictions.groupby("held_out_user", sort=True):
+        seed_accuracies = []
+        for seed in seeds:
+            seed_group = volunteer_group.loc[volunteer_group["seed"] == seed]
+            if seed_group.empty:
+                continue
+            seed_accuracies.append(
+                float((seed_group["true_position"] == seed_group["pred_position"]).mean())
+            )
+        if seed_accuracies:
+            result[str(volunteer)] = float(np.mean(seed_accuracies)) * 100.0
+    return result
+
+
+def _draw_dl_volunteer_panel(
+    ax: Axes,
+    x_labels: Sequence[str],
+    data: dict[str, dict[str, float]],
+    title: str,
+) -> bool:
+    """Draw one held-out-volunteer slope panel; return whether anything was plotted."""
+    volunteers = sorted(
+        {volunteer for values in data.values() for volunteer in values}, key=str
+    )
+    if not volunteers or not x_labels:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        ax.set_title(title, fontsize=11)
+        return False
+
+    x_positions = np.arange(len(x_labels))
+    value_grid = np.full((len(volunteers), len(x_labels)), np.nan)
+    for volunteer_idx, volunteer in enumerate(volunteers):
+        for label_idx, label in enumerate(x_labels):
+            value_grid[volunteer_idx, label_idx] = data.get(label, {}).get(volunteer, np.nan)
+        values = value_grid[volunteer_idx]
+        valid = ~np.isnan(values)
+        if not valid.any():
+            continue
+        ax.plot(
+            x_positions[valid],
+            values[valid],
+            marker=VOLUNTEER_MARKERS[volunteer_idx % len(VOLUNTEER_MARKERS)],
+            markersize=5.5,
+            linewidth=1.0,
+            alpha=0.55,
+            color=VOLUNTEER_COLORS[volunteer_idx % len(VOLUNTEER_COLORS)],
+            label=f"Volunteer {volunteer}",
+        )
+
+    means = np.nanmean(value_grid, axis=0)
+    stds = np.nanstd(value_grid, axis=0, ddof=1) if len(volunteers) > 1 else np.zeros_like(means)
+    ax.errorbar(
+        x_positions,
+        means,
+        yerr=stds,
+        marker="D",
+        markersize=6,
+        linewidth=1.8,
+        color="black",
+        alpha=0.85,
+        capsize=3,
+        label="Mean ± SD",
+        zorder=5,
+    )
+
+    finite_values = value_grid[~np.isnan(value_grid)]
+    y_upper = 25.0
+    if finite_values.size:
+        y_upper = max(25.0, float(np.ceil(finite_values.max() / 5.0) * 5.0))
+    ax.set_ylim(0.0, y_upper)
+    ax.set_yticks(np.arange(0.0, y_upper + 1.0, 5.0))
+    ax.set_xticks(x_positions, x_labels)
+    ax.set_xlim(-0.4, len(x_labels) - 0.6)
+    ax.set_title(title, fontsize=11)
+    ax.grid(axis="y", alpha=0.3)
+    ax.legend(fontsize=7.5, ncol=2, loc="upper right")
+    return True
+
+
+def plot_dl_volunteer_variability(
+    predictions: pd.DataFrame,
+    *,
+    seeds: Sequence[int],
+    band_order: Sequence[str] = BAND_ORDER,
+    band_model: str = "CNN",
+    room_model: str = "CNN_room",
+    room_band: str = "Fusion",
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Plot each held-out volunteer's seed-averaged LOVO position accuracy.
+
+    Panel (a) compares bands for the Band CNN; panel (b) compares Band CNN and
+    Room CNN at Fusion. Each point is one volunteer's position accuracy
+    averaged across the three seeds, connected across x-categories.
+    """
+    _validate_columns(
+        predictions,
+        {"dataset", "model", "split_mode", "held_out_user", "true_position", "pred_position", "seed"},
+    )
+    lovo_predictions = predictions.loc[predictions["split_mode"].astype(str) == "lovo"]
+    if lovo_predictions.empty:
+        print("No LOVO DL predictions available for the volunteer-variability plot.")
+        return
+
+    panel_a_data = {
+        band: _dl_volunteer_seed_means(
+            lovo_predictions.loc[
+                (lovo_predictions["model"] == band_model) & (lovo_predictions["dataset"] == band)
+            ],
+            seeds,
+        )
+        for band in band_order
+    }
+    panel_b_data = {
+        "Band CNN": _dl_volunteer_seed_means(
+            lovo_predictions.loc[
+                (lovo_predictions["model"] == band_model)
+                & (lovo_predictions["dataset"] == room_band)
+            ],
+            seeds,
+        ),
+        "Room CNN": _dl_volunteer_seed_means(
+            lovo_predictions.loc[
+                (lovo_predictions["model"] == room_model)
+                & (lovo_predictions["dataset"] == room_band)
+            ],
+            seeds,
+        ),
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(11.6, 4.8))
+    plotted_a = _draw_dl_volunteer_panel(
+        axes[0], list(band_order), panel_a_data, "(a) Band CNN by frequency band"
+    )
+    plotted_b = _draw_dl_volunteer_panel(
+        axes[1], ["Band CNN", "Room CNN"], panel_b_data, "(b) Band CNN vs Room CNN (Fusion)"
+    )
+    if not (plotted_a or plotted_b):
+        plt.close(fig)
+        print("No LOVO fold metrics available for the volunteer-variability plot.")
+        return
+
+    axes[0].set_ylabel("Position accuracy (%)")
+    fig.tight_layout()
+    _save_and_show(fig, save_path, show=show)
+
+
+def plot_dl_block_vs_lovo_metrics(
+    seed_summary: pd.DataFrame,
+    *,
+    band_order: Sequence[str] = BAND_ORDER,
+    band_model: str = "CNN",
+    room_model: str = "CNN_room",
+    room_band: str = "Fusion",
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Plot Block vs LOVO position accuracy and mean distance error for four DL configs.
+
+    Configs are the Band CNN at each band plus the Room CNN at Fusion. Bars use
+    the seed means from :func:`~utils.DL.dl_pipeline.dl_seed_summary_table`,
+    with SD-across-seeds error bars on both splits.
+    """
+    configs = [(band_model, band, f"Band CNN\n{band}") for band in band_order]
+    configs.append((room_model, room_band, f"Room CNN\n{room_band}"))
+    metrics = (
+        ("position_accuracy", "Position accuracy", "Position accuracy (%)", True),
+        ("mean_distance_error", "Mean distance error", "Mean distance error (m)", False),
+    )
+
+    fig, axes = plt.subplots(1, len(metrics), figsize=(6.8 * len(metrics), 4.6))
+    axes = np.atleast_1d(axes)
+    any_plotted = False
+
+    for ax, (metric_key, panel_title, y_label, as_percent) in zip(axes, metrics):
+        scale = 100.0 if as_percent else 1.0
+        labels: list[str] = []
+        block_values: list[float] = []
+        block_stds: list[float] = []
+        lovo_values: list[float] = []
+        lovo_stds: list[float] = []
+        for model, band, label in configs:
+            block_row = seed_summary.loc[
+                (seed_summary["model"] == model)
+                & (seed_summary["dataset"] == band)
+                & (seed_summary["split"] == "block")
+            ]
+            lovo_row = seed_summary.loc[
+                (seed_summary["model"] == model)
+                & (seed_summary["dataset"] == band)
+                & (seed_summary["split"] == "lovo")
+            ]
+            if block_row.empty or lovo_row.empty:
+                continue
+            block_mean = pd.to_numeric(
+                pd.Series([block_row.iloc[0].get(f"{metric_key}_mean")]), errors="coerce"
+            ).iloc[0]
+            block_std = pd.to_numeric(
+                pd.Series([block_row.iloc[0].get(f"{metric_key}_std")]), errors="coerce"
+            ).iloc[0]
+            lovo_mean = pd.to_numeric(
+                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_mean")]), errors="coerce"
+            ).iloc[0]
+            lovo_std = pd.to_numeric(
+                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_std")]), errors="coerce"
+            ).iloc[0]
+            if pd.isna(block_mean) or pd.isna(lovo_mean):
+                continue
+            labels.append(label)
+            block_values.append(float(block_mean) * scale)
+            block_stds.append(0.0 if pd.isna(block_std) else float(block_std) * scale)
+            lovo_values.append(float(lovo_mean) * scale)
+            lovo_stds.append(0.0 if pd.isna(lovo_std) else float(lovo_std) * scale)
+
+        if labels:
+            x = np.arange(len(labels))
+            width = 0.35
+            ax.bar(
+                x - width / 2,
+                block_values,
+                width,
+                yerr=block_stds,
+                capsize=4,
+                label="Temporal Block mean ± SD",
+                color="#4c72b0",
+            )
+            ax.bar(
+                x + width / 2,
+                lovo_values,
+                width,
+                yerr=lovo_stds,
+                capsize=4,
+                label="LOVO mean ± SD",
+                color="#dd8452",
+            )
+            ax.set_xticks(x, labels, fontsize=8.5)
+            any_plotted = True
+        else:
+            ax.text(
+                0.5,
+                0.5,
+                "Need both Block and LOVO results",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+        ax.set_ylabel(y_label)
+        ax.set_title(panel_title, fontsize=11.5)
+        ax.grid(axis="y", alpha=0.3)
+
+    if not any_plotted:
+        plt.close(fig)
+        print("Block vs LOVO DL metrics unavailable.")
+        return
+
+    handles, labels_ = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels_, loc="lower center", ncol=2, bbox_to_anchor=(0.5, -0.05))
+    fig.suptitle("Temporal Block and LOVO performance", fontsize=13.5)
+    fig.tight_layout(rect=(0, 0.08, 1, 0.93))
+    _save_and_show(fig, save_path, show=show)
+
+
+def _dl_block_floor_plan_records(
+    predictions: pd.DataFrame,
+    seeds: Sequence[int],
+) -> dict[tuple[int, int], dict]:
+    """Average per-position Block accuracy across seeds, keyed by grid cell."""
+    records: dict[tuple[int, int], dict] = {}
+    for location, group in predictions.groupby("true_location"):
+        match = LOCATION_PATTERN.fullmatch(_normalize_location_label(location))
+        if match is None:
+            continue
+        row_letter = match.group("row")
+        if row_letter not in FLOOR_PLAN_ROWS:
+            continue
+        seed_accuracies = []
+        for seed in seeds:
+            seed_group = group.loc[group["seed"] == seed]
+            if seed_group.empty:
+                continue
+            seed_accuracies.append(
+                float((seed_group["true_location"] == seed_group["pred_location"]).mean())
+            )
+        if not seed_accuracies:
+            continue
+        key = (FLOOR_PLAN_ROWS.index(row_letter), int(match.group("column")) - 1)
+        records[key] = {
+            "row_idx": key[0],
+            "col_idx": key[1],
+            "accuracy": float(np.mean(seed_accuracies)),
+        }
+    return records
+
+
+def _dl_lovo_floor_plan_records(
+    predictions: pd.DataFrame,
+    seeds: Sequence[int],
+) -> dict[tuple[int, int], dict]:
+    """Average per-position LOVO accuracy: seed-mean per volunteer, then equal volunteer mean."""
+    records: dict[tuple[int, int], dict] = {}
+    for location, group in predictions.groupby("true_location"):
+        match = LOCATION_PATTERN.fullmatch(_normalize_location_label(location))
+        if match is None:
+            continue
+        row_letter = match.group("row")
+        if row_letter not in FLOOR_PLAN_ROWS:
+            continue
+        volunteer_means = []
+        for _, volunteer_group in group.groupby("held_out_user", sort=True):
+            seed_accuracies = []
+            for seed in seeds:
+                seed_group = volunteer_group.loc[volunteer_group["seed"] == seed]
+                if seed_group.empty:
+                    continue
+                seed_accuracies.append(
+                    float((seed_group["true_location"] == seed_group["pred_location"]).mean())
+                )
+            if seed_accuracies:
+                volunteer_means.append(float(np.mean(seed_accuracies)))
+        if not volunteer_means:
+            continue
+        key = (FLOOR_PLAN_ROWS.index(row_letter), int(match.group("column")) - 1)
+        records[key] = {
+            "row_idx": key[0],
+            "col_idx": key[1],
+            "accuracy": float(np.mean(volunteer_means)),
+        }
+    return records
+
+
+def plot_dl_spatial_generalization(
+    block_predictions: pd.DataFrame,
+    lovo_predictions: pd.DataFrame,
+    *,
+    seeds: Sequence[int],
+    annotate: bool = True,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    r"""Save three floor-plan figures for the Band CNN (Fusion): Block accuracy,
+    LOVO accuracy, and their difference :math:`\Delta A`.
+
+    Each is its own single-panel figure (rather than one wide three-panel
+    figure) so cell values and axes stay legible at dissertation page width,
+    matching :func:`plot_floor_plan_heatmap`. Block positions average accuracy
+    across the three seeds; LOVO positions first average seeds within each
+    held-out volunteer, then average volunteers with equal weight. The Block
+    and LOVO maps share identical 0-1 colour limits; the difference map uses a
+    diverging scale centred at zero, in percentage points.
+    """
+    _validate_columns(block_predictions, {"true_location", "pred_location", "seed"})
+    _validate_columns(lovo_predictions, {"true_location", "pred_location", "seed", "held_out_user"})
+
+    block_by_key = _dl_block_floor_plan_records(block_predictions, seeds)
+    lovo_by_key = _dl_lovo_floor_plan_records(lovo_predictions, seeds)
+    shared_keys = sorted(set(block_by_key) & set(lovo_by_key))
+    if not shared_keys:
+        print("No shared floor-plan positions between block and LOVO DL predictions.")
+        return
+
+    block_records = [block_by_key[key] for key in shared_keys]
+    lovo_records = [lovo_by_key[key] for key in shared_keys]
+    diff_records = [
+        {
+            "row_idx": row_idx,
+            "col_idx": col_idx,
+            "accuracy_diff_pp": (
+                block_by_key[(row_idx, col_idx)]["accuracy"]
+                - lovo_by_key[(row_idx, col_idx)]["accuracy"]
+            )
+            * 100.0,
+        }
+        for row_idx, col_idx in shared_keys
+    ]
+    n_rows = len(FLOOR_PLAN_ROWS)
+    n_cols = max(col_idx for _, col_idx in shared_keys) + 1
+    max_abs_diff_pp = max((abs(record["accuracy_diff_pp"]) for record in diff_records), default=0.0)
+    diff_limit = max(max_abs_diff_pp, 1e-6)
+
+    acc_norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
+    diff_norm = mcolors.TwoSlopeNorm(vmin=-diff_limit, vcenter=0.0, vmax=diff_limit)
+
+    panels = [
+        (block_records, "accuracy", FLOOR_PLAN_ACCURACY_CMAP, acc_norm, "Position accuracy", lambda v: f"{v:.0%}", "block_accuracy"),
+        (lovo_records, "accuracy", FLOOR_PLAN_ACCURACY_CMAP, acc_norm, "Position accuracy", lambda v: f"{v:.0%}", "lovo_accuracy"),
+        (
+            diff_records,
+            "accuracy_diff_pp",
+            FLOOR_PLAN_DIFF_CMAP,
+            diff_norm,
+            "Accuracy difference (percentage points)",
+            lambda v: f"{v:+.0f} pp",
+            "accuracy_diff",
+        ),
+    ]
+    for records, metric_key, cmap_name, norm, metric_label, fmt_fn, filename_suffix in panels:
+        fig = _render_floor_plan_panel(
+            records,
+            metric_key=metric_key,
+            cmap_name=cmap_name,
+            norm=norm,
+            metric_label=metric_label,
+            fmt_fn=fmt_fn,
+            annotate=annotate,
+            n_rows=n_rows,
+            n_cols=n_cols,
+        )
+        output = None
+        if save_path is not None:
+            base = Path(save_path)
+            suffix = base.suffix or f".{PLOT_FORMAT}"
+            output = base.with_name(f"{base.stem}_{filename_suffix}{suffix}")
+        _save_and_show(fig, output, show=show)
 
 
 def save_training_curves(history: pd.DataFrame, save_path: str | Path, title: str) -> None:
