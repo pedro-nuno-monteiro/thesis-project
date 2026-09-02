@@ -304,6 +304,204 @@ def show_dl_results(results_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     return cnn_summary, comparison
 
 
+# Display names used consistently across every DL analysis table and figure.
+DL_MODEL_DISPLAY_NAMES = {"CNN": "Band CNN", "CNN_room": "Room CNN"}
+
+
+def dl_display_model_names(models: pd.Series) -> pd.Series:
+    """Map raw DL model labels to their dissertation display names."""
+    return models.map(DL_MODEL_DISPLAY_NAMES).fillna(models)
+
+
+def load_all_dl_predictions(  # noqa: PLR0913
+    results_dir: Path,
+    *,
+    band_models: tuple[str, ...] = ("CNN",),
+    room_models: tuple[str, ...] = ("CNN_room",),
+    bands_to_run: tuple[str, ...],
+    room_band: str = "Fusion",
+    split_modes: tuple[str, ...],
+    seeds: tuple[int, ...],
+) -> pd.DataFrame:
+    """Load every saved DL prediction parquet for analysis-only notebook runs.
+
+    Band-wise models (``band_models``) are loaded for every band in
+    ``bands_to_run``; room-wise models (``room_models``) are loaded for
+    ``room_band`` only, matching how those architectures were actually trained.
+    Each row is tagged with its originating ``seed`` so the notebook can treat
+    the seed as an explicit resampling dimension.
+    """
+    runs_path = Path(results_dir) / "runs.csv"
+    if not runs_path.exists():
+        raise FileNotFoundError(f"Cannot load DL predictions before {runs_path} exists.")
+    runs = pd.read_csv(runs_path)
+    dl_runs = runs.loc[runs["family"].astype(str).str.casefold() == "dl"].copy()
+
+    def _band_key(band: str) -> str:
+        return band.casefold().replace(".", "_").replace(" ", "")
+
+    requested_splits = set(split_modes)
+    requested_seeds = {int(seed) for seed in seeds}
+    requested_band_keys = {_band_key(band) for band in bands_to_run}
+    room_band_key = _band_key(room_band)
+    band_model_set = {model.casefold() for model in band_models}
+    room_model_set = {model.casefold() for model in room_models}
+
+    model_key = dl_runs["model"].astype(str).str.casefold()
+    band_key = dl_runs["band"].astype(str).str.casefold()
+    is_band_row = model_key.isin(band_model_set) & band_key.isin(requested_band_keys)
+    is_room_row = model_key.isin(room_model_set) & (band_key == room_band_key)
+    selected = dl_runs.loc[
+        (is_band_row | is_room_row)
+        & dl_runs["split"].astype(str).isin(requested_splits)
+        & pd.to_numeric(dl_runs["seed"], errors="coerce").isin(requested_seeds)
+    ]
+    if selected.empty:
+        raise FileNotFoundError(
+            "runs.csv contains no DL rows matching the requested models/bands/splits/seeds."
+        )
+
+    frames = []
+    missing = []
+    for _, run_row in selected.iterrows():
+        run_id = str(run_row["run_id"])
+        path = Path(results_dir) / "predictions" / f"{run_id}.parquet"
+        if not path.exists():
+            missing.append(str(path))
+            continue
+        frame = pd.read_parquet(path)
+        frame["seed"] = int(run_row["seed"])
+        frames.append(frame)
+    if missing:
+        raise FileNotFoundError(
+            "runs.csv references missing DL prediction parquets:\n" + "\n".join(missing)
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
+_DL_METRIC_NAMES = (
+    "position_accuracy",
+    "macro_f1",
+    "room_accuracy",
+    "mean_distance_error",
+    "median_distance_error",
+    "rmse_distance_error",
+    "p90_distance_error",
+)
+
+
+def _dl_seed_value(seed_group: pd.DataFrame, *, split: str) -> dict[str, float]:
+    """Return one seed's metrics, equally weighting LOVO folds across volunteers."""
+    has_folds = (
+        split == "lovo"
+        and "held_out_user" in seed_group.columns
+        and seed_group["held_out_user"].notna().any()
+    )
+    if not has_folds:
+        return compute_localization_metrics(seed_group)
+    fold_rows = [
+        compute_localization_metrics(fold_group)
+        for _, fold_group in seed_group.groupby("held_out_user", sort=True)
+    ]
+    return {
+        name: float(np.mean([row[name] for row in fold_rows]))
+        for name in _DL_METRIC_NAMES
+    }
+
+
+def _format_mean_std(mean_value: object, std_value: object) -> str:
+    """Format a numeric mean and standard deviation for display tables."""
+    mean_float = pd.to_numeric(pd.Series([mean_value]), errors="coerce").iloc[0]
+    std_float = pd.to_numeric(pd.Series([std_value]), errors="coerce").iloc[0]
+    if pd.isna(mean_float) or pd.isna(std_float):
+        return "nan"
+    return f"{float(mean_float):.4f} +/- {float(std_float):.4f}"
+
+
+def dl_seed_summary_table(
+    predictions: pd.DataFrame,
+    *,
+    seeds: tuple[int, ...],
+) -> pd.DataFrame:
+    """Aggregate DL metrics across seeds (model x band x split), mean +/- SD.
+
+    For LOVO rows, each seed's value is first equally averaged across its six
+    held-out volunteers (see :func:`_dl_seed_value`) so no single volunteer's
+    window count skews the seed-level number; the three seed values are then
+    averaged again with equal weight to produce the reported mean and SD.
+    """
+    rows: list[dict[str, Any]] = []
+    for (model, dataset, split), group in predictions.groupby(
+        ["model", "dataset", "split_mode"], sort=False
+    ):
+        seed_values: dict[str, list[float]] = {name: [] for name in _DL_METRIC_NAMES}
+        used_seeds = []
+        for seed in seeds:
+            seed_group = group.loc[group["seed"] == seed]
+            if seed_group.empty:
+                continue
+            metrics = _dl_seed_value(seed_group, split=str(split))
+            for name in _DL_METRIC_NAMES:
+                seed_values[name].append(metrics[name])
+            used_seeds.append(seed)
+
+        row: dict[str, Any] = {
+            "model": model,
+            "dataset": dataset,
+            "split": split,
+            "n_seeds": len(used_seeds),
+        }
+        for name in _DL_METRIC_NAMES:
+            values = seed_values[name]
+            row[f"{name}_mean"] = float(np.mean(values)) if values else np.nan
+            row[f"{name}_std"] = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
+            row[name] = _format_mean_std(row[f"{name}_mean"], row[f"{name}_std"])
+        rows.append(row)
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["dataset", "model", "split"])
+        .reset_index(drop=True)
+    )
+
+
+def dl_per_room_table(
+    predictions: pd.DataFrame,
+    *,
+    seeds: tuple[int, ...],
+) -> pd.DataFrame:
+    """Aggregate per-room position accuracy across seeds, mean +/- SD."""
+    rows: list[dict[str, Any]] = []
+    for (model, dataset, split, room), group in predictions.groupby(
+        ["model", "dataset", "split_mode", "true_room"], sort=False
+    ):
+        seed_values: list[float] = []
+        for seed in seeds:
+            seed_group = group.loc[group["seed"] == seed]
+            if seed_group.empty:
+                continue
+            metrics = _dl_seed_value(seed_group, split=str(split))
+            seed_values.append(metrics["position_accuracy"])
+        mean_value = float(np.mean(seed_values)) if seed_values else np.nan
+        std_value = float(np.std(seed_values, ddof=1)) if len(seed_values) > 1 else 0.0
+        rows.append(
+            {
+                "model": model,
+                "dataset": dataset,
+                "split": split,
+                "true_room": room,
+                "n_seeds": len(seed_values),
+                "position_accuracy_mean": mean_value,
+                "position_accuracy_std": std_value,
+                "position_accuracy": _format_mean_std(mean_value, std_value),
+            }
+        )
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["dataset", "model", "split", "true_room"])
+        .reset_index(drop=True)
+    )
+
+
 class RawCsiWindowDataset(Dataset):
     """Expose cached multi-band CSI windows and encoded targets to PyTorch."""
 
