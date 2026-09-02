@@ -36,6 +36,10 @@ FLOOR_PLAN_ERROR_CMAP = "viridis_r"
 # positive value (severe LOVO degradation relative to Block) reads as red, zero as
 # white, and LOVO outperforming Block as blue.
 FLOOR_PLAN_DIFF_CMAP = "RdBu_r"
+# Sequential map for the Block-vs-LOVO accuracy *decrease*, used where every value
+# is one-signed (Block never worse than LOVO) so a diverging scale would waste half
+# its range on unused negative values.
+FLOOR_PLAN_DECREASE_CMAP = "Reds"
 # Okabe-Ito colour-blind-safe qualitative palette (orange, sky blue, bluish green,
 # vermillion, blue, reddish purple) paired with distinct marker shapes so series
 # stay distinguishable without relying on colour alone.
@@ -1386,6 +1390,8 @@ def _draw_dl_volunteer_panel(
     x_labels: Sequence[str],
     data: dict[str, dict[str, float]],
     title: str,
+    *,
+    show_legend: bool = True,
 ) -> bool:
     """Draw one held-out-volunteer slope panel; return whether anything was plotted."""
     volunteers = sorted(
@@ -1442,7 +1448,8 @@ def _draw_dl_volunteer_panel(
     ax.set_xlim(-0.4, len(x_labels) - 0.6)
     ax.set_title(title, fontsize=11)
     ax.grid(axis="y", alpha=0.3)
-    ax.legend(fontsize=7.5, ncol=2, loc="upper right")
+    if show_legend:
+        ax.legend(fontsize=7.5, ncol=2, loc="upper right")
     return True
 
 
@@ -1461,7 +1468,9 @@ def plot_dl_volunteer_variability(
 
     Panel (a) compares bands for the Band CNN; panel (b) compares Band CNN and
     Room CNN at Fusion. Each point is one volunteer's position accuracy
-    averaged across the three seeds, connected across x-categories.
+    averaged across the three seeds, connected across x-categories. Both
+    panels share the same volunteers, so a single legend below the figure
+    stands in for the two identical per-panel legends.
     """
     _validate_columns(
         predictions,
@@ -1500,10 +1509,18 @@ def plot_dl_volunteer_variability(
 
     fig, axes = plt.subplots(1, 2, figsize=(11.6, 4.8))
     plotted_a = _draw_dl_volunteer_panel(
-        axes[0], list(band_order), panel_a_data, "(a) Band CNN by frequency band"
+        axes[0],
+        list(band_order),
+        panel_a_data,
+        "(a) Band CNN by frequency band",
+        show_legend=False,
     )
     plotted_b = _draw_dl_volunteer_panel(
-        axes[1], ["Band CNN", "Room CNN"], panel_b_data, "(b) Band CNN vs Room CNN (Fusion)"
+        axes[1],
+        ["Band CNN", "Room CNN"],
+        panel_b_data,
+        "(b) Band CNN vs Room CNN (Fusion)",
+        show_legend=False,
     )
     if not (plotted_a or plotted_b):
         plt.close(fig)
@@ -1511,7 +1528,10 @@ def plot_dl_volunteer_variability(
         return
 
     axes[0].set_ylabel("Position accuracy (%)")
-    fig.tight_layout()
+    legend_ax = axes[0] if plotted_a else axes[1]
+    handles, labels_ = legend_ax.get_legend_handles_labels()
+    fig.legend(handles, labels_, fontsize=8.5, ncol=4, loc="lower center", bbox_to_anchor=(0.5, -0.14))
+    fig.tight_layout(rect=(0, 0.12, 1, 1))
     _save_and_show(fig, save_path, show=show)
 
 
@@ -1525,17 +1545,18 @@ def plot_dl_block_vs_lovo_metrics(
     save_path: str | Path | None = None,
     show: bool = True,
 ) -> None:
-    """Plot Block vs LOVO position accuracy and mean distance error for four DL configs.
+    """Plot Block vs LOVO position accuracy and mean localization error for four DL configs.
 
     Configs are the Band CNN at each band plus the Room CNN at Fusion. Bars use
     the seed means from :func:`~utils.DL.dl_pipeline.dl_seed_summary_table`,
-    with SD-across-seeds error bars on both splits.
+    with SD-across-seeds error bars on both splits. No in-figure title is
+    drawn; identify the figure in its caption instead.
     """
     configs = [(band_model, band, f"Band CNN\n{band}") for band in band_order]
     configs.append((room_model, room_band, f"Room CNN\n{room_band}"))
     metrics = (
         ("position_accuracy", "Position accuracy", "Position accuracy (%)", True),
-        ("mean_distance_error", "Mean distance error", "Mean distance error (m)", False),
+        ("mean_distance_error", "Mean localization error", "Mean localization error (m)", False),
     )
 
     fig, axes = plt.subplots(1, len(metrics), figsize=(6.8 * len(metrics), 4.6))
@@ -1625,8 +1646,7 @@ def plot_dl_block_vs_lovo_metrics(
 
     handles, labels_ = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels_, loc="lower center", ncol=2, bbox_to_anchor=(0.5, -0.05))
-    fig.suptitle("Temporal Block and LOVO performance", fontsize=13.5)
-    fig.tight_layout(rect=(0, 0.08, 1, 0.93))
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
     _save_and_show(fig, save_path, show=show)
 
 
@@ -1707,16 +1727,19 @@ def plot_dl_spatial_generalization(
     save_path: str | Path | None = None,
     show: bool = True,
 ) -> None:
-    r"""Save three floor-plan figures for the Band CNN (Fusion): Block accuracy,
-    LOVO accuracy, and their difference :math:`\Delta A`.
+    """Save three floor-plan figures for the Band CNN (Fusion): Block accuracy,
+    LOVO accuracy, and the accuracy decrease from Block to LOVO.
 
     Each is its own single-panel figure (rather than one wide three-panel
     figure) so cell values and axes stay legible at dissertation page width,
     matching :func:`plot_floor_plan_heatmap`. Block positions average accuracy
     across the three seeds; LOVO positions first average seeds within each
     held-out volunteer, then average volunteers with equal weight. The Block
-    and LOVO maps share identical 0-1 colour limits; the difference map uses a
-    diverging scale centred at zero, in percentage points.
+    and LOVO maps share identical 0-1 colour limits. The decrease map plots
+    Block-minus-LOVO accuracy, which is one-signed here (LOVO never
+    outperforms Block at any position), so it uses a sequential red scale
+    from 0 to the actual maximum decrease rather than a diverging scale that
+    would waste half its range on unused negative values.
     """
     _validate_columns(block_predictions, {"true_location", "pred_location", "seed"})
     _validate_columns(lovo_predictions, {"true_location", "pred_location", "seed", "held_out_user"})
@@ -1730,11 +1753,11 @@ def plot_dl_spatial_generalization(
 
     block_records = [block_by_key[key] for key in shared_keys]
     lovo_records = [lovo_by_key[key] for key in shared_keys]
-    diff_records = [
+    decrease_records = [
         {
             "row_idx": row_idx,
             "col_idx": col_idx,
-            "accuracy_diff_pp": (
+            "accuracy_decrease_pp": (
                 block_by_key[(row_idx, col_idx)]["accuracy"]
                 - lovo_by_key[(row_idx, col_idx)]["accuracy"]
             )
@@ -1744,23 +1767,27 @@ def plot_dl_spatial_generalization(
     ]
     n_rows = len(FLOOR_PLAN_ROWS)
     n_cols = max(col_idx for _, col_idx in shared_keys) + 1
-    max_abs_diff_pp = max((abs(record["accuracy_diff_pp"]) for record in diff_records), default=0.0)
-    diff_limit = max(max_abs_diff_pp, 1e-6)
+    # Use the true maximum so the colour bar always spans every plotted cell; a
+    # rounded/percentile cap would visually clip outlier positions off the top.
+    max_decrease_pp = max(
+        (record["accuracy_decrease_pp"] for record in decrease_records), default=0.0
+    )
+    decrease_vmax = max(max_decrease_pp, 1e-6)
 
     acc_norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
-    diff_norm = mcolors.TwoSlopeNorm(vmin=-diff_limit, vcenter=0.0, vmax=diff_limit)
+    decrease_norm = mcolors.Normalize(vmin=0.0, vmax=decrease_vmax)
 
     panels = [
         (block_records, "accuracy", FLOOR_PLAN_ACCURACY_CMAP, acc_norm, "Position accuracy", lambda v: f"{v:.0%}", "block_accuracy"),
         (lovo_records, "accuracy", FLOOR_PLAN_ACCURACY_CMAP, acc_norm, "Position accuracy", lambda v: f"{v:.0%}", "lovo_accuracy"),
         (
-            diff_records,
-            "accuracy_diff_pp",
-            FLOOR_PLAN_DIFF_CMAP,
-            diff_norm,
-            "Accuracy difference (percentage points)",
-            lambda v: f"{v:+.0f} pp",
-            "accuracy_diff",
+            decrease_records,
+            "accuracy_decrease_pp",
+            FLOOR_PLAN_DECREASE_CMAP,
+            decrease_norm,
+            "Accuracy decrease (percentage points)",
+            lambda v: f"{v:.0f} pp",
+            "accuracy_decrease",
         ),
     ]
     for records, metric_key, cmap_name, norm, metric_label, fmt_fn, filename_suffix in panels:
