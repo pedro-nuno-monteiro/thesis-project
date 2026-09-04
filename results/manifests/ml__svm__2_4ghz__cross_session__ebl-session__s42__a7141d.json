@@ -1,0 +1,39 @@
+{
+  "config": {
+    "feat_opts": {
+      "overlap_size": 0,
+      "require_all_esps": false,
+      "window_size": 60
+    },
+    "model_params": {
+      "C": 10.0,
+      "gamma": 0.0001,
+      "kernel": "rbf"
+    },
+    "preproc_opts": {
+      "baseline_scope": "per_session",
+      "epsilon": 1e-08,
+      "normalization": "empty_baseline"
+    },
+    "seed": 42,
+    "split_params": {
+      "column_spacing": 1.0,
+      "n_blocks": 10,
+      "random_state": 42,
+      "row_spacing": 1.0,
+      "test_size": 0.3
+    }
+  },
+  "parsed_run_id": {
+    "band": "2_4ghz",
+    "baseline_scope": "session",
+    "family": "ml",
+    "hash6": "a7141d",
+    "model": "svm",
+    "normalization": "empty_baseline",
+    "seed": 42,
+    "split": "cross_session"
+  },
+  "run_id": "ml__svm__2_4ghz__cross_session__ebl-session__s42__a7141d",
+  "timestamp": "2026-09-04T12:46:28.447731+00:00"
+}
