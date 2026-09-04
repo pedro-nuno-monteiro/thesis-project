@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 from matplotlib import colors as mcolors
 
-from utils.config import PLOT_DPI, PLOT_FORMAT
 from utils.csi_processing import process_magnitude_data
 
 if TYPE_CHECKING:
@@ -74,6 +73,22 @@ MAGNITUDE_DIMS = 2
 VISUALIZATION_MIN_DB = -80.0
 INVALID_AXIS_MESSAGE = "axis must be 'x' or 'y'."
 INVALID_STRIDE_MESSAGE = "Strides must be at least 1."
+
+
+def save_figure(fig: plt.Figure, path: str | Path, kind: str = "vector") -> Path:
+    """Save a figure and return the resulting output path."""
+    output = Path(path)
+    save_options = {}
+    if kind == "vector":
+        output = output.with_suffix(".pdf")
+        save_options = {
+            "format": "pdf",
+            "bbox_inches": "tight",
+            "facecolor": "white",
+        }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, **save_options)
+    return output
 
 
 def plot_localization_error_cdf_by_model(
@@ -153,7 +168,7 @@ def plot_band_error_cdf(
         if save_path is not None:
             output = (
                 Path(save_path)
-                / f"cdf_{_slugify(model_label)}_all-bands_{split}.{PLOT_FORMAT}"
+                / f"cdf_{_slugify(model_label)}_all-bands_{split}.pdf"
             )
         _save_and_show(fig, output, show=show)
 
@@ -250,7 +265,7 @@ def plot_position_confusion_by_true_room(
     for room in sorted(dataset_predictions["true_room"].dropna().unique()):
         room_predictions = dataset_predictions.loc[dataset_predictions["true_room"] == room]
         output = (
-            output_dir / f"confusion_room_{room}.{PLOT_FORMAT}"
+            output_dir / f"confusion_room_{room}.pdf"
             if output_dir is not None
             else None
         )
@@ -370,8 +385,7 @@ def plot_floor_plan_heatmap(
         output = None
         if save_path is not None:
             base = Path(save_path)
-            suffix = base.suffix or f".{PLOT_FORMAT}"
-            output = base.with_name(f"{base.stem}_{filename_suffix}{suffix}")
+            output = base.with_name(f"{base.stem}_{filename_suffix}.pdf")
         _save_and_show(fig, output, show=show)
 
 
@@ -550,18 +564,8 @@ def _save_and_show(fig, save_path: str | Path | None, *, show: bool = True) -> N
     if not fig.get_constrained_layout():
         fig.tight_layout()
     if save_path is not None:
-        output = Path(save_path).with_suffix(f".{PLOT_FORMAT}")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(
-            output,
-            bbox_inches="tight",
-            dpi=PLOT_DPI,
-            format=PLOT_FORMAT,
-        )
-        print(
-            f"[plots] saved {output} at dpi={PLOT_DPI}. PNG is raster; set "
-            "PLOT_FORMAT='pdf' for a LaTeX vector figure without other changes."
-        )
+        output = save_figure(fig, save_path, kind="vector")
+        print(f"[plots] saved {output}.")
     if show:
         plt.show()
     else:
@@ -1805,15 +1809,12 @@ def plot_dl_spatial_generalization(
         output = None
         if save_path is not None:
             base = Path(save_path)
-            suffix = base.suffix or f".{PLOT_FORMAT}"
-            output = base.with_name(f"{base.stem}_{filename_suffix}{suffix}")
+            output = base.with_name(f"{base.stem}_{filename_suffix}.pdf")
         _save_and_show(fig, output, show=show)
 
 
 def save_training_curves(history: pd.DataFrame, save_path: str | Path, title: str) -> None:
     """Save the CNN training and validation loss/accuracy curves."""
-    output = Path(save_path).with_suffix(f".{PLOT_FORMAT}")
-    output.parent.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
     axes[0].plot(history["epoch"], history["train_loss"], label="train")
     axes[0].plot(history["epoch"], history["val_loss"], label="val")
@@ -1827,12 +1828,9 @@ def save_training_curves(history: pd.DataFrame, save_path: str | Path, title: st
     axes[1].set_xlabel("epoch")
     axes[1].set_ylabel("accuracy")
     axes[1].legend()
-    fig.savefig(output, dpi=PLOT_DPI, format=PLOT_FORMAT)
+    output = save_figure(fig, save_path, kind="vector")
     plt.close(fig)
-    print(
-        f"[plots] saved {output} at dpi={PLOT_DPI}. PNG is raster; set "
-        "PLOT_FORMAT='pdf' for a LaTeX vector figure without other code changes."
-    )
+    print(f"[plots] saved {output}.")
 
 
 def set_all_subcarrier_ticks(ax: Axes, subcarrier_count: int) -> None:
@@ -2043,7 +2041,7 @@ def plot_csi_magnitude_stages(  # noqa: PLR0913
             heatmap_figure,
             save=save,
             output_directory=output_directory,
-            filename=f"{filename_stem}_heatmap.png",
+            filename=f"{filename_stem}_heatmap.pdf",
         )
         surface_figure = _plot_magnitude_surface_pair(
             plot_values,
@@ -2060,7 +2058,7 @@ def plot_csi_magnitude_stages(  # noqa: PLR0913
             surface_figure,
             save=save,
             output_directory=output_directory,
-            filename=f"{filename_stem}_3d.png",
+            filename=f"{filename_stem}_3d.pdf",
         )
 
 
@@ -2294,9 +2292,8 @@ def _finish_magnitude_figure(
 ) -> None:
     if save:
         output_path = Path(output_directory) / filename
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
-        print(f"[plots] saved {output_path} at dpi=300.")
+        output_path = save_figure(fig, output_path, kind="vector")
+        print(f"[plots] saved {output_path}.")
     plt.show()
 
 
