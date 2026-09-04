@@ -89,9 +89,6 @@ GRID_SEARCH_N_JOBS = 4
 
 MAX_EPOCH_SECONDS = 3600.0
 
-PLOT_DPI = 200
-PLOT_FORMAT = "png"
-
 # Capacity is intentionally frozen after the ablation study.
 CNN_CONV1_FILTERS = 32
 CNN_CONV2_FILTERS = 64
