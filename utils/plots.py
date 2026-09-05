@@ -829,19 +829,23 @@ def plot_block_cdf_triptych(
     *,
     models: Sequence[str],
     band_order: Sequence[str] = BAND_ORDER,
+    split_mode: str = "block",
     save_path: str | Path | None = None,
     show: bool = True,
 ) -> None:
-    """Plot one Temporal Block CDF panel per model, comparing bands on common axes.
+    """Plot one CDF panel per model, comparing bands on common axes.
 
-    Uses the same band colour mapping as :func:`plot_lovo_cdf_triptych`. No split
-    label is drawn in the figure; identify it as Temporal Block in its caption.
+    Used for both Temporal Block (default) and Cross Session, the two
+    single-run splits; LOVO uses :func:`plot_lovo_cdf_triptych` instead for its
+    fold-averaged +/-1 SD bands. Uses the same band colour mapping as
+    :func:`plot_lovo_cdf_triptych`. No split label is drawn in the figure;
+    identify the split in its caption.
     """
     _validate_columns(predictions, {"dataset", "model", "distance_error", "split_mode"})
-    block_predictions = predictions.loc[predictions["split_mode"].astype(str) == "block"]
+    block_predictions = predictions.loc[predictions["split_mode"].astype(str) == split_mode]
     all_errors = _numeric_distance_errors(block_predictions)
     if block_predictions.empty or all_errors.empty:
-        print("No Temporal Block predictions available for the CDF triptych.")
+        print(f"No {split_mode} predictions available for the CDF triptych.")
         return
 
     x_max = float(all_errors.max()) * 1.02
@@ -881,7 +885,7 @@ def plot_block_cdf_triptych(
 
     if not any_plotted:
         plt.close(fig)
-        print("No Temporal Block predictions available for the CDF triptych.")
+        print(f"No {split_mode} predictions available for the CDF triptych.")
         return
 
     axes[0].set_ylabel("Cumulative probability")
@@ -901,19 +905,28 @@ def plot_block_cdf_triptych(
     _save_and_show(fig, save_path, show=show)
 
 
-def plot_lovo_volunteer_variability(
+def plot_lovo_volunteer_variability(  # noqa: PLR0913
     lovo_per_fold: pd.DataFrame,
     *,
     bands: Sequence[str],
     model: str = "RF",
+    user_column: str = "held_out_user",
+    label_prefix: str = "Volunteer",
     save_path: str | Path | None = None,
     show: bool = True,
     ax: Axes | None = None,
 ) -> None:
-    """Plot each held-out volunteer's position accuracy across bands as a slope plot."""
+    """Plot each user's position accuracy across bands as a slope plot.
+
+    ``lovo_per_fold`` is a per-(model, dataset, ``user_column``) summary table
+    with one ``position_accuracy`` value each; the default column name and
+    label match its original LOVO use (one row per held-out volunteer fold),
+    but both can be overridden to reuse this for any other per-user, per-band
+    accuracy summary (e.g. Cross Session returning users).
+    """
     _validate_columns(
         lovo_per_fold,
-        {"model", "dataset", "held_out_user", "position_accuracy"},
+        {"model", "dataset", user_column, "position_accuracy"},
     )
     model_key = str(model).casefold()
     filtered = lovo_per_fold.loc[
@@ -927,7 +940,7 @@ def plot_lovo_volunteer_variability(
         fig = ax.figure
 
     if not band_labels:
-        ax.text(0.5, 0.5, "No LOVO fold metrics", ha="center", va="center")
+        ax.text(0.5, 0.5, "No fold metrics", ha="center", va="center")
         if not supplied_ax:
             _save_and_show(fig, save_path, show=show)
         return
@@ -935,7 +948,7 @@ def plot_lovo_volunteer_variability(
     x_positions = np.arange(len(band_labels))
     pivot = (
         filtered.pivot_table(
-            index="held_out_user", columns="dataset", values="position_accuracy"
+            index=user_column, columns="dataset", values="position_accuracy"
         )
         .reindex(columns=band_labels)
         * 100.0
@@ -952,7 +965,7 @@ def plot_lovo_volunteer_variability(
             linewidth=1.0,
             alpha=0.55,
             color=VOLUNTEER_COLORS[volunteer_idx % len(VOLUNTEER_COLORS)],
-            label=f"Volunteer {volunteer}",
+            label=f"{label_prefix} {volunteer}",
         )
 
     means = pivot.mean(axis=0).to_numpy(dtype=float)
@@ -1372,10 +1385,15 @@ def plot_dl_cdf_comparison(  # noqa: PLR0913
     _save_and_show(fig, save_path, show=show)
 
 
-def _dl_volunteer_seed_means(curve_predictions: pd.DataFrame, seeds: Sequence[int]) -> dict[str, float]:
-    """Return {volunteer: seed-averaged position accuracy in %} for one DL curve."""
+def _dl_volunteer_seed_means(
+    curve_predictions: pd.DataFrame,
+    seeds: Sequence[int],
+    *,
+    user_column: str = "held_out_user",
+) -> dict[str, float]:
+    """Return {user: seed-averaged position accuracy in %} for one DL curve."""
     result: dict[str, float] = {}
-    for volunteer, volunteer_group in curve_predictions.groupby("held_out_user", sort=True):
+    for volunteer, volunteer_group in curve_predictions.groupby(user_column, sort=True):
         seed_accuracies = []
         for seed in seeds:
             seed_group = volunteer_group.loc[volunteer_group["seed"] == seed]
@@ -1395,9 +1413,10 @@ def _draw_dl_volunteer_panel(
     data: dict[str, dict[str, float]],
     title: str,
     *,
+    label_prefix: str = "Volunteer",
     show_legend: bool = True,
 ) -> bool:
-    """Draw one held-out-volunteer slope panel; return whether anything was plotted."""
+    """Draw one per-user slope panel; return whether anything was plotted."""
     volunteers = sorted(
         {volunteer for values in data.values() for volunteer in values}, key=str
     )
@@ -1423,7 +1442,7 @@ def _draw_dl_volunteer_panel(
             linewidth=1.0,
             alpha=0.55,
             color=VOLUNTEER_COLORS[volunteer_idx % len(VOLUNTEER_COLORS)],
-            label=f"Volunteer {volunteer}",
+            label=f"{label_prefix} {volunteer}",
         )
 
     means = np.nanmean(value_grid, axis=0)
@@ -1457,7 +1476,7 @@ def _draw_dl_volunteer_panel(
     return True
 
 
-def plot_dl_volunteer_variability(
+def plot_dl_volunteer_variability(  # noqa: PLR0913
     predictions: pd.DataFrame,
     *,
     seeds: Sequence[int],
@@ -1465,49 +1484,58 @@ def plot_dl_volunteer_variability(
     band_model: str = "CNN",
     room_model: str = "CNN_room",
     room_band: str = "Fusion",
+    split_mode: str = "lovo",
+    user_column: str = "held_out_user",
+    label_prefix: str = "Volunteer",
     save_path: str | Path | None = None,
     show: bool = True,
 ) -> None:
-    """Plot each held-out volunteer's seed-averaged LOVO position accuracy.
+    """Plot each user's seed-averaged position accuracy for one DL split.
 
     Panel (a) compares bands for the Band CNN; panel (b) compares Band CNN and
-    Room CNN at Fusion. Each point is one volunteer's position accuracy
-    averaged across the three seeds, connected across x-categories. Both
-    panels share the same volunteers, so a single legend below the figure
-    stands in for the two identical per-panel legends.
+    Room CNN at Fusion. Each point is one user's position accuracy averaged
+    across the three seeds, connected across x-categories. Both panels share
+    the same users, so a single legend below the figure stands in for the two
+    identical per-panel legends. Defaults match the original LOVO use (one
+    line per held-out volunteer fold); pass ``split_mode="cross_session"``,
+    ``user_column="user"`` to reuse this for Cross Session's returning users
+    instead.
     """
     _validate_columns(
         predictions,
-        {"dataset", "model", "split_mode", "held_out_user", "true_position", "pred_position", "seed"},
+        {"dataset", "model", "split_mode", user_column, "true_position", "pred_position", "seed"},
     )
-    lovo_predictions = predictions.loc[predictions["split_mode"].astype(str) == "lovo"]
-    if lovo_predictions.empty:
-        print("No LOVO DL predictions available for the volunteer-variability plot.")
+    split_predictions = predictions.loc[predictions["split_mode"].astype(str) == split_mode]
+    if split_predictions.empty:
+        print(f"No {split_mode} DL predictions available for the {label_prefix.lower()}-variability plot.")
         return
 
     panel_a_data = {
         band: _dl_volunteer_seed_means(
-            lovo_predictions.loc[
-                (lovo_predictions["model"] == band_model) & (lovo_predictions["dataset"] == band)
+            split_predictions.loc[
+                (split_predictions["model"] == band_model) & (split_predictions["dataset"] == band)
             ],
             seeds,
+            user_column=user_column,
         )
         for band in band_order
     }
     panel_b_data = {
         "Band CNN": _dl_volunteer_seed_means(
-            lovo_predictions.loc[
-                (lovo_predictions["model"] == band_model)
-                & (lovo_predictions["dataset"] == room_band)
+            split_predictions.loc[
+                (split_predictions["model"] == band_model)
+                & (split_predictions["dataset"] == room_band)
             ],
             seeds,
+            user_column=user_column,
         ),
         "Room CNN": _dl_volunteer_seed_means(
-            lovo_predictions.loc[
-                (lovo_predictions["model"] == room_model)
-                & (lovo_predictions["dataset"] == room_band)
+            split_predictions.loc[
+                (split_predictions["model"] == room_model)
+                & (split_predictions["dataset"] == room_band)
             ],
             seeds,
+            user_column=user_column,
         ),
     }
 
@@ -1517,6 +1545,7 @@ def plot_dl_volunteer_variability(
         list(band_order),
         panel_a_data,
         "(a) Band CNN by frequency band",
+        label_prefix=label_prefix,
         show_legend=False,
     )
     plotted_b = _draw_dl_volunteer_panel(
@@ -1524,11 +1553,12 @@ def plot_dl_volunteer_variability(
         ["Band CNN", "Room CNN"],
         panel_b_data,
         "(b) Band CNN vs Room CNN (Fusion)",
+        label_prefix=label_prefix,
         show_legend=False,
     )
     if not (plotted_a or plotted_b):
         plt.close(fig)
-        print("No LOVO fold metrics available for the volunteer-variability plot.")
+        print(f"No {split_mode} fold metrics available for the {label_prefix.lower()}-variability plot.")
         return
 
     axes[0].set_ylabel("Position accuracy (%)")
