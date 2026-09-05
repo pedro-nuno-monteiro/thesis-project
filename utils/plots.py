@@ -905,53 +905,41 @@ def plot_block_cdf_triptych(
     _save_and_show(fig, save_path, show=show)
 
 
-def plot_lovo_volunteer_variability(  # noqa: PLR0913
-    lovo_per_fold: pd.DataFrame,
+def _draw_user_metric_panel(  # noqa: PLR0913
+    ax: Axes,
+    metrics: pd.DataFrame,
     *,
     bands: Sequence[str],
-    model: str = "RF",
-    user_column: str = "held_out_user",
-    label_prefix: str = "Volunteer",
-    save_path: str | Path | None = None,
-    show: bool = True,
-    ax: Axes | None = None,
-) -> None:
-    """Plot each user's position accuracy across bands as a slope plot.
+    model: str,
+    metric_column: str,
+    user_column: str,
+    label_prefix: str,
+    value_scale: float,
+    y_label: str,
+    y_lower: float,
+    y_upper_floor: float,
+    y_tick_step: float,
+    show_legend: bool,
+) -> bool:
+    """Draw one per-user, per-band slope panel for a single metric.
 
-    ``lovo_per_fold`` is a per-(model, dataset, ``user_column``) summary table
-    with one ``position_accuracy`` value each; the default column name and
-    label match its original LOVO use (one row per held-out volunteer fold),
-    but both can be overridden to reuse this for any other per-user, per-band
-    accuracy summary (e.g. Cross Session returning users).
+    Shared by :func:`plot_lovo_volunteer_variability`'s two panels: each user
+    keeps the same colour/marker across both, and a black marker shows the
+    unweighted mean +/- 1 SD across users (never a pooled value). Returns
+    whether anything was plotted.
     """
-    _validate_columns(
-        lovo_per_fold,
-        {"model", "dataset", user_column, "position_accuracy"},
-    )
     model_key = str(model).casefold()
-    filtered = lovo_per_fold.loc[
-        lovo_per_fold["model"].astype(str).str.casefold() == model_key
-    ]
+    filtered = metrics.loc[metrics["model"].astype(str).str.casefold() == model_key]
     band_labels = [band for band in bands if band in set(filtered["dataset"])]
-    supplied_ax = ax is not None
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(7.5, 4.6))
-    else:
-        fig = ax.figure
-
     if not band_labels:
-        ax.text(0.5, 0.5, "No fold metrics", ha="center", va="center")
-        if not supplied_ax:
-            _save_and_show(fig, save_path, show=show)
-        return
+        ax.text(0.5, 0.5, "No fold metrics", ha="center", va="center", transform=ax.transAxes)
+        return False
 
     x_positions = np.arange(len(band_labels))
     pivot = (
-        filtered.pivot_table(
-            index=user_column, columns="dataset", values="position_accuracy"
-        )
+        filtered.pivot_table(index=user_column, columns="dataset", values=metric_column)
         .reindex(columns=band_labels)
-        * 100.0
+        * value_scale
     )
     volunteers = sorted(pivot.index, key=str)
     for volunteer_idx, volunteer in enumerate(volunteers):
@@ -986,19 +974,99 @@ def plot_lovo_volunteer_variability(  # noqa: PLR0913
 
     finite_values = pivot.to_numpy(dtype=float)
     finite_values = finite_values[~np.isnan(finite_values)]
-    y_upper = 35.0
+    y_upper = y_upper_floor
     if finite_values.size:
-        y_upper = max(35.0, float(np.ceil(finite_values.max() / 5.0) * 5.0))
-    ax.set_ylim(0.0, y_upper)
-    ax.set_yticks(np.arange(0.0, y_upper + 1.0, 5.0))
+        y_upper = max(y_upper_floor, float(np.ceil(finite_values.max() / y_tick_step) * y_tick_step))
+    ax.set_ylim(y_lower, y_upper)
+    ax.set_yticks(np.arange(y_lower, y_upper + y_tick_step * 0.01, y_tick_step))
 
     ax.set_xticks(x_positions, band_labels)
     ax.set_xlim(-0.4, len(band_labels) - 0.6)
-    ax.set_ylabel("Position accuracy (%)")
+    ax.set_ylabel(y_label)
     ax.grid(axis="y", alpha=0.3)
-    ax.legend(fontsize=8, ncol=2, loc="best")
-    if not supplied_ax:
-        _save_and_show(fig, save_path, show=show)
+    if show_legend:
+        ax.legend(fontsize=8, ncol=2, loc="best")
+    return True
+
+
+def plot_lovo_volunteer_variability(  # noqa: PLR0913
+    lovo_per_fold: pd.DataFrame,
+    *,
+    bands: Sequence[str],
+    model: str = "RF",
+    user_column: str = "held_out_user",
+    label_prefix: str = "Volunteer",
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Plot each user's position accuracy (a) and mean localization error (b).
+
+    ``lovo_per_fold`` is a per-(model, dataset, ``user_column``) summary table
+    with one ``position_accuracy`` and one ``mean_distance_error`` value each;
+    the default column name and label match its original LOVO use (one row
+    per held-out volunteer fold), but both can be overridden to reuse this for
+    any other per-user, per-band summary (e.g. Cross Session returning
+    users). Users are never pooled: each point is one user's own metric.
+    Panel (a) is unchanged from the original single-panel figure; panel (b)
+    adds mean localization error in metres on the same x-axis (lower is
+    better). Both panels use identical per-user colours/markers, so a single
+    shared legend below the figure stands in for the two identical
+    per-panel legends.
+    """
+    _validate_columns(
+        lovo_per_fold,
+        {"model", "dataset", user_column, "position_accuracy", "mean_distance_error"},
+    )
+    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(15.0, 4.6))
+    plotted_a = _draw_user_metric_panel(
+        ax_a,
+        lovo_per_fold,
+        bands=bands,
+        model=model,
+        metric_column="position_accuracy",
+        user_column=user_column,
+        label_prefix=label_prefix,
+        value_scale=100.0,
+        y_label="Position accuracy (%)",
+        y_lower=0.0,
+        y_upper_floor=35.0,
+        y_tick_step=5.0,
+        show_legend=False,
+    )
+    plotted_b = _draw_user_metric_panel(
+        ax_b,
+        lovo_per_fold,
+        bands=bands,
+        model=model,
+        metric_column="mean_distance_error",
+        user_column=user_column,
+        label_prefix=label_prefix,
+        value_scale=1.0,
+        y_label="Mean localization error (m)",
+        y_lower=0.0,
+        y_upper_floor=5.0,
+        y_tick_step=1.0,
+        show_legend=False,
+    )
+    if not (plotted_a or plotted_b):
+        plt.close(fig)
+        print("No fold metrics available for the user-variability plot.")
+        return
+
+    ax_a.set_title("(a) Position accuracy", fontsize=11)
+    ax_b.set_title("(b) Mean localization error", fontsize=11)
+    legend_ax = ax_a if plotted_a else ax_b
+    handles, labels_ = legend_ax.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels_,
+        fontsize=8.5,
+        ncol=len(labels_) or 1,
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.12),
+    )
+    fig.tight_layout(rect=(0, 0.14, 1, 1))
+    _save_and_show(fig, save_path, show=show)
 
 
 def plot_block_vs_lovo_metrics(
