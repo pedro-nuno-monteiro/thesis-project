@@ -925,7 +925,7 @@ def _draw_user_metric_panel(  # ruff: ignore[too-many-arguments]
     x_positions = np.arange(len(band_labels))
     pivot = (
         filtered.pivot_table(index=user_column, columns="dataset", values=metric_column).reindex(
-            columns=band_labels
+            columns=band_labels,
         )
         * value_scale
     )
@@ -965,7 +965,8 @@ def _draw_user_metric_panel(  # ruff: ignore[too-many-arguments]
     y_upper = y_upper_floor
     if finite_values.size:
         y_upper = max(
-            y_upper_floor, float(np.ceil(finite_values.max() / y_tick_step) * y_tick_step)
+            y_upper_floor,
+            float(np.ceil(finite_values.max() / y_tick_step) * y_tick_step),
         )
     ax.set_ylim(y_lower, y_upper)
     ax.set_yticks(np.arange(y_lower, y_upper + y_tick_step * 0.01, y_tick_step))
@@ -1545,7 +1546,7 @@ def plot_dl_volunteer_variability(  # ruff: ignore[too-many-arguments]
     split_predictions = predictions.loc[predictions["split_mode"].astype(str) == split_mode]
     if split_predictions.empty:
         print(
-            f"No {split_mode} DL predictions available for the {label_prefix.lower()}-variability plot."
+            f"No {split_mode} DL predictions available for the {label_prefix.lower()}-variability plot.",
         )
         return
 
@@ -1598,7 +1599,7 @@ def plot_dl_volunteer_variability(  # ruff: ignore[too-many-arguments]
     if not (plotted_a or plotted_b):
         plt.close(fig)
         print(
-            f"No {split_mode} fold metrics available for the {label_prefix.lower()}-variability plot."
+            f"No {split_mode} fold metrics available for the {label_prefix.lower()}-variability plot.",
         )
         return
 
@@ -1606,7 +1607,12 @@ def plot_dl_volunteer_variability(  # ruff: ignore[too-many-arguments]
     legend_ax = axes[0] if plotted_a else axes[1]
     handles, labels_ = legend_ax.get_legend_handles_labels()
     fig.legend(
-        handles, labels_, fontsize=8.5, ncol=4, loc="lower center", bbox_to_anchor=(0.5, -0.10)
+        handles,
+        labels_,
+        fontsize=8.5,
+        ncol=4,
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.10),
     )
     fig.tight_layout(rect=(0, 0.12, 1, 1))
     _save_and_show(fig, save_path, show=show)
@@ -1912,13 +1918,11 @@ def save_training_curves(history: pd.DataFrame, save_path: str | Path, title: st
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), constrained_layout=True)
     axes[0].plot(history["epoch"], history["train_loss"], label="train")
     axes[0].plot(history["epoch"], history["val_loss"], label="val")
-    axes[0].set_title(f"{title} loss")
     axes[0].set_xlabel("epoch")
     axes[0].set_ylabel("loss")
     axes[0].legend()
     axes[1].plot(history["epoch"], history["train_acc"], label="train")
     axes[1].plot(history["epoch"], history["val_acc"], label="val")
-    axes[1].set_title(f"{title} accuracy")
     axes[1].set_xlabel("epoch")
     axes[1].set_ylabel("accuracy")
     axes[1].legend()
