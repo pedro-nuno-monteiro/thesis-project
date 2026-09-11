@@ -57,13 +57,14 @@ def _band_color_map(band_order: Sequence[str]) -> dict[str, str]:
     """Return a stable band-to-colour mapping shared by every CDF triptych."""
     return dict(zip(band_order, plt.rcParams["axes.prop_cycle"].by_key()["color"]))
 
+
 CsiMap = dict[str, dict[str, dict[str, dict[str, dict[str, np.ndarray]]]]]
 CsiStageMaps = dict[str, CsiMap]
 SelectedMagnitudeStages = dict[str, tuple[np.ndarray, np.ndarray]]
 SelectedEntry = tuple[str, np.ndarray | None]
 SelectedTrialGroup = tuple[str, str, str, str, list[SelectedEntry]]
 CSI_LOCATION_PATTERN = re.compile(
-    r"^(?:(?P<letter>[A-G])(?:-)?(?P<number>[1-9]|1[0-4])|Z-?0)$"
+    r"^(?:(?P<letter>[A-G])(?:-)?(?P<number>[1-9]|1[0-4])|Z-?0)$",
 )
 LOW_FREQUENCY_ESP_IDS = range(1, 11)
 HIGH_FREQUENCY_ESP_OFFSET = 10
@@ -144,7 +145,7 @@ def plot_band_error_cdf(
         plotted = False
         for band in [band for band in band_order if band in set(split_predictions["dataset"])]:
             errors = _numeric_distance_errors(
-                split_predictions.loc[split_predictions["dataset"] == band]
+                split_predictions.loc[split_predictions["dataset"] == band],
             )
             if errors.empty:
                 continue
@@ -166,10 +167,7 @@ def plot_band_error_cdf(
         fig.tight_layout()
         output = None
         if save_path is not None:
-            output = (
-                Path(save_path)
-                / f"cdf_{_slugify(model_label)}_all-bands_{split}.pdf"
-            )
+            output = Path(save_path) / f"cdf_{_slugify(model_label)}_all-bands_{split}.pdf"
         _save_and_show(fig, output, show=show)
 
 
@@ -190,9 +188,7 @@ def plot_model_band_error_boxplot(
     for model in models:
         for band in bands:
             errors = _numeric_distance_errors(
-                predictions.loc[
-                    (predictions["model"] == model) & (predictions["dataset"] == band)
-                ]
+                predictions.loc[(predictions["model"] == model) & (predictions["dataset"] == band)],
             )
             if not errors.empty:
                 labels.append(f"{model}\n{band}")
@@ -264,11 +260,7 @@ def plot_position_confusion_by_true_room(
 
     for room in sorted(dataset_predictions["true_room"].dropna().unique()):
         room_predictions = dataset_predictions.loc[dataset_predictions["true_room"] == room]
-        output = (
-            output_dir / f"confusion_room_{room}.pdf"
-            if output_dir is not None
-            else None
-        )
+        output = output_dir / f"confusion_room_{room}.pdf" if output_dir is not None else None
         plot_global_position_confusion_matrix(
             room_predictions,
             dataset=dataset,
@@ -285,7 +277,7 @@ def _floor_plan_figsize(n_rows: int, n_cols: int) -> tuple[float, float]:
     return width, height
 
 
-def _render_floor_plan_panel(  # noqa: PLR0913
+def _render_floor_plan_panel(  # ruff: ignore[too-many-arguments]
     records,
     *,
     metric_key: str,
@@ -416,7 +408,7 @@ def _floor_plan_records(predictions: pd.DataFrame) -> list[dict[str, float]]:
             fold_mean_errors = []
             for _, fold_group in group.groupby("held_out_user"):
                 fold_accuracies.append(
-                    float((fold_group["true_location"] == fold_group["pred_location"]).mean())
+                    float((fold_group["true_location"] == fold_group["pred_location"]).mean()),
                 )
                 fold_errors = _numeric_distance_errors(fold_group)
                 if not fold_errors.empty:
@@ -433,7 +425,7 @@ def _floor_plan_records(predictions: pd.DataFrame) -> list[dict[str, float]]:
                 "col_idx": int(match.group("column")) - 1,
                 "accuracy": accuracy,
                 "mean_error": mean_error,
-            }
+            },
         )
     return records
 
@@ -451,7 +443,7 @@ def _draw_floor_background(ax, n_rows: int, n_cols: int, mpatches) -> None:
                     linewidth=0,
                     facecolor=ROOM_PATCH_COLORS.get(room, "#f2f3f4"),
                     zorder=0,
-                )
+                ),
             )
     for row_i in range(n_rows + 1):
         ax.axhline(row_i - 0.5, color="gray", linewidth=0.3, alpha=0.4, zorder=0)
@@ -484,7 +476,7 @@ def _draw_floor_metric_cells(
                 edgecolor="white",
                 facecolor=face_color,
                 zorder=1,
-            )
+            ),
         )
         if annotate and not np.isnan(value):
             brightness = 0.299 * face_color[0] + 0.587 * face_color[1] + 0.114 * face_color[2]
@@ -516,9 +508,7 @@ def _room_id(row_letter: str, col_num: int) -> int:
 def _location_values(*location_series: pd.Series) -> list[str]:
     """Return unique location labels in physical grid order."""
     locations = {
-        str(location)
-        for series in location_series
-        for location in series.dropna().unique()
+        str(location) for series in location_series for location in series.dropna().unique()
     }
     return sorted(locations, key=_location_sort_key)
 
@@ -587,9 +577,7 @@ def plot_lovo_fold_spread(
         {"model", "dataset", "held_out_user", "position_accuracy"},
     )
     model_key = str(model).casefold()
-    filtered = lovo_per_fold.loc[
-        lovo_per_fold["model"].astype(str).str.casefold() == model_key
-    ]
+    filtered = lovo_per_fold.loc[lovo_per_fold["model"].astype(str).str.casefold() == model_key]
     supplied_ax = ax is not None
     if ax is None:
         fig, ax = plt.subplots(figsize=(7, 4.2))
@@ -662,7 +650,7 @@ def plot_block_vs_lovo_position_accuracy(
                 "dataset": band,
                 "block": float(block_row.iloc[0]["position_accuracy"]),
                 "lovo": float(lovo_row.iloc[0]["position_accuracy_mean"]),
-            }
+            },
         )
 
     fig, ax = plt.subplots(figsize=(7.5, 4.2))
@@ -785,7 +773,11 @@ def plot_lovo_cdf_triptych(
                 values = np.sort(errors.to_numpy(dtype=float))
                 cdf = np.arange(1, values.size + 1) / values.size
                 (line,) = ax.plot(
-                    values, cdf, linewidth=2, label=f"{band} (pooled)", color=color
+                    values,
+                    cdf,
+                    linewidth=2,
+                    label=f"{band} (pooled)",
+                    color=color,
                 )
             legend_handles.setdefault(band, line)
             panel_plotted = True
@@ -806,18 +798,13 @@ def plot_lovo_cdf_triptych(
     axes[0].set_xlim(0, x_max)
 
     pooled_note = "" if has_fold_errors else " - pooled across the six folds"
-    fig.suptitle(
-        f"LOVO localization error CDF by frequency band{pooled_note}",
-        fontsize=13.5,
-        y=1.04,
-    )
     fig.legend(
         legend_handles.values(),
         legend_handles.keys(),
         title="Band",
         loc="lower center",
         ncol=len(legend_handles) or 1,
-        bbox_to_anchor=(0.5, -0.14),
+        bbox_to_anchor=(0.5, -0.10),
         frameon=False,
     )
     fig.tight_layout(rect=(0, 0.16, 1, 0.94))
@@ -867,7 +854,7 @@ def plot_block_cdf_triptych(
         panel_plotted = False
         for band in band_order:
             errors = _numeric_distance_errors(
-                model_predictions.loc[model_predictions["dataset"] == band]
+                model_predictions.loc[model_predictions["dataset"] == band],
             )
             if errors.empty:
                 continue
@@ -905,7 +892,7 @@ def plot_block_cdf_triptych(
     _save_and_show(fig, save_path, show=show)
 
 
-def _draw_user_metric_panel(  # noqa: PLR0913
+def _draw_user_metric_panel(  # ruff: ignore[too-many-arguments]
     ax: Axes,
     metrics: pd.DataFrame,
     *,
@@ -937,8 +924,9 @@ def _draw_user_metric_panel(  # noqa: PLR0913
 
     x_positions = np.arange(len(band_labels))
     pivot = (
-        filtered.pivot_table(index=user_column, columns="dataset", values=metric_column)
-        .reindex(columns=band_labels)
+        filtered.pivot_table(index=user_column, columns="dataset", values=metric_column).reindex(
+            columns=band_labels
+        )
         * value_scale
     )
     volunteers = sorted(pivot.index, key=str)
@@ -976,7 +964,9 @@ def _draw_user_metric_panel(  # noqa: PLR0913
     finite_values = finite_values[~np.isnan(finite_values)]
     y_upper = y_upper_floor
     if finite_values.size:
-        y_upper = max(y_upper_floor, float(np.ceil(finite_values.max() / y_tick_step) * y_tick_step))
+        y_upper = max(
+            y_upper_floor, float(np.ceil(finite_values.max() / y_tick_step) * y_tick_step)
+        )
     ax.set_ylim(y_lower, y_upper)
     ax.set_yticks(np.arange(y_lower, y_upper + y_tick_step * 0.01, y_tick_step))
 
@@ -989,7 +979,7 @@ def _draw_user_metric_panel(  # noqa: PLR0913
     return True
 
 
-def plot_lovo_volunteer_variability(  # noqa: PLR0913
+def plot_lovo_volunteer_variability(  # ruff: ignore[too-many-arguments]
     lovo_per_fold: pd.DataFrame,
     *,
     bands: Sequence[str],
@@ -999,27 +989,20 @@ def plot_lovo_volunteer_variability(  # noqa: PLR0913
     save_path: str | Path | None = None,
     show: bool = True,
 ) -> None:
-    """Plot each user's position accuracy (a) and mean localization error (b).
+    """Plot each user's position accuracy for one ML split.
 
     ``lovo_per_fold`` is a per-(model, dataset, ``user_column``) summary table
-    with one ``position_accuracy`` and one ``mean_distance_error`` value each;
-    the default column name and label match its original LOVO use (one row
-    per held-out volunteer fold), but both can be overridden to reuse this for
-    any other per-user, per-band summary (e.g. Cross Session returning
-    users). Users are never pooled: each point is one user's own metric.
-    Panel (a) is unchanged from the original single-panel figure; panel (b)
-    adds mean localization error in metres on the same x-axis (lower is
-    better). Both panels use identical per-user colours/markers, so a single
-    shared legend below the figure stands in for the two identical
-    per-panel legends.
+    containing one ``position_accuracy`` value per user-band pair. The users
+    are never pooled: each point is one user's own metric. A single shared
+    legend below the figure provides the per-user colour/marker mapping.
     """
     _validate_columns(
         lovo_per_fold,
         {"model", "dataset", user_column, "position_accuracy", "mean_distance_error"},
     )
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(15.0, 4.6))
-    plotted_a = _draw_user_metric_panel(
-        ax_a,
+    fig, ax = plt.subplots(1, 1, figsize=(8.5, 4.6))
+    plotted = _draw_user_metric_panel(
+        ax,
         lovo_per_fold,
         bands=bands,
         model=model,
@@ -1033,39 +1016,22 @@ def plot_lovo_volunteer_variability(  # noqa: PLR0913
         y_tick_step=5.0,
         show_legend=False,
     )
-    plotted_b = _draw_user_metric_panel(
-        ax_b,
-        lovo_per_fold,
-        bands=bands,
-        model=model,
-        metric_column="mean_distance_error",
-        user_column=user_column,
-        label_prefix=label_prefix,
-        value_scale=1.0,
-        y_label="Mean localization error (m)",
-        y_lower=0.0,
-        y_upper_floor=5.0,
-        y_tick_step=1.0,
-        show_legend=False,
-    )
-    if not (plotted_a or plotted_b):
+    if not plotted:
         plt.close(fig)
         print("No fold metrics available for the user-variability plot.")
         return
 
-    ax_a.set_title("(a) Position accuracy", fontsize=11)
-    ax_b.set_title("(b) Mean localization error", fontsize=11)
-    legend_ax = ax_a if plotted_a else ax_b
-    handles, labels_ = legend_ax.get_legend_handles_labels()
+    ax.set_title("Position accuracy", fontsize=11)
+    handles, labels_ = ax.get_legend_handles_labels()
     fig.legend(
         handles,
         labels_,
         fontsize=8.5,
         ncol=len(labels_) or 1,
         loc="lower center",
-        bbox_to_anchor=(0.5, -0.12),
+        bbox_to_anchor=(0.5, -0.08),
     )
-    fig.tight_layout(rect=(0, 0.14, 1, 1))
+    fig.tight_layout(rect=(0, 0.12, 1, 1))
     _save_and_show(fig, save_path, show=show)
 
 
@@ -1092,9 +1058,7 @@ def plot_block_vs_lovo_metrics(
         (global_summary["model"].astype(str).str.casefold() == model_key)
         & (global_summary["split"] == "block")
     ]
-    lovo_rows = lovo_summary.loc[
-        lovo_summary["model"].astype(str).str.casefold() == model_key
-    ]
+    lovo_rows = lovo_summary.loc[lovo_summary["model"].astype(str).str.casefold() == model_key]
 
     fig, axes = plt.subplots(1, len(metrics), figsize=(6.4 * len(metrics), 4.4))
     axes = np.atleast_1d(axes)
@@ -1112,13 +1076,16 @@ def plot_block_vs_lovo_metrics(
             if block_row.empty or lovo_row.empty:
                 continue
             block_value = pd.to_numeric(
-                pd.Series([block_row.iloc[0].get(metric_key)]), errors="coerce"
+                pd.Series([block_row.iloc[0].get(metric_key)]),
+                errors="coerce",
             ).iloc[0]
             lovo_mean = pd.to_numeric(
-                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_mean")]), errors="coerce"
+                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_mean")]),
+                errors="coerce",
             ).iloc[0]
             lovo_std = pd.to_numeric(
-                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_std")]), errors="coerce"
+                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_std")]),
+                errors="coerce",
             ).iloc[0]
             if pd.isna(block_value) or pd.isna(lovo_mean):
                 continue
@@ -1161,7 +1128,7 @@ def plot_block_vs_lovo_metrics(
         return
 
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=2, bbox_to_anchor=(0.5, -0.05))
+    fig.legend(handles, labels, loc="lower center", ncol=2, bbox_to_anchor=(0.5, -0.03))
     fig.tight_layout(rect=(0, 0.07, 1, 1))
     _save_and_show(fig, save_path, show=show)
 
@@ -1188,8 +1155,8 @@ def _block_vs_lovo_diff_records(
             "row_idx": row_idx,
             "col_idx": col_idx,
             "accuracy_diff_pp": (
-                block_by_key[(row_idx, col_idx)]["accuracy"]
-                - lovo_by_key[(row_idx, col_idx)]["accuracy"]
+                block_by_key[row_idx, col_idx]["accuracy"]
+                - lovo_by_key[row_idx, col_idx]["accuracy"]
             )
             * 100.0,
         }
@@ -1334,7 +1301,7 @@ def plot_block_vs_lovo_floor_plan(
 # ---------------------------------------------------------------------------
 
 
-def plot_dl_cdf_comparison(  # noqa: PLR0913
+def plot_dl_cdf_comparison(  # ruff: ignore[too-many-arguments]
     predictions: pd.DataFrame,
     *,
     split: str,
@@ -1355,7 +1322,8 @@ def plot_dl_cdf_comparison(  # noqa: PLR0913
     equal-volunteer-weighted LOVO evaluation.
     """
     _validate_columns(
-        predictions, {"dataset", "model", "distance_error", "split_mode", "seed"}
+        predictions,
+        {"dataset", "model", "distance_error", "split_mode", "seed"},
     )
     split_predictions = predictions.loc[predictions["split_mode"].astype(str) == split]
     all_errors = _numeric_distance_errors(split_predictions)
@@ -1381,7 +1349,7 @@ def plot_dl_cdf_comparison(  # noqa: PLR0913
             for _, volunteer_group in curve_predictions.groupby("held_out_user", sort=True):
                 errors_by_seed = {
                     seed: _numeric_distance_errors(
-                        volunteer_group.loc[volunteer_group["seed"] == seed]
+                        volunteer_group.loc[volunteer_group["seed"] == seed],
                     ).to_numpy(dtype=float)
                     for seed in seeds
                 }
@@ -1394,7 +1362,7 @@ def plot_dl_cdf_comparison(  # noqa: PLR0913
             return stacked.mean(axis=0), stacked.std(axis=0)
         errors_by_seed = {
             seed: _numeric_distance_errors(
-                curve_predictions.loc[curve_predictions["seed"] == seed]
+                curve_predictions.loc[curve_predictions["seed"] == seed],
             ).to_numpy(dtype=float)
             for seed in seeds
         }
@@ -1430,16 +1398,16 @@ def plot_dl_cdf_comparison(  # noqa: PLR0913
     room_cnn_predictions = split_predictions.loc[
         (split_predictions["model"] == room_model) & (split_predictions["dataset"] == room_band)
     ]
-    _draw_curve(axes[1], "Band CNN", band_cnn_predictions, "#4c72b0")
-    _draw_curve(axes[1], "Room CNN", room_cnn_predictions, "#dd8452")
+    _draw_curve(axes[1], "B-CNN", band_cnn_predictions, "#4c72b0")
+    _draw_curve(axes[1], "R-CNN", room_cnn_predictions, "#dd8452")
 
     if not any_plotted:
         plt.close(fig)
         print(f"No {split} DL predictions available for the CDF comparison.")
         return
 
-    axes[0].set_title("(a) Band CNN by frequency band", fontsize=11)
-    axes[1].set_title("(b) Band CNN vs Room CNN (Fusion)", fontsize=11)
+    axes[0].set_title("(a) B-CNN", fontsize=11)
+    axes[1].set_title("(b) B-CNN vs R-CNN (Fusion)", fontsize=11)
     for ax in axes:
         ax.set_xlabel("Distance error (m)")
         ax.set_xlim(0, x_max)
@@ -1468,7 +1436,7 @@ def _dl_volunteer_seed_means(
             if seed_group.empty:
                 continue
             seed_accuracies.append(
-                float((seed_group["true_position"] == seed_group["pred_position"]).mean())
+                float((seed_group["true_position"] == seed_group["pred_position"]).mean()),
             )
         if seed_accuracies:
             result[str(volunteer)] = float(np.mean(seed_accuracies)) * 100.0
@@ -1486,7 +1454,8 @@ def _draw_dl_volunteer_panel(
 ) -> bool:
     """Draw one per-user slope panel; return whether anything was plotted."""
     volunteers = sorted(
-        {volunteer for values in data.values() for volunteer in values}, key=str
+        {volunteer for values in data.values() for volunteer in values},
+        key=str,
     )
     if not volunteers or not x_labels:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
@@ -1544,7 +1513,7 @@ def _draw_dl_volunteer_panel(
     return True
 
 
-def plot_dl_volunteer_variability(  # noqa: PLR0913
+def plot_dl_volunteer_variability(  # ruff: ignore[too-many-arguments]
     predictions: pd.DataFrame,
     *,
     seeds: Sequence[int],
@@ -1575,7 +1544,9 @@ def plot_dl_volunteer_variability(  # noqa: PLR0913
     )
     split_predictions = predictions.loc[predictions["split_mode"].astype(str) == split_mode]
     if split_predictions.empty:
-        print(f"No {split_mode} DL predictions available for the {label_prefix.lower()}-variability plot.")
+        print(
+            f"No {split_mode} DL predictions available for the {label_prefix.lower()}-variability plot."
+        )
         return
 
     panel_a_data = {
@@ -1589,7 +1560,7 @@ def plot_dl_volunteer_variability(  # noqa: PLR0913
         for band in band_order
     }
     panel_b_data = {
-        "Band CNN": _dl_volunteer_seed_means(
+        "B-CNN": _dl_volunteer_seed_means(
             split_predictions.loc[
                 (split_predictions["model"] == band_model)
                 & (split_predictions["dataset"] == room_band)
@@ -1597,7 +1568,7 @@ def plot_dl_volunteer_variability(  # noqa: PLR0913
             seeds,
             user_column=user_column,
         ),
-        "Room CNN": _dl_volunteer_seed_means(
+        "R-CNN": _dl_volunteer_seed_means(
             split_predictions.loc[
                 (split_predictions["model"] == room_model)
                 & (split_predictions["dataset"] == room_band)
@@ -1612,27 +1583,31 @@ def plot_dl_volunteer_variability(  # noqa: PLR0913
         axes[0],
         list(band_order),
         panel_a_data,
-        "(a) Band CNN by frequency band",
+        "(a) B-CNN",
         label_prefix=label_prefix,
         show_legend=False,
     )
     plotted_b = _draw_dl_volunteer_panel(
         axes[1],
-        ["Band CNN", "Room CNN"],
+        ["B-CNN", "R-CNN"],
         panel_b_data,
-        "(b) Band CNN vs Room CNN (Fusion)",
+        "(b) B-CNN vs R-CNN (Fusion)",
         label_prefix=label_prefix,
         show_legend=False,
     )
     if not (plotted_a or plotted_b):
         plt.close(fig)
-        print(f"No {split_mode} fold metrics available for the {label_prefix.lower()}-variability plot.")
+        print(
+            f"No {split_mode} fold metrics available for the {label_prefix.lower()}-variability plot."
+        )
         return
 
     axes[0].set_ylabel("Position accuracy (%)")
     legend_ax = axes[0] if plotted_a else axes[1]
     handles, labels_ = legend_ax.get_legend_handles_labels()
-    fig.legend(handles, labels_, fontsize=8.5, ncol=4, loc="lower center", bbox_to_anchor=(0.5, -0.14))
+    fig.legend(
+        handles, labels_, fontsize=8.5, ncol=4, loc="lower center", bbox_to_anchor=(0.5, -0.10)
+    )
     fig.tight_layout(rect=(0, 0.12, 1, 1))
     _save_and_show(fig, save_path, show=show)
 
@@ -1686,16 +1661,20 @@ def plot_dl_block_vs_lovo_metrics(
             if block_row.empty or lovo_row.empty:
                 continue
             block_mean = pd.to_numeric(
-                pd.Series([block_row.iloc[0].get(f"{metric_key}_mean")]), errors="coerce"
+                pd.Series([block_row.iloc[0].get(f"{metric_key}_mean")]),
+                errors="coerce",
             ).iloc[0]
             block_std = pd.to_numeric(
-                pd.Series([block_row.iloc[0].get(f"{metric_key}_std")]), errors="coerce"
+                pd.Series([block_row.iloc[0].get(f"{metric_key}_std")]),
+                errors="coerce",
             ).iloc[0]
             lovo_mean = pd.to_numeric(
-                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_mean")]), errors="coerce"
+                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_mean")]),
+                errors="coerce",
             ).iloc[0]
             lovo_std = pd.to_numeric(
-                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_std")]), errors="coerce"
+                pd.Series([lovo_row.iloc[0].get(f"{metric_key}_std")]),
+                errors="coerce",
             ).iloc[0]
             if pd.isna(block_mean) or pd.isna(lovo_mean):
                 continue
@@ -1747,7 +1726,7 @@ def plot_dl_block_vs_lovo_metrics(
         return
 
     handles, labels_ = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels_, loc="lower center", ncol=2, bbox_to_anchor=(0.5, -0.05))
+    fig.legend(handles, labels_, loc="lower center", ncol=2, bbox_to_anchor=(0.5, -0.03))
     fig.tight_layout(rect=(0, 0.08, 1, 1))
     _save_and_show(fig, save_path, show=show)
 
@@ -1771,7 +1750,7 @@ def _dl_block_floor_plan_records(
             if seed_group.empty:
                 continue
             seed_accuracies.append(
-                float((seed_group["true_location"] == seed_group["pred_location"]).mean())
+                float((seed_group["true_location"] == seed_group["pred_location"]).mean()),
             )
         if not seed_accuracies:
             continue
@@ -1805,7 +1784,7 @@ def _dl_lovo_floor_plan_records(
                 if seed_group.empty:
                     continue
                 seed_accuracies.append(
-                    float((seed_group["true_location"] == seed_group["pred_location"]).mean())
+                    float((seed_group["true_location"] == seed_group["pred_location"]).mean()),
                 )
             if seed_accuracies:
                 volunteer_means.append(float(np.mean(seed_accuracies)))
@@ -1860,8 +1839,8 @@ def plot_dl_spatial_generalization(
             "row_idx": row_idx,
             "col_idx": col_idx,
             "accuracy_decrease_pp": (
-                block_by_key[(row_idx, col_idx)]["accuracy"]
-                - lovo_by_key[(row_idx, col_idx)]["accuracy"]
+                block_by_key[row_idx, col_idx]["accuracy"]
+                - lovo_by_key[row_idx, col_idx]["accuracy"]
             )
             * 100.0,
         }
@@ -1872,7 +1851,8 @@ def plot_dl_spatial_generalization(
     # Use the true maximum so the colour bar always spans every plotted cell; a
     # rounded/percentile cap would visually clip outlier positions off the top.
     max_decrease_pp = max(
-        (record["accuracy_decrease_pp"] for record in decrease_records), default=0.0
+        (record["accuracy_decrease_pp"] for record in decrease_records),
+        default=0.0,
     )
     decrease_vmax = max(max_decrease_pp, 1e-6)
 
@@ -1880,8 +1860,24 @@ def plot_dl_spatial_generalization(
     decrease_norm = mcolors.Normalize(vmin=0.0, vmax=decrease_vmax)
 
     panels = [
-        (block_records, "accuracy", FLOOR_PLAN_ACCURACY_CMAP, acc_norm, "Position accuracy", lambda v: f"{v:.0%}", "block_accuracy"),
-        (lovo_records, "accuracy", FLOOR_PLAN_ACCURACY_CMAP, acc_norm, "Position accuracy", lambda v: f"{v:.0%}", "lovo_accuracy"),
+        (
+            block_records,
+            "accuracy",
+            FLOOR_PLAN_ACCURACY_CMAP,
+            acc_norm,
+            "Position accuracy",
+            lambda v: f"{v:.0%}",
+            "block_accuracy",
+        ),
+        (
+            lovo_records,
+            "accuracy",
+            FLOOR_PLAN_ACCURACY_CMAP,
+            acc_norm,
+            "Position accuracy",
+            lambda v: f"{v:.0%}",
+            "lovo_accuracy",
+        ),
         (
             decrease_records,
             "accuracy_decrease_pp",
@@ -1961,7 +1957,7 @@ def magnitude_to_db(magnitude: np.ndarray, epsilon: float = DB_EPSILON) -> np.nd
     return 20.0 * np.log10(np.clip(magnitude_array, epsilon, None))
 
 
-def select_aligned_magnitude_interval(  # noqa: PLR0913
+def select_aligned_magnitude_interval(  # ruff: ignore[too-many-arguments]
     magnitude_stages: CsiStageMaps,
     *,
     position: str,
@@ -2046,7 +2042,7 @@ def select_aligned_magnitude_interval(  # noqa: PLR0913
     return selected
 
 
-def plot_csi_magnitude_stages(  # noqa: PLR0913
+def plot_csi_magnitude_stages(  # ruff: ignore[too-many-arguments]
     magnitude_stages: CsiStageMaps,
     *,
     position: str,
@@ -2117,9 +2113,7 @@ def plot_csi_magnitude_stages(  # noqa: PLR0913
     for stage_name, figure_title, filename_stem, value_label, convert_to_db in stage_settings:
         values = selected[stage_name]
         plot_values = (
-            (magnitude_to_db(values[0]), magnitude_to_db(values[1]))
-            if convert_to_db
-            else values
+            (magnitude_to_db(values[0]), magnitude_to_db(values[1])) if convert_to_db else values
         )
         cmap, norm = _magnitude_color_mapping(
             plot_values,
@@ -2200,8 +2194,7 @@ def _unique_recording_scenario(
         raise ValueError(f"No paired CSI recording was found for {identity}.")
     if len(matching_scenarios) > 1:
         msg = (
-            "The selected recording exists in multiple scenarios: "
-            f"{', '.join(matching_scenarios)}."
+            f"The selected recording exists in multiple scenarios: {', '.join(matching_scenarios)}."
         )
         raise ValueError(msg)
     return matching_scenarios[0]
@@ -2268,7 +2261,7 @@ def _magnitude_color_mapping(
     return plt.get_cmap("viridis"), mcolors.Normalize(vmin=lower, vmax=upper)
 
 
-def _plot_magnitude_heatmap_pair(  # noqa: PLR0913
+def _plot_magnitude_heatmap_pair(  # ruff: ignore[too-many-arguments]
     values: tuple[np.ndarray, np.ndarray],
     *,
     panel_titles: tuple[str, str],
@@ -2303,7 +2296,7 @@ def _plot_magnitude_heatmap_pair(  # noqa: PLR0913
     return fig
 
 
-def _plot_magnitude_surface_pair(  # noqa: PLR0913
+def _plot_magnitude_surface_pair(  # ruff: ignore[too-many-arguments]
     values: tuple[np.ndarray, np.ndarray],
     *,
     panel_titles: tuple[str, str],
@@ -2372,7 +2365,7 @@ def _style_magnitude_axis(ax: Axes, *, is_3d: bool = False) -> None:
         for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
             axis.pane.set_facecolor((1.0, 1.0, 1.0, 1.0))
             axis.pane.set_edgecolor("#d9d9d9")
-            axis._axinfo["grid"]["color"] = (0.82, 0.82, 0.82, 0.55)  # noqa: SLF001
+            axis._axinfo["grid"]["color"] = (0.82, 0.82, 0.82, 0.55)  # ruff: ignore[private-member-access]
         return
     ax.grid(color="#d0d0d0", linewidth=0.45, alpha=0.35)
     ax.spines["top"].set_visible(False)
@@ -2462,6 +2455,7 @@ def format_esp_key(esp_key: str) -> str:
 
 def sorted_location_keys(location_keys: set[str]) -> list[str]:
     """Sort nested-map location keys in physical grid order."""
+
     def sort_key(location_key: str) -> tuple[str, int]:
         """Return the row and numeric column used for location ordering."""
         location = format_location_key(location_key)
@@ -2506,11 +2500,7 @@ def paired_esp_keys(esp_keys: list[str]) -> list[str]:
 def get_available_location_keys(magnitudes: CsiMap) -> list[str]:
     """Return locations that contain at least one magnitude recording."""
     return sorted_location_keys(
-        {
-            location_key
-            for locations_map in magnitudes.values()
-            for location_key in locations_map
-        }
+        {location_key for locations_map in magnitudes.values() for location_key in locations_map},
     )
 
 
@@ -2593,11 +2583,7 @@ def iter_selected_magnitude_groups(
             continue
         for user_key, esps_map in users_map.items():
             trial_keys = sorted(
-                {
-                    trial_key
-                    for esp_key in esp_keys
-                    for trial_key in esps_map.get(esp_key, {})
-                }
+                {trial_key for esp_key in esp_keys for trial_key in esps_map.get(esp_key, {})},
             )
             for trial_key in trial_keys:
                 entries: list[SelectedEntry] = []
@@ -2689,7 +2675,7 @@ def plot_selected_magnitude_profiles(
         print("No magnitude data found for the selected location/ESPs.")
 
 
-def plot_selected_magnitude_heatmaps(  # noqa: PLR0913
+def plot_selected_magnitude_heatmaps(  # ruff: ignore[too-many-arguments]
     magnitudes: CsiMap,
     location_key: str,
     esp_keys: list[str],
@@ -2837,7 +2823,7 @@ def plot_average_magnitude_profiles_across_users(
                 empty_room_location_key=empty_room_location_key,
             )
             entries.append(
-                (esp_key, stacked_users.shape[0], mean_profile, std_profile, empty_profile)
+                (esp_key, stacked_users.shape[0], mean_profile, std_profile, empty_profile),
             )
             has_average_entry = True
         if not has_average_entry:
@@ -2891,8 +2877,7 @@ def plot_average_magnitude_profiles_across_users(
             ax.legend()
         hide_unused_axes(axes, len(entries))
         fig.suptitle(
-            "Average CSI magnitude (dB) across users | "
-            f"{scenario_key} / {location_key}"
+            f"Average CSI magnitude (dB) across users | {scenario_key} / {location_key}",
         )
         plt.show()
         plot_count += 1
