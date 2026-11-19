@@ -7,8 +7,9 @@ import json
 import os
 import random
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -21,10 +22,9 @@ from utils.cache import (
     RESULTS_ROOT,
     get_all_dataframes,
     get_cache_path,
-    get_results_path,
+    load_predictions,
     load_window_array_cache,
     load_window_arrays,
-    load_predictions,
     make_run_id,
     open_window_array_writers,
     prediction_cache_metadata,
@@ -156,7 +156,7 @@ def create_position_label_encoder(
     return label_encoder
 
 
-def run_dl_experiments(  # noqa: PLR0913, PLR0914
+def run_dl_experiments(  # noqa: PLR0913
     processed_magnitude_data: CsiMap,
     feature_dataframes: dict[str, pd.DataFrame],
     *,
@@ -403,10 +403,7 @@ def _dl_seed_value(seed_group: pd.DataFrame, *, split: str) -> dict[str, float]:
         compute_localization_metrics(fold_group)
         for _, fold_group in seed_group.groupby("held_out_user", sort=True)
     ]
-    return {
-        name: float(np.mean([row[name] for row in fold_rows]))
-        for name in _DL_METRIC_NAMES
-    }
+    return {name: float(np.mean([row[name] for row in fold_rows])) for name in _DL_METRIC_NAMES}
 
 
 def _format_mean_std(mean_value: object, std_value: object) -> str:
@@ -457,11 +454,7 @@ def dl_seed_summary_table(
             row[f"{name}_std"] = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
             row[name] = _format_mean_std(row[f"{name}_mean"], row[f"{name}_std"])
         rows.append(row)
-    return (
-        pd.DataFrame(rows)
-        .sort_values(["dataset", "model", "split"])
-        .reset_index(drop=True)
-    )
+    return pd.DataFrame(rows).sort_values(["dataset", "model", "split"]).reset_index(drop=True)
 
 
 def dl_per_room_table(
@@ -549,7 +542,9 @@ def print_torch_environment(*, require_cuda: bool = False) -> torch.device:
     if not torch.cuda.is_available():
         print("!!! CUDA IS NOT AVAILABLE; DL will use the configured CPU fallback. !!!")
         if require_cuda:
-            raise AssertionError("CUDA is required for this run but torch.cuda.is_available() is false.")
+            raise AssertionError(
+                "CUDA is required for this run but torch.cuda.is_available() is false."
+            )
         return torch.device("cpu")
 
     device_name = torch.cuda.get_device_name(0)
@@ -829,8 +824,8 @@ def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
                 "fold": str(held_out_user if held_out_user is not None else "single"),
                 "held_out_user": held_out_user,
                 "validation_user": validation_user,
-                "n_train_windows": int(len(protocol_train)),
-                "n_test_windows": int(len(test_df)),
+                "n_train_windows": len(protocol_train),
+                "n_test_windows": len(test_df),
                 "trials_used": _trials_used(protocol_train, test_df),
                 **fold_metrics,
             }
@@ -898,9 +893,7 @@ def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
             )
             upsert_fold_rows(user_rows, results_root=result_root)
 
-    peak_memory = (
-        int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
-    )
+    peak_memory = int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
     metrics["peak_cuda_memory_bytes"] = peak_memory
     metrics["torch_version"] = str(torch.__version__)
     print(f"[DL GPU] run_id={resolved_run_id} peak_cuda_memory_bytes={peak_memory}")
@@ -942,9 +935,7 @@ def train_evaluate_cnn_multi_seed(
     """Execute one independent DL run per configured seed and report seed spread."""
     if not seeds:
         raise ValueError("At least one DL seed is required.")
-    outputs = {
-        int(seed): train_evaluate_cnn(seed=int(seed), **kwargs) for seed in seeds
-    }
+    outputs = {int(seed): train_evaluate_cnn(seed=int(seed), **kwargs) for seed in seeds}
     result_root = Path(kwargs.get("results_dir", RESULTS_ROOT))
     seed_summary = derive_seed_summary(results_root=result_root)
     if not seed_summary.empty:
@@ -978,9 +969,7 @@ def resolved_dataloader_settings(
                 params.get("cuda_persistent_workers", CUDA_PERSISTENT_WORKERS)
             )
             and workers > 0,
-            "prefetch_factor": int(
-                params.get("cuda_prefetch_factor", CUDA_PREFETCH_FACTOR)
-            ),
+            "prefetch_factor": int(params.get("cuda_prefetch_factor", CUDA_PREFETCH_FACTOR)),
         }
         if workers == 0:
             settings.pop("prefetch_factor")
@@ -990,9 +979,7 @@ def resolved_dataloader_settings(
             "batch_size": int(params.get("cpu_batch_size", CPU_BATCH_SIZE)),
             "num_workers": workers,
             "pin_memory": bool(params.get("cpu_pin_memory", CPU_PIN_MEMORY)),
-            "persistent_workers": bool(
-                params.get("cpu_persistent_workers", CPU_PERSISTENT_WORKERS)
-            )
+            "persistent_workers": bool(params.get("cpu_persistent_workers", CPU_PERSISTENT_WORKERS))
             and workers > 0,
         }
     print(f"[DataLoader] device={device.type} settings={settings}")
@@ -1030,19 +1017,14 @@ def _train_predict_fold(  # noqa: PLR0913, PLR0915
         train_fingerprint=_window_identity_fingerprint(protocol_train_df),
         test_fingerprint=_window_identity_fingerprint(test_df),
     )
-    branch_channels = {
-        band_name: int(array.shape[1]) for band_name, array in arrays.items()
-    }
+    branch_channels = {band_name: int(array.shape[1]) for band_name, array in arrays.items()}
     model = model_cls(
         branch_channels,
         n_classes=len(label_encoder.classes_),
         params=params,
     ).to(device)
     total_params = parameter_count(model)
-    print(
-        f"[{model_label}] {band}/{split_mode} fold={fold or 'single'} "
-        f"parameters={total_params}"
-    )
+    print(f"[{model_label}] {band}/{split_mode} fold={fold or 'single'} parameters={total_params}")
     checkpoint = checkpoint_path(run_id, fold=fold, results_root=results_root)
     checkpoint_metadata_path = checkpoint.with_suffix(".pt.metadata.json")
     # Prediction metadata fingerprints both protocol sides, preventing reuse when
@@ -1109,9 +1091,7 @@ def _train_predict_fold(  # noqa: PLR0913, PLR0915
             train_loss, train_acc = _run_epoch(
                 model, train_loader, criterion, device, optimizer=optimizer
             )
-            val_loss, val_acc = _run_epoch(
-                model, val_loader, criterion, device, optimizer=None
-            )
+            val_loss, val_acc = _run_epoch(model, val_loader, criterion, device, optimizer=None)
             epoch_seconds = time.perf_counter() - epoch_started
             history_rows.append(
                 {
@@ -1426,7 +1406,7 @@ def _window_pairs(df: pd.DataFrame) -> pd.DataFrame:
 def _version_pair(version: str) -> tuple[int, int]:
     """Extract a major/minor integer pair from a version string."""
     numbers = []
-    for part in version.split("+")[0].split("."):
+    for part in version.split("+", maxsplit=1)[0].split("."):
         digits = "".join(character for character in part if character.isdigit())
         if not digits:
             break
@@ -1554,7 +1534,7 @@ def build_frequency_window_arrays(
         "subcarrier_counts": subcarrier_counts,
         "shapes": {band: list(shape) for band, shape in shapes.items()},
         "dtype": "float16",
-        "meta_rows": int(len(meta)),
+        "meta_rows": len(meta),
     }
     save_window_array_metadata(meta, meta_path, manifest, manifest_path)
 
@@ -1564,7 +1544,7 @@ def build_frequency_window_arrays(
     return arrays, meta
 
 
-def build_room_window_arrays(  # noqa: PLR0913, PLR0914
+def build_room_window_arrays(  # noqa: PLR0913
     magnitude_data: CsiMap,
     *,
     fusion_meta: pd.DataFrame,
@@ -1602,9 +1582,7 @@ def build_room_window_arrays(  # noqa: PLR0913, PLR0914
         fusion_meta_fingerprint=fusion_meta_fingerprint,
     )
     config_hash = hashlib.sha256(
-        json.dumps(representation_config, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(representation_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:12]
     feat_opts = {
         "window_size": window_size,
@@ -1616,19 +1594,14 @@ def build_room_window_arrays(  # noqa: PLR0913, PLR0914
     print(f"[room window arrays] cache path: {cache_dir.resolve()}")
 
     room_order = tuple(ROOM_ANCHOR_PAIRS)
-    array_paths = {
-        room: cache_dir / f"{_band_stem(room)}.npy"
-        for room in room_order
-    }
+    array_paths = {room: cache_dir / f"{_band_stem(room)}.npy" for room in room_order}
     meta_path = cache_dir / "meta.parquet"
     manifest_path = cache_dir / "manifest.json"
     expected_shapes = {
         room: (
             len(fusion_meta),
             ROOM_CHANNEL_COUNTS[room],
-            EXPECTED_SUBCARRIERS["2.4 GHz"]
-            + padding_rows
-            + EXPECTED_SUBCARRIERS["5 GHz"],
+            EXPECTED_SUBCARRIERS["2.4 GHz"] + padding_rows + EXPECTED_SUBCARRIERS["5 GHz"],
             window_size,
         )
         for room in room_order
@@ -1708,9 +1681,7 @@ def build_room_window_arrays(  # noqa: PLR0913, PLR0914
                     np.float16,
                     copy=False,
                 )
-                assert np.all(
-                    image[low_width : low_width + padding_rows] == 0.0
-                ), (
+                assert np.all(image[low_width : low_width + padding_rows] == 0.0), (
                     "Room-channel padding must remain exactly zero for "
                     f"group_id={group_id}, window_idx={window_idx}, room={room}, "
                     f"channel={channel_index}."
@@ -1734,7 +1705,7 @@ def build_room_window_arrays(  # noqa: PLR0913, PLR0914
         "source_fusion_manifest": fusion_manifest,
         "shapes": {room: list(shape) for room, shape in expected_shapes.items()},
         "dtype": "float16",
-        "meta_rows": int(len(meta)),
+        "meta_rows": len(meta),
     }
     save_window_array_metadata(meta, meta_path, manifest, manifest_path)
     arrays = load_window_arrays(array_paths)
@@ -1775,8 +1746,7 @@ def _validated_fusion_manifest(
     }
     if mismatches:
         raise ValueError(
-            "fusion_meta build settings do not match the room-array request: "
-            f"{mismatches}."
+            f"fusion_meta build settings do not match the room-array request: {mismatches}."
         )
     return manifest
 
@@ -1935,10 +1905,7 @@ def _print_room_array_summary(
     """Print room-array shapes and the deterministic channel-pair ordering."""
     pair_lookup = {entry["room"]: entry["pairs"] for entry in ordered_pairs}
     for room, array in arrays.items():
-        print(
-            f"[room window arrays] {room}: shape={tuple(array.shape)}, "
-            f"dtype={array.dtype}"
-        )
+        print(f"[room window arrays] {room}: shape={tuple(array.shape)}, dtype={array.dtype}")
         print(f"[room window arrays] {room} anchor pairs: {pair_lookup[room]}")
 
 

@@ -16,8 +16,7 @@ ESP_IDS_BY_BAND = {
 }
 BANDS_TO_RUN = tuple(ESP_IDS_BY_BAND)
 ANCHOR_GROUPS = {
-    band: [f"esp_{esp_id:02d}" for esp_id in ESP_IDS_BY_BAND[band]]
-    for band in ("2.4 GHz", "5 GHz")
+    band: [f"esp_{esp_id:02d}" for esp_id in ESP_IDS_BY_BAND[band]] for band in ("2.4 GHz", "5 GHz")
 }
 ROOM_ANCHOR_PAIRS: dict[str, list[tuple[str, str]]] = {
     "Room 1": [
@@ -36,16 +35,10 @@ ROOM_ANCHOR_PAIRS: dict[str, list[tuple[str, str]]] = {
         ("esp_05", "esp_15"),
     ],
 }
-ROOM_CHANNEL_COUNTS = {
-    room: len(anchor_pairs)
-    for room, anchor_pairs in ROOM_ANCHOR_PAIRS.items()
-}
+ROOM_CHANNEL_COUNTS = {room: len(anchor_pairs) for room, anchor_pairs in ROOM_ANCHOR_PAIRS.items()}
 
 EXPECTED_SUBCARRIERS = {"2.4 GHz": 50, "5 GHz": 56}
-EXPECTED_ANCHORS = {
-    band: len(anchor_group)
-    for band, anchor_group in ANCHOR_GROUPS.items()
-}
+EXPECTED_ANCHORS = {band: len(anchor_group) for band, anchor_group in ANCHOR_GROUPS.items()}
 
 EMPTY_ROOM_LOCATION = "Z-0"
 ROOM_1_COLUMNS = range(1, 10)

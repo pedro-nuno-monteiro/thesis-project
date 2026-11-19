@@ -11,6 +11,7 @@ Usage:
 `clean` covers both the feature-dataframe cache (.cache/dataframes, including DL
 window arrays) and the per-file parsed-CSI cache (.cache/csi_processing).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,6 +42,7 @@ def _confirm(msg: str) -> bool:
 
 
 # ── list ──────────────────────────────────────────────────────────────────────
+
 
 def cmd_list(_args: argparse.Namespace) -> None:
     _list_csi_cache()
@@ -86,8 +88,10 @@ def cmd_list(_args: argparse.Namespace) -> None:
 
         window_dirs = sorted(p.parent for p in (folder / "window_arrays").rglob("manifest.json"))
         for window_dir in window_dirs:
-            print(f"  DL window arrays: {window_dir.relative_to(folder)}/ "
-                  f"[{_dir_size_mb(window_dir):.1f} MB]")
+            print(
+                f"  DL window arrays: {window_dir.relative_to(folder)}/ "
+                f"[{_dir_size_mb(window_dir):.1f} MB]"
+            )
 
 
 def _list_csi_cache() -> None:
@@ -98,11 +102,14 @@ def _list_csi_cache() -> None:
         return
     for version_dir in version_dirs:
         file_count = sum(1 for _ in version_dir.glob("*.pkl"))
-        print(f"{version_dir.relative_to(PROJECT_ROOT)}/  "
-              f"[{_dir_size_mb(version_dir):.1f} MB, {file_count} files]")
+        print(
+            f"{version_dir.relative_to(PROJECT_ROOT)}/  "
+            f"[{_dir_size_mb(version_dir):.1f} MB, {file_count} files]"
+        )
 
 
 # ── clean helpers ─────────────────────────────────────────────────────────────
+
 
 def _drop_nested(folders: list[Path]) -> list[Path]:
     """Keep only top-most folders so a parent and its child are not both deleted."""
@@ -171,6 +178,7 @@ def cmd_results_clean(args: argparse.Namespace) -> None:
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
+
 
 def _add_clean_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_mutually_exclusive_group()

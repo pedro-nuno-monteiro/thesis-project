@@ -7,8 +7,9 @@ import os
 import pickle
 import re
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -145,6 +146,7 @@ def load_window_arrays(array_paths: dict[str, Path]) -> dict[str, np.ndarray]:
 
 # ── Key generation ────────────────────────────────────────────────────────────
 
+
 def make_preproc_key(opts: dict[str, Any]) -> str:
     """Encode magnitude-processing options as a short, human-readable key."""
     parts: list[str] = []
@@ -198,9 +200,7 @@ def make_run_id(
         raise ValueError(f"Unsupported split for run_id: {split!r}.")
     normalization_stem = _normalization_stem(normalization, baseline_scope)
     config_hash = hashlib.sha256(
-        json.dumps(_json_normalized(config), sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(_json_normalized(config), sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:6]
     seed_stem = f"__s{int(seed)}" if seed is not None else ""
     return (
@@ -229,9 +229,7 @@ def parse_run_id(run_id: str) -> dict[str, Any]:
 def get_cache_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> Path:
     """Return the feature-cache directory for preprocessing and feature options."""
     return (
-        CACHE_DIR
-        / f"preproc={make_preproc_key(preproc_opts)}"
-        / f"feat={make_feat_key(feat_opts)}"
+        CACHE_DIR / f"preproc={make_preproc_key(preproc_opts)}" / f"feat={make_feat_key(feat_opts)}"
     )
 
 
@@ -260,11 +258,7 @@ def predictions_path(
         stem = f"{_band_stem(band)}__{_band_stem(model)}__{_band_stem(split_mode)}"
         if fold is not None:
             stem = f"{stem}__{_band_stem(fold)}"
-    return (
-        Path(results_dir)
-        / "predictions"
-        / f"{stem}.parquet"
-    )
+    return Path(results_dir) / "predictions" / f"{stem}.parquet"
 
 
 def save_predictions(
@@ -279,9 +273,7 @@ def save_predictions(
     run_id: str | None = None,
 ) -> Path:
     """Persist prediction rows as parquet for analysis without retraining."""
-    path = predictions_path(
-        results_dir, model, band, split_mode, fold=fold, run_id=run_id
-    )
+    path = predictions_path(results_dir, model, band, split_mode, fold=fold, run_id=run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".parquet.tmp")
     if metadata is None:
@@ -306,9 +298,7 @@ def load_predictions(
     run_id: str | None = None,
 ) -> pd.DataFrame | None:
     """Load persisted predictions, returning None when no cache file exists."""
-    path = predictions_path(
-        results_dir, model, band, split_mode, fold=fold, run_id=run_id
-    )
+    path = predictions_path(results_dir, model, band, split_mode, fold=fold, run_id=run_id)
     if not path.exists():
         return None
     if expected_metadata is not None and not _prediction_metadata_matches(
@@ -377,6 +367,7 @@ def prediction_cache_metadata(
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+
 def _lib_version(name: str) -> str:
     """Return an installed package version or ``unknown`` when unavailable."""
     try:
@@ -396,9 +387,7 @@ def _normalization_stem(normalization: str, baseline_scope: str | None) -> str:
     if normalized == "empty_baseline":
         scope = str(baseline_scope or "session").strip().lower().removeprefix("per_")
         if scope not in {"session", "user", "global"}:
-            raise ValueError(
-                "baseline_scope must be session, user, or global for empty_baseline."
-            )
+            raise ValueError("baseline_scope must be session, user, or global for empty_baseline.")
         return f"ebl-{scope}"
     if normalized not in {"none", "zscore", "minmax", "packet_minmax"}:
         raise ValueError(f"Unsupported normalization for run_id: {normalization!r}.")
@@ -473,9 +462,7 @@ def _prediction_metadata_matches(path: Path, expected_metadata: dict[str, Any]) 
     if observed is None:
         return False
     expected = _json_normalized(expected_metadata)
-    mismatches = [
-        key for key, value in expected.items() if observed.get(key) != value
-    ]
+    mismatches = [key for key, value in expected.items() if observed.get(key) != value]
     for side in ("train", "test"):
         key = f"{side}_fingerprint"
         if key in mismatches:
@@ -485,8 +472,7 @@ def _prediction_metadata_matches(path: Path, expected_metadata: dict[str, Any]) 
     ]
     if other_mismatches:
         print(
-            f"[predictions cache mismatch] metadata changed ({', '.join(other_mismatches)}): "
-            f"{path}"
+            f"[predictions cache mismatch] metadata changed ({', '.join(other_mismatches)}): {path}"
         )
     return not mismatches
 
@@ -506,9 +492,7 @@ def _check_schema(df: pd.DataFrame, path: Path) -> None:
         )
 
     feature_cols = [col for col in df.columns if col not in _EXPECTED_METADATA_COLS]
-    non_float32_cols = [
-        col for col in feature_cols if str(df[col].dtype) != "float32"
-    ]
+    non_float32_cols = [col for col in feature_cols if str(df[col].dtype) != "float32"]
     if non_float32_cols:
         raise _StaleFeatureCache(
             f"Cache schema mismatch in {path} -- feature columns must be float32; "
@@ -517,6 +501,7 @@ def _check_schema(df: pd.DataFrame, path: Path) -> None:
 
 
 # ── Feature dataframe cache ───────────────────────────────────────────────────
+
 
 def get_all_dataframes(
     preproc_opts: dict[str, Any],

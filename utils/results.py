@@ -6,9 +6,10 @@ import json
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -195,13 +196,9 @@ def compute_localization_metrics(predictions_df: pd.DataFrame) -> dict[str, floa
         ),
         "room_accuracy": _accuracy(true_room, pred_room),
         "mean_distance_error": float(np.mean(error_values)) if error_values.size else np.nan,
-        "median_distance_error": (
-            float(np.median(error_values)) if error_values.size else np.nan
-        ),
+        "median_distance_error": (float(np.median(error_values)) if error_values.size else np.nan),
         "rmse_distance_error": (
-            float(np.sqrt(np.mean(np.square(error_values))))
-            if error_values.size
-            else np.nan
+            float(np.sqrt(np.mean(np.square(error_values)))) if error_values.size else np.nan
         ),
         "p90_distance_error": (
             float(np.percentile(error_values, 90)) if error_values.size else np.nan
@@ -237,9 +234,7 @@ def room_label_for_location(location: object) -> int | None:
     column = int(match.group("column"))
     if row in "ABCDEF" and column in ROOM_1_COLUMNS:
         return 1
-    if (row == "A" and column in ROOM_2_A_COLUMNS) or (
-        row in "BC" and column in ROOM_2_BC_COLUMNS
-    ):
+    if (row == "A" and column in ROOM_2_A_COLUMNS) or (row in "BC" and column in ROOM_2_BC_COLUMNS):
         return 2
     if row in "EF" and column in ROOM_3_EF_COLUMNS:
         return 3
@@ -345,9 +340,7 @@ def build_global_predictions_dataframe(  # noqa: PLR0913
     return pd.DataFrame(
         {
             "window_id": (
-                test_df["group_id"].astype(str)
-                + "_window_"
-                + test_df["window_idx"].astype(str)
+                test_df["group_id"].astype(str) + "_window_" + test_df["window_idx"].astype(str)
             ).to_numpy(),
             "user": test_df["user"].to_numpy(),
             "trial": test_df["trial"].to_numpy(),
@@ -392,9 +385,7 @@ def majority_class_baselines(
         [room_label_for_location(location) for location in train_df["location"]]
     )
     majority_room = train_rooms.mode(dropna=True).iloc[0]
-    true_rooms = pd.Series(
-        [room_label_for_location(location) for location in test_df["location"]]
-    )
+    true_rooms = pd.Series([room_label_for_location(location) for location in test_df["location"]])
     return {
         "majority_position_accuracy": float(
             (test_df["location"].astype(str).to_numpy() == majority_position).mean()
@@ -461,7 +452,7 @@ def build_run_row(  # noqa: PLR0913
         scope = str(scope).removeprefix("per_")
     row = {
         "run_id": run_id,
-        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
+        "timestamp": timestamp or datetime.now(UTC).isoformat(),
         "family": parsed["family"],
         "model": parsed["model"],
         "band": parsed["band"],
@@ -539,7 +530,7 @@ def write_run_manifest(
     normalized_config = json.loads(json.dumps(config, sort_keys=True, default=str))
     payload = {
         "run_id": run_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "parsed_run_id": parsed,
         "config": normalized_config,
     }
@@ -668,22 +659,13 @@ def _upsert_rows(
     # Preserve the existing table's metric-column order while replacing rows
     # identified by the supplied stable keys.
     if path.exists():
-        string_columns = {
-            column: "string"
-            for column in (
-                "run_id",
-                "trials_used",
-                "fold",
-                "held_out_user",
-                "validation_user",
-            )
-        }
+        string_columns = dict.fromkeys(
+            ("run_id", "trials_used", "fold", "held_out_user", "validation_user"), "string"
+        )
         header_order = list(pd.read_csv(path, nrows=0).columns)
         header_columns = set(header_order)
         suffix_positions = [
-            header_order.index(column)
-            for column in suffix_columns
-            if column in header_columns
+            header_order.index(column) for column in suffix_columns if column in header_columns
         ]
         if suffix_positions:
             first_suffix = min(suffix_positions)
@@ -694,11 +676,7 @@ def _upsert_rows(
             ]
         existing = pd.read_csv(
             path,
-            dtype={
-                key: value
-                for key, value in string_columns.items()
-                if key in header_columns
-            },
+            dtype={key: value for key, value in string_columns.items() if key in header_columns},
         )
         for key in key_columns:
             if key not in existing or key not in incoming:
@@ -727,7 +705,11 @@ def _upsert_rows(
 def _csv_safe_mapping(values: dict[str, Any]) -> dict[str, Any]:
     """Serialize nested values so a mapping can be stored safely in CSV cells."""
     return {
-        key: (json.dumps(value, sort_keys=True, default=str) if isinstance(value, (dict, list)) else value)
+        key: (
+            json.dumps(value, sort_keys=True, default=str)
+            if isinstance(value, (dict, list))
+            else value
+        )
         for key, value in values.items()
     }
 
@@ -738,6 +720,7 @@ def _unique(values: Iterable[str]) -> list[str]:
 
 
 # Legacy paper result exports retained in the shared result module.
+
 
 def save_summary(df: pd.DataFrame, results_dir: Path, basename: str = "summary") -> None:
     """Write the summary dataframe to CSV, Markdown, and LaTeX in results_dir."""
@@ -759,6 +742,7 @@ def save_summary(df: pd.DataFrame, results_dir: Path, basename: str = "summary")
 
 
 # ── Reproducibility manifest ──────────────────────────────────────────────────
+
 
 def _git_commit() -> str | None:
     """Return the current short Git commit when it can be determined."""
@@ -795,15 +779,14 @@ def write_manifest(
     # Capture input shapes and experiment settings before merging optional
     # tuning or LOVO metadata into the persisted manifest.
     dataset_sizes = {
-        f"{_band_stem(band)}_windows": len(df)
-        for band, df in feature_dataframes.items()
+        f"{_band_stem(band)}_windows": len(df) for band, df in feature_dataframes.items()
     }
     feature_matrix_shapes = {
         band: {
             "rows": int(df.shape[0]),
             "columns": int(df.shape[1]),
-            "feature_columns": int(
-                len([col for col in df.columns if col not in _EXPECTED_METADATA_COLS])
+            "feature_columns": len(
+                [col for col in df.columns if col not in _EXPECTED_METADATA_COLS]
             ),
         }
         for band, df in feature_dataframes.items()
@@ -828,7 +811,7 @@ def write_manifest(
             existing_manifest = {}
 
     manifest: dict[str, Any] = {
-        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
+        "timestamp": datetime.now(UTC).astimezone().isoformat(),
         "git_commit": _git_commit(),
         "python_version": sys.version.split()[0],
         "key_library_versions": {

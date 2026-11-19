@@ -89,9 +89,7 @@ class DualBandCNN(nn.Module):
 
     def forward(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         """Encode each band, concatenate its latent vector, and predict logits."""
-        latents = [
-            self.branches[_safe_branch_name(band)](inputs[band]) for band in self._order
-        ]
+        latents = [self.branches[_safe_branch_name(band)](inputs[band]) for band in self._order]
         return self.head(torch.cat(latents, dim=1))
 
 
@@ -138,8 +136,5 @@ class RoomStackedCNN(nn.Module):
 
     def forward(self, inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         """Concatenate room latents in configured room order and predict logits."""
-        latents = [
-            self.branches[_safe_branch_name(room)](inputs[room])
-            for room in self._order
-        ]
+        latents = [self.branches[_safe_branch_name(room)](inputs[room]) for room in self._order]
         return self.head(torch.cat(latents, dim=1))

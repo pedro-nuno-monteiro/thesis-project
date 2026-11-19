@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator, Literal
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -63,10 +64,7 @@ def room_label_for_location(location_key: str) -> int | None:
 
     if row in "ABCDEF" and column in ROOM_1_COLUMNS:
         return 1
-    if (row == "A" and column in ROOM_2_A_COLUMNS) or (
-        row in "BC"
-        and column in ROOM_2_BC_COLUMNS
-    ):
+    if (row == "A" and column in ROOM_2_A_COLUMNS) or (row in "BC" and column in ROOM_2_BC_COLUMNS):
         return 2
     if row in "EF" and column in ROOM_3_EF_COLUMNS:
         return 3
@@ -117,7 +115,7 @@ def compute_window_features(
     return features
 
 
-def build_frequency_feature_dataframe(  # noqa: C901, PLR0913
+def build_frequency_feature_dataframe(
     magnitude_data: CsiMap,
     frequency_scenario: FeatureScenario,
     *,
@@ -351,7 +349,7 @@ def _subcarrier_count_from_features(features: np.ndarray) -> int:
 # compute_window_features function, which applies a sliding window to the magnitude data and
 # computes statistical features for each window. The function takes parameters for window size,
 # overlap size.
-def _features_by_esp(  # noqa: PLR0913
+def _features_by_esp(
     esps_map: dict[str, dict[str, np.ndarray]],
     selected_esp_keys: list[str],
     trial_key: str,

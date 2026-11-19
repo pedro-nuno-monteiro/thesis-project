@@ -18,7 +18,6 @@ from sklearn.pipeline import Pipeline
 from utils.cache import (
     get_all_dataframes,
     get_cache_path,
-    get_results_path,
     load_predictions,
     make_run_id,
     prediction_cache_metadata,
@@ -131,13 +130,17 @@ def validate_cross_session_inventory(csv_diagnostics: pd.DataFrame) -> pd.DataFr
                 pd.to_numeric(
                     user_band.loc[user_band["trial"] == "01", "subcarriers"],
                     errors="coerce",
-                ).dropna().astype(int)
+                )
+                .dropna()
+                .astype(int)
             )
             subcarriers_02 = set(
                 pd.to_numeric(
                     user_band.loc[user_band["trial"] == "02", "subcarriers"],
                     errors="coerce",
-                ).dropna().astype(int)
+                )
+                .dropna()
+                .astype(int)
             )
             compatible = (
                 anchors_01 == expected_anchors
@@ -172,10 +175,9 @@ def validate_cross_session_inventory(csv_diagnostics: pd.DataFrame) -> pd.DataFr
                         .dropna()
                         .astype(int)
                     )
-                    if (
-                        recording_anchors != expected_anchors
-                        or recording_widths != {expected_subcarriers}
-                    ):
+                    if recording_anchors != expected_anchors or recording_widths != {
+                        expected_subcarriers
+                    }:
                         failures.append(
                             f"user={user} trial={trial} location={location} band={band}: "
                             f"anchors={sorted(recording_anchors)}, "
@@ -612,8 +614,7 @@ def run_global_baselines(  # noqa: PLR0913
                         }
                     )
                     lovo_fold_user_ids[band] = [
-                        str(test_df["user"].iloc[0])
-                        for _, test_df in split_lovo_folds(dataframe)
+                        str(test_df["user"].iloc[0]) for _, test_df in split_lovo_folds(dataframe)
                     ]
                 else:
                     _, predictions, metrics = run_global_position_experiment(
@@ -773,9 +774,7 @@ def load_all_predictions(
     if runs_path.exists():
         runs = pd.read_csv(runs_path)
         requested_models = {str(model).lower() for model in models_to_run}
-        requested_bands = {
-            band.lower().replace(".", "_").replace(" ", "") for band in bands_to_run
-        }
+        requested_bands = {band.lower().replace(".", "_").replace(" ", "") for band in bands_to_run}
         requested_splits = set(split_modes)
         selected = runs.loc[
             runs["model"].astype(str).str.lower().isin(requested_models)
@@ -992,10 +991,7 @@ def load_lovo_summary_tables(summary_dir: Path) -> tuple[pd.DataFrame, pd.DataFr
     per_fold["model"] = per_fold["model"].astype(str).str.upper()
     per_fold["dataset"] = per_fold["dataset"].map(_canonical_lovo_dataset)
     per_fold["held_out_user"] = (
-        per_fold["held_out_user"]
-        .astype(str)
-        .str.replace(r"\.0$", "", regex=True)
-        .str.zfill(2)
+        per_fold["held_out_user"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(2)
     )
     return per_fold, summary
 
@@ -1135,6 +1131,7 @@ def save_lovo_analysis_table(table: pd.DataFrame, *, tables_dir: Path) -> None:
         results_root=tables_dir.parent,
     )
 
+
 def best_confusion_predictions(
     predictions: pd.DataFrame,
     results_table: pd.DataFrame,
@@ -1172,10 +1169,7 @@ def best_confusion_predictions(
         & (predictions["split_mode"].astype(str) == split_name)
     ].copy()
     if filtered.empty:
-        msg = (
-            f"No predictions for dataset={dataset!r}, model={model_name!r}, "
-            f"split={split_name!r}."
-        )
+        msg = f"No predictions for dataset={dataset!r}, model={model_name!r}, split={split_name!r}."
         raise ValueError(msg)
     return model_name, filtered
 
@@ -1261,7 +1255,7 @@ def _format_mean_std(mean_value: object, std_value: object) -> str:
     return f"{float(mean_float):.4f} +/- {float(std_float):.4f}"
 
 
-def _grid_search_model_band(  # noqa: PLR0913, PLR0914
+def _grid_search_model_band(  # noqa: PLR0913
     outer_train: pd.DataFrame,
     outer_test: pd.DataFrame,
     inner_train: pd.DataFrame,
@@ -1444,9 +1438,7 @@ def _grid_search_model_band(  # noqa: PLR0913, PLR0914
         trials_used=trials_used,
         n_train=len(outer_train),
         n_test=len(outer_test),
-        n_classes=pd.concat([outer_train, outer_test], ignore_index=True)[
-            "location"
-        ].nunique(),
+        n_classes=pd.concat([outer_train, outer_test], ignore_index=True)["location"].nunique(),
         device="cpu",
     )
     upsert_run(
@@ -1584,12 +1576,10 @@ def _params_from_grid_search_row(
     missing_parameters = [name for name in parameter_names if name not in row.index]
     if missing_parameters:
         raise ValueError(
-            f"Matched grid-search row for {model}/{band} lacks parameters: "
-            f"{missing_parameters}."
+            f"Matched grid-search row for {model}/{band} lacks parameters: {missing_parameters}."
         )
     loaded_params = {
-        parameter: _coerce_param_value(row[parameter])
-        for parameter in parameter_names
+        parameter: _coerce_param_value(row[parameter]) for parameter in parameter_names
     }
     return _normalize_loaded_tuned_params(loaded_params, model=model_name)
 
@@ -1654,9 +1644,12 @@ MIN_GROUP_SPLIT_COUNT = 2
 DEFAULT_BLOCK_COUNT = 10
 DEFAULT_ROW_SPACING = 1.0
 DEFAULT_COLUMN_SPACING = 1.0
+
+
 def feature_columns(df: pd.DataFrame) -> list[str]:
     """Return CSI feature columns by excluding metadata columns."""
     return [col for col in df.columns if col not in METADATA_COLUMNS]
+
 
 def split_lovo_folds(
     df: pd.DataFrame,
@@ -1729,8 +1722,7 @@ def split_cross_session(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         f"positions={len(train_positions)}"
     )
     print(
-        f"[cross_session] n_test={len(test_df)} users={test_users} "
-        f"positions={len(test_positions)}"
+        f"[cross_session] n_test={len(test_df)} users={test_users} positions={len(test_positions)}"
     )
     print("[cross_session] assertion passed: no trial-02 window is in training")
     if missing_positions:
@@ -2051,7 +2043,7 @@ def filter_training_protocol_trials(
     return filtered
 
 
-def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
+def run_global_lovo_experiment(  # noqa: PLR0913, PLR0915
     df: pd.DataFrame,
     *,
     dataset_name: str,
@@ -2193,7 +2185,7 @@ def run_global_lovo_experiment(  # noqa: PLR0912, PLR0913, PLR0914, PLR0915
             {
                 "held_out_user": held_out_user,
                 **fold_metrics,
-                "n_test_windows": int(len(fold_predictions)),
+                "n_test_windows": len(fold_predictions),
                 "fit_seconds": float(fit_seconds),
                 "predict_seconds": float(predict_seconds),
                 "wall_seconds": float(fold_wall_seconds),
@@ -2403,7 +2395,7 @@ def _lovo_metrics_from_predictions(
             {
                 "held_out_user": held_out_user,
                 **metrics,
-                "n_test_windows": int(len(group)),
+                "n_test_windows": len(group),
             }
         )
     per_fold_metrics = pd.DataFrame(rows)

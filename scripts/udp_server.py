@@ -24,7 +24,6 @@ ESP_MAC_MAP = {
     "90:38:0C:ED:6C:98": "08",
     "90:38:0C:ED:6B:10": "09",
     "08:B6:1F:EF:81:A0": "10",
-
     "D0:CF:13:ED:B7:D8": "11",
     "D0:CF:13:ED:9A:2C": "12",
     "D0:CF:13:ED:9A:8C": "13",
@@ -236,7 +235,7 @@ def drain_pending_packets(sock: socket.socket, max_seconds: float = 0.25) -> int
         while time.monotonic() < deadline:
             try:
                 sock.recvfrom(RECV_BUFFER_SIZE)
-            except (BlockingIOError, InterruptedError, socket.timeout):
+            except (TimeoutError, BlockingIOError, InterruptedError):
                 break
             drained_packets += 1
     finally:
@@ -275,7 +274,7 @@ def collect_location(
 
         try:
             data, addr = sock.recvfrom(RECV_BUFFER_SIZE)
-        except socket.timeout:
+        except TimeoutError:
             continue
 
         parsed_packet = parse_packet(data)

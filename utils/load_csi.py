@@ -228,9 +228,7 @@ def processing_diagnostics_frame(
                 "invalid_packets_removed": int(file_result.invalid_packets_removed),
                 "valid_magnitude_rows": int(file_result.magnitude.shape[0]),
                 "subcarriers": (
-                    int(file_result.magnitude.shape[1])
-                    if file_result.magnitude.ndim >= 2
-                    else 0
+                    int(file_result.magnitude.shape[1]) if file_result.magnitude.ndim >= 2 else 0
                 ),
                 "calibration_mode": options.calibration_mode,
                 "calibration_applied": bool(file_result.calibration_applied),
@@ -249,15 +247,13 @@ def summarize_processing_diagnostics(diagnostics: pd.DataFrame) -> pd.DataFrame:
         summary_rows.append(
             {
                 "band": band,
-                "files": int(len(band_diagnostics)),
+                "files": len(band_diagnostics),
                 "raw_rows_mean": raw_rows_mean,
                 "raw_rows_median": float(band_diagnostics["raw_rows"].median()),
                 "valid_csi_rows_mean": float(
                     band_diagnostics["valid_csi_rows_before_filter"].mean()
                 ),
-                "valid_magnitude_rows_mean": float(
-                    band_diagnostics["valid_magnitude_rows"].mean()
-                ),
+                "valid_magnitude_rows_mean": float(band_diagnostics["valid_magnitude_rows"].mean()),
                 "valid_magnitude_rows_median": float(
                     band_diagnostics["valid_magnitude_rows"].median()
                 ),
@@ -452,9 +448,7 @@ def _run_jobs(
     if not jobs:
         return [], CacheStats(calibration_mode=options.calibration_mode)
 
-    worker_count = (
-        (os.cpu_count() or 1) if options.max_workers is None else options.max_workers
-    )
+    worker_count = (os.cpu_count() or 1) if options.max_workers is None else options.max_workers
     worker_count = max(1, min(worker_count, len(jobs)))
     if worker_count == 1:
         results = [worker(job, options) for job in jobs]
@@ -511,9 +505,9 @@ def _set_magnitude_entry(
     magnitude: np.ndarray,
 ) -> None:
     """Store one processed magnitude array at its source metadata path."""
-    magnitudes[job.scenario_key][job.location_key][job.user_key][job.esp_key][
-        job.trial_key
-    ] = magnitude
+    magnitudes[job.scenario_key][job.location_key][job.user_key][job.esp_key][job.trial_key] = (
+        magnitude
+    )
 
 
 def _empty_standard_result(
