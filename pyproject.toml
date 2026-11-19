@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "thesis-project"
 version = "0.1.0"
-description = "Data analysis project."
+description = "Wi-Fi CSI indoor localisation: data pipeline, ML/DL models, and fingerprint analysis."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
@@ -13,9 +13,11 @@ authors = [
 ]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py312"
 line-length = 100
 extend-include = ["*.ipynb"]
+# Frozen archives are kept as they were; lint only the current work.
+extend-exclude = ["thesis", "isac-paper", "legacy"]
 
 [tool.ruff.lint]
 select = ["E", "F", "N", "I", "SIM", "UP", "ALL"]
@@ -29,3 +31,7 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
 docstring-code-line-length = "dynamic"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

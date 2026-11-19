@@ -1,42 +1,52 @@
-# Wi-Fi CSI Localisation Thesis
+# Wi-Fi CSI Localisation
 
-This repository contains the data-processing, classical machine-learning, and deep-learning pipelines used in the thesis project for indoor localisation with Wi-Fi CSI (Channel State Information).
+Indoor localisation and fingerprint analysis with Wi-Fi CSI (Channel State Information) captured by ESP32 anchors on 2.4 GHz and 5 GHz.
 
-## Final project organization
+The **current work** (the domain-change / fingerprint-analysis article) lives at the repository root. Finished projects are kept as **frozen, self-contained archives**, each with its own copy of the code and its own results.
+
+## Project organization
 
 ```text
 .
-├── ML.ipynb                          # Main notebook for classical ML experiments
-├── DL.ipynb                          # Main notebook for deep-learning experiments
-├── udp_server.py                     # UDP CSI acquisition script
-├── utils/                            # Core reusable Python pipeline code
-├── results/                          # Final generated artifacts (runs, tables, manifests, predictions, plots)
-├── extras/                           # Support scripts and automated tests
-├── code/                             # Legacy exploration notebooks/scripts used during development
-├── isac paper/                       # ISAC paper-specific notebook, images, and utilities
-├── requirements.txt                  # Standard Python dependencies
-├── requirements-gpu.txt              # GPU-focused dependencies
-└── pyproject.toml                    # Project/tool configuration
+├── Fingerprint_Analysis.ipynb   # CURRENT WORK: domain change and fingerprint analysis
+├── utils/                       # Current pipeline code (data, features, ML, DL)
+├── results/                     # Results of the current work only
+├── tests/                       # Tests for utils/ (pytest)
+├── scripts/
+│   ├── udp_server.py            # UDP CSI acquisition from the ESP32 anchors
+│   └── manage_cache.py          # List/clean .cache/ and results/
+├── thesis/                      # FROZEN: MSc dissertation (ML.ipynb, DL.ipynb, utils/, results/)
+├── isac-paper/                  # FROZEN: ISAC paper (paper.ipynb, paper_utils/, utils/, images/)
+├── legacy/                      # Early exploration notebooks and scripts (no data)
+├── requirements.txt             # Pinned Python dependencies
+├── requirements-gpu.txt         # + torch for the CUDA 12.8 / Blackwell GPU
+└── requirements-dev.txt         # + pytest
 ```
 
-## What the other folders do
+### How the projects stay separate
 
-- `results/` stores experiment outputs used for reporting:
-  - `runs.csv` is the canonical experiment registry.
-  - `manifests/` stores run configurations.
-  - `predictions/` stores cached prediction parquet files.
-  - `tables/` stores publication-ready summary tables.
-  - `plots/` stores generated figures.
-  - `tuning/` stores grid-search outputs.
-- `extras/` contains repository support material:
-  - `scripts/manage_cache.py` for cache management.
-  - `tests/` for regression/consistency checks.
-- `code/` contains historical notebooks/scripts from earlier experimentation and preprocessing iterations.
-- `isac paper/` contains paper-focused assets (`paper.ipynb`, `images/`, `paper_utils/`).
+Each project folder (root, `thesis/`, `isac-paper/`) has its own `utils/`, whose `config.py` sets `PROJECT_ROOT` to that folder. A notebook kernel starts in the notebook's own folder, so:
+
+| Notebook | Imports | Writes results to | Cache |
+|---|---|---|---|
+| `Fingerprint_Analysis.ipynb` | `utils/` | `results/` | `.cache/` |
+| `thesis/ML.ipynb`, `thesis/DL.ipynb` | `thesis/utils/` | `thesis/results/` | `thesis/.cache/` |
+| `isac-paper/paper.ipynb` | `isac-paper/utils/` | `isac-paper/results/` | `isac-paper/.cache/` |
+
+Always open a notebook from its own folder (the VS Code default). Don't edit the archived `utils/` copies. New code goes in the root `utils/`.
+
+### Archives
+
+- `thesis/`: the code and results exactly as they were when the dissertation was finished (git tag `thesis-final`). `thesis/results/runs.csv` is the registry of the 72 thesis runs, with `checkpoints/`, `predictions/`, `manifests/`, `tables/`, `tuning/` and `plots/` next to it. `thesis/scripts/height.py` regenerates the volunteer figure.
+- `isac-paper/`: the ISAC paper notebook with a `utils/` snapshot from commit `ab77738` (git tag `isac-paper`), the last commit that changed the paper.
+
+## Data
+
+The raw CSI recordings are on the server at `/disco1500gb/Pedro_Data` (`DATA_DIR` in `utils/config.py`) and are never committed. Files are named `<scenario>_<location>_<user>_<esp>_<trial>_<timestamp>.csv`; `Z-0` is the empty room.
 
 ## Utils package reference
 
-All active reusable implementation is in `utils/`.
+Reference for the current `utils/` at the repository root.
 
 ### `utils/import_data.py`
 - `sort_meta_info`: Parse and sort metadata from valid CSV filenames.
@@ -225,5 +235,11 @@ data discovery
 
 ## Environment
 
-- Standard environment: `requirements.txt`
-- GPU environment (DL-focused): `requirements-gpu.txt`
+Experiments run on the Linux server in the conda env `thesis` (Python 3.12, torch 2.11 + CUDA 12.8):
+
+```bash
+conda activate thesis
+pip install -r requirements-gpu.txt -r requirements-dev.txt   # the env already matches these pins
+python -m pytest                                              # run the tests
+python scripts/manage_cache.py list                           # inspect caches
+```

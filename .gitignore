@@ -212,17 +212,12 @@ marimo/_lsp/
 __marimo__/
 Subcarrier Clustering.ipynb
 
-# Experiment cache and results (generated, not version-controlled)
-.cache/dataframes/
-isac paper/results/
-
-# large regenerable window arrays — never commit
-*.npy
-results/window_arrays/
+# Experiment caches (regenerable, at any depth: root, thesis/, isac-paper/)
 .cache/
+*.npy
+**/window_arrays/
+isac-paper/results/
 
-# but DO keep the small outputs
-!results/predictions/*.parquet
-!results/*.csv
-!results/tuning/*.csv
-!results/plots/*.pdf
+# Raw CSI data lives in /disco1500gb/Pedro_Data and is never committed
+# (*.csv is ignored above), but result tables under any results/ are kept.
+!**/results/**/*.csv
