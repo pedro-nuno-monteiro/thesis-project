@@ -277,7 +277,7 @@ def _floor_plan_figsize(n_rows: int, n_cols: int) -> tuple[float, float]:
     return width, height
 
 
-def _render_floor_plan_panel(  # ruff: ignore[too-many-arguments]
+def _render_floor_plan_panel(  # ruff: ignore[PLR0913]
     records,
     *,
     metric_key: str,
@@ -892,7 +892,7 @@ def plot_block_cdf_triptych(
     _save_and_show(fig, save_path, show=show)
 
 
-def _draw_user_metric_panel(  # ruff: ignore[too-many-arguments]
+def _draw_user_metric_panel(  # ruff: ignore[PLR0913]
     ax: Axes,
     metrics: pd.DataFrame,
     *,
@@ -980,7 +980,7 @@ def _draw_user_metric_panel(  # ruff: ignore[too-many-arguments]
     return True
 
 
-def plot_lovo_volunteer_variability(  # ruff: ignore[too-many-arguments]
+def plot_lovo_volunteer_variability(  # ruff: ignore[PLR0913]
     lovo_per_fold: pd.DataFrame,
     *,
     bands: Sequence[str],
@@ -1302,7 +1302,7 @@ def plot_block_vs_lovo_floor_plan(
 # ---------------------------------------------------------------------------
 
 
-def plot_dl_cdf_comparison(  # ruff: ignore[too-many-arguments]
+def plot_dl_cdf_comparison(  # ruff: ignore[PLR0913]
     predictions: pd.DataFrame,
     *,
     split: str,
@@ -1514,7 +1514,7 @@ def _draw_dl_volunteer_panel(
     return True
 
 
-def plot_dl_volunteer_variability(  # ruff: ignore[too-many-arguments]
+def plot_dl_volunteer_variability(  # ruff: ignore[PLR0913]
     predictions: pd.DataFrame,
     *,
     seeds: Sequence[int],
@@ -1961,7 +1961,7 @@ def magnitude_to_db(magnitude: np.ndarray, epsilon: float = DB_EPSILON) -> np.nd
     return 20.0 * np.log10(np.clip(magnitude_array, epsilon, None))
 
 
-def select_aligned_magnitude_interval(  # ruff: ignore[too-many-arguments]
+def select_aligned_magnitude_interval(  # ruff: ignore[PLR0913]
     magnitude_stages: CsiStageMaps,
     *,
     position: str,
@@ -2046,7 +2046,7 @@ def select_aligned_magnitude_interval(  # ruff: ignore[too-many-arguments]
     return selected
 
 
-def plot_csi_magnitude_stages(  # ruff: ignore[too-many-arguments]
+def plot_csi_magnitude_stages(  # ruff: ignore[PLR0913]
     magnitude_stages: CsiStageMaps,
     *,
     position: str,
@@ -2265,7 +2265,7 @@ def _magnitude_color_mapping(
     return plt.get_cmap("viridis"), mcolors.Normalize(vmin=lower, vmax=upper)
 
 
-def _plot_magnitude_heatmap_pair(  # ruff: ignore[too-many-arguments]
+def _plot_magnitude_heatmap_pair(  # ruff: ignore[PLR0913]
     values: tuple[np.ndarray, np.ndarray],
     *,
     panel_titles: tuple[str, str],
@@ -2300,7 +2300,7 @@ def _plot_magnitude_heatmap_pair(  # ruff: ignore[too-many-arguments]
     return fig
 
 
-def _plot_magnitude_surface_pair(  # ruff: ignore[too-many-arguments]
+def _plot_magnitude_surface_pair(  # ruff: ignore[PLR0913]
     values: tuple[np.ndarray, np.ndarray],
     *,
     panel_titles: tuple[str, str],
@@ -2369,7 +2369,7 @@ def _style_magnitude_axis(ax: Axes, *, is_3d: bool = False) -> None:
         for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
             axis.pane.set_facecolor((1.0, 1.0, 1.0, 1.0))
             axis.pane.set_edgecolor("#d9d9d9")
-            axis._axinfo["grid"]["color"] = (0.82, 0.82, 0.82, 0.55)  # ruff: ignore[private-member-access]
+            axis._axinfo["grid"]["color"] = (0.82, 0.82, 0.82, 0.55)  # ruff: ignore[SLF001]
         return
     ax.grid(color="#d0d0d0", linewidth=0.45, alpha=0.35)
     ax.spines["top"].set_visible(False)
@@ -2679,7 +2679,7 @@ def plot_selected_magnitude_profiles(
         print("No magnitude data found for the selected location/ESPs.")
 
 
-def plot_selected_magnitude_heatmaps(  # ruff: ignore[too-many-arguments]
+def plot_selected_magnitude_heatmaps(  # ruff: ignore[PLR0913]
     magnitudes: CsiMap,
     location_key: str,
     esp_keys: list[str],

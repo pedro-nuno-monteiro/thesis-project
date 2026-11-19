@@ -21,7 +21,7 @@ extend-exclude = ["thesis", "isac-paper", "legacy"]
 
 [tool.ruff.lint]
 select = ["E", "F", "N", "I", "SIM", "UP", "ALL"]
-ignore = ["T201", "Q000", "ERA001", "D103", "W191", "PLR1702", "D100", "CPY001", "INP001"]
+ignore = ["COM812", "T201", "Q000", "ERA001", "D103", "W191", "PLR1702", "D100", "CPY001", "INP001"]
 fixable = ["ALL"]
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
