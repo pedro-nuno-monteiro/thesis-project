@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Cache and results management CLI for the CSI localization pipeline.
 
+Run from anywhere; paths resolve relative to the repository root.
+
 Usage:
-    python scripts/manage_cache.py list
-    python scripts/manage_cache.py clean [--all | --older-than DAYS]
-    python scripts/manage_cache.py results clean [--all | --older-than DAYS]
+    python extras/scripts/manage_cache.py list
+    python extras/scripts/manage_cache.py clean [--all | --older-than DAYS]
+    python extras/scripts/manage_cache.py results clean [--all | --older-than DAYS]
+
+`clean` covers both the feature-dataframe cache (.cache/dataframes, including DL
+window arrays) and the per-file parsed-CSI cache (.cache/csi_processing).
 """
 from __future__ import annotations
 
@@ -15,8 +20,10 @@ import sys
 import time
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).parent.parent
+# extras/scripts/manage_cache.py -> repository root is two levels above scripts/.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CACHE_DIR = PROJECT_ROOT / ".cache" / "dataframes"
+CSI_CACHE_DIR = PROJECT_ROOT / ".cache" / "csi_processing"
 RESULTS_DIR = PROJECT_ROOT / "results"
 
 
@@ -36,13 +43,15 @@ def _confirm(msg: str) -> bool:
 # ── list ──────────────────────────────────────────────────────────────────────
 
 def cmd_list(_args: argparse.Namespace) -> None:
+    _list_csi_cache()
+
     if not CACHE_DIR.exists():
-        print("No cache directory found (.cache/dataframes/ does not exist).")
+        print("No feature cache directory found (.cache/dataframes/ does not exist).")
         return
 
     options_files = sorted(CACHE_DIR.rglob("options.json"))
     if not options_files:
-        print("Cache is empty.")
+        print("Feature cache is empty.")
         return
 
     for options_file in options_files:
@@ -75,11 +84,37 @@ def cmd_list(_args: argparse.Namespace) -> None:
             names = ", ".join(f.stem for f in parquet_files)
             print(f"  cached bands: {names}")
 
+        window_dirs = sorted(p.parent for p in (folder / "window_arrays").rglob("manifest.json"))
+        for window_dir in window_dirs:
+            print(f"  DL window arrays: {window_dir.relative_to(folder)}/ "
+                  f"[{_dir_size_mb(window_dir):.1f} MB]")
+
+
+def _list_csi_cache() -> None:
+    """Print one line per parsed-CSI cache version folder."""
+    version_dirs = sorted(d for d in CSI_CACHE_DIR.glob("*") if d.is_dir())
+    if not version_dirs:
+        print("Parsed-CSI cache is empty (.cache/csi_processing/).")
+        return
+    for version_dir in version_dirs:
+        file_count = sum(1 for _ in version_dir.glob("*.pkl"))
+        print(f"{version_dir.relative_to(PROJECT_ROOT)}/  "
+              f"[{_dir_size_mb(version_dir):.1f} MB, {file_count} files]")
+
 
 # ── clean helpers ─────────────────────────────────────────────────────────────
 
+def _drop_nested(folders: list[Path]) -> list[Path]:
+    """Keep only top-most folders so a parent and its child are not both deleted."""
+    kept: list[Path] = []
+    for folder in sorted(set(folders)):
+        if not any(folder.is_relative_to(parent) for parent in kept):
+            kept.append(folder)
+    return kept
+
+
 def _collect_folders(root: Path, older_than_days: int | None) -> list[Path]:
-    """Return leaf cache/results folders (those containing an options.json or manifest.json)."""
+    """Return cache/results folders (those containing an options.json or manifest.json)."""
     marker_files = list(root.rglob("options.json")) + list(root.rglob("manifest.json"))
     folders = sorted({f.parent for f in marker_files})
 
@@ -87,15 +122,26 @@ def _collect_folders(root: Path, older_than_days: int | None) -> list[Path]:
         cutoff = time.time() - older_than_days * 86400
         folders = [d for d in folders if d.stat().st_mtime < cutoff]
 
+    return _drop_nested(folders)
+
+
+def _collect_csi_folders(older_than_days: int | None) -> list[Path]:
+    """Return parsed-CSI cache version folders (one per processor version)."""
+    folders = sorted(d for d in CSI_CACHE_DIR.glob("*") if d.is_dir())
+    if older_than_days is not None:
+        cutoff = time.time() - older_than_days * 86400
+        folders = [d for d in folders if d.stat().st_mtime < cutoff]
     return folders
 
 
-def _run_clean(root: Path, args: argparse.Namespace, label: str) -> None:
-    if not root.exists():
-        print(f"No {label} directory found.")
-        return
-
-    folders = _collect_folders(root, getattr(args, "older_than", None))
+def _run_clean(
+    root: Path,
+    args: argparse.Namespace,
+    label: str,
+    extra_folders: list[Path] | None = None,
+) -> None:
+    folders = _collect_folders(root, getattr(args, "older_than", None)) if root.exists() else []
+    folders += extra_folders or []
     if not folders:
         print(f"No matching {label} folders found.")
         return
@@ -116,7 +162,8 @@ def _run_clean(root: Path, args: argparse.Namespace, label: str) -> None:
 
 
 def cmd_clean(args: argparse.Namespace) -> None:
-    _run_clean(CACHE_DIR, args, "cache")
+    csi_folders = _collect_csi_folders(getattr(args, "older_than", None))
+    _run_clean(CACHE_DIR, args, "cache", extra_folders=csi_folders)
 
 
 def cmd_results_clean(args: argparse.Namespace) -> None:

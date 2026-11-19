@@ -2,4 +2,4 @@
 
 # Blackwell (sm_120): install from the CUDA 12.8 wheel index.
 --extra-index-url https://download.pytorch.org/whl/cu128
-torch>=2.7
+torch==2.11.0

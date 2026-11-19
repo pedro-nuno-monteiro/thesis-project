@@ -85,7 +85,7 @@ CPU_PERSISTENT_WORKERS = False
 
 # Classical ML grid-search execution and diagnostic settings
 GRID_INNER_N_BLOCKS = 4
-GRID_SEARCH_N_JOBS = 4
+GRID_SEARCH_N_JOBS = -1  # -1 = all CPU cores; not part of run IDs, results unchanged
 
 MAX_EPOCH_SECONDS = 3600.0
 
