@@ -56,6 +56,7 @@ Reference for the current `utils/` at the repository root.
 - `extract_csi_numbers`: Parse CSI numeric payload inside bracketed CSV entries.
 - `read_csi_columns`: Read CSI and RSSI columns required from one CSV file.
 - `parse_valid_packet_rows`: Keep complete CSI packets and aligned RSSI values.
+- `load_raw_complex_csi`: Parse one file to complex CSI before FFT shift and subcarrier selection.
 - `iq_values_to_complex`: Convert interleaved I/Q CSI values into complex arrays.
 - `processing_diagnostics_frame`: Build one diagnostics row per processed file.
 - `summarize_processing_diagnostics`: Summarize packet parsing/retention diagnostics by band.
@@ -85,6 +86,39 @@ Reference for the current `utils/` at the repository root.
 - `build_frequency_feature_dataframe`: Build one window-level feature DataFrame for a frequency scenario.
 - `build_frequency_feature_dataframes`: Build the 2.4 GHz / 5 GHz / fusion feature DataFrames.
 - `iter_window_groups`: Iterate aligned recording groups that generate training windows.
+
+### `utils/fingerprint.py`
+- `FingerprintSelection`: One selected fingerprint (vector, organized table, recording rows) with `summary`, `title`, `label`, and filename slugs.
+- `select_fingerprint`: Select one window (`individual`) or the recording mean (`mean`) for a band/position/user/trial.
+- `select_recording_rows`: Return every window of one recording, sorted by `window_idx`.
+- `fingerprint_vector`: Return one window's feature vector or the column-wise recording mean.
+- `organize_fingerprint`: Reshape a flat feature vector into (ESP, subcarrier) x feature-family rows.
+- `resolve_esps`: Validate and order the requested ESPs of an organized fingerprint.
+- `fingerprint_table_preview`: Show the first N subcarriers of every ESP.
+- `feature_family_table`: Pivot one feature family to subcarrier x ESP.
+- `fingerprints_by_trial` / `TrialFingerprints`: Mean and SD (across windows) fingerprints per trial plus an inventory of windows used.
+- `feature_inventory_table`: Fingerprints, recordings, positions, users, trials, and ESPs per band.
+- `canonical_feature_family`, `fingerprint_feature_columns`, `normalize_position`, `normalize_two_digit_id`: Name and column helpers.
+
+### `utils/data_quality.py`
+- `subcarrier_tone_map`, `raw_tone_numbers`: Map raw CSI positions to physical tones and to retained indices of the actual selection.
+- `pilot_retained_indices`, `pilot_retained_indices_by_esp`, `pilot_subcarrier_numbers_by_esp`, `pilot_neighbour_indices`: Pilot-tone (+/-7, +/-21) positions under the selection.
+- `raw_tone_profile`, `raw_tone_profiles`, `diagnostic_file_path`: Per-tone raw magnitude/CV of recordings before selection.
+- `pilot_excess_table`, `pilot_excess_summary`: Per-recording pilot-to-neighbour ratios, spike fractions, and pilot power share.
+- `pilot_feature_ratio_table`: Pilot vs non-pilot feature magnitude (e.g. window std) per ESP and trial.
+- `session_dates_table`: Recording dates per user/trial from file names.
+- `diagnostics_by_trial`: Packet counts, parsing losses, and retention per band and trial.
+- `missing_recordings_table`, `z0_reference_table`: Missing/empty recordings and Z-0 baseline coverage per session.
+- `duplicate_recordings_table`, `duplicate_summary`: Byte-identical CSV files filed under different keys.
+- `aligned_window_table`, `alignment_loss_table`: Aligned window counts and windows lost to multi-ESP alignment.
+
+### `utils/domain_shift.py`
+- `recording_profiles`, `within_recording_sd_table`: Per-recording mean/SD profiles and within-recording spread.
+- `grid_neighbours`: 4-connected same-room neighbours of each position.
+- `cross_session_similarity`: Per (user, position, ESP) Pearson r, RMSE, offset, scale ratio, SMD, neighbour RMSE, and shift ratio between two trials.
+- `shift_summary_by_esp`, `location_shift_table`: Medians per ESP/user and per (user, position).
+- `localization_by_location`, `shift_localization_table`: Per (user, position) accuracy/error and its join with shift measures.
+- `shift_localization_correlations`, `esp_shift_localization_correlations`: Spearman correlations, pooled, per user, and per ESP.
 
 ### `utils/cache.py`
 - `csi_cache_path`: Build content-addressed cache path for one CSI CSV file.
@@ -122,7 +156,8 @@ Reference for the current `utils/` at the repository root.
 - `checkpoint_path`: Return checkpoint path for whole run or one LOVO fold.
 - `derive_table_from_runs`: Generate CSV/LaTeX views from canonical `runs.csv`.
 - `derive_seed_summary`: Summarize variation across independent seeds.
-- `save_summary`: Save summary DataFrame to CSV/Markdown/LaTeX.
+- `save_summary`: Save summary DataFrame to CSV/Markdown/LaTeX (Markdown needs `tabulate`, not installed in the `thesis` env).
+- `save_table`: Save a table to CSV and LaTeX without the index.
 - `write_manifest`: Save self-describing `manifest.json` in results directory.
 
 ### `utils/plots.py`
@@ -165,6 +200,12 @@ Reference for the current `utils/` at the repository root.
 - `empty_room_mean_profile_db`: Compute empty-room mean dB profile for one ESP.
 - `plot_average_magnitude_profiles_across_users`: Compare average user profiles with optional empty-room baseline.
 - `plot_magnitude_analysis_interactive`: Run interactive magnitude-analysis visual workflow.
+- `plot_fingerprint_facets`: Plot one or more organized fingerprints with one panel per ESP (optional mean +/- SD bands and marked subcarriers).
+- `plot_raw_tone_profiles`: Plot raw per-tone magnitude/CV with pilots and dropped tones marked.
+- `plot_metric_by_esp`: Box plots of one metric per ESP, optionally split by trial or user.
+- `plot_floor_plan_metric`: Draw any per-location metric on the floor plan.
+- `plot_shift_vs_localization`: Scatter grid of shift measures against localization metrics with Spearman rho.
+- `plot_fingerprint_esp_overlay`: Overlay every ESP of one organized fingerprint on a single axis.
 
 ### `utils/ML/models.py`
 - `default_params_for`: Return default hyperparameters for one model/band pair.
@@ -174,6 +215,7 @@ Reference for the current `utils/` at the repository root.
 - `load_raw_csi_data`: Load CSI and optional aligned pre-calibration arrays.
 - `validate_cross_session_inventory`: Validate trial-02 compatibility for cross-session training.
 - `select_cross_session_trials`: Keep only trials used by cross-session protocol.
+- `build_preproc_opts`: Build cache-keyed preprocessing options (adds `baseline_scope` for `empty_baseline`).
 - `load_feature_dataframes`: Load/build cached feature DataFrames for requested bands.
 - `print_normalization_discriminability`: Print Fisher-ratio diagnostics for normalization quality.
 - `load_or_build_none_reference_features`: Load/build normalization=`none` reference feature cache.

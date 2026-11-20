@@ -9,8 +9,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib import colors as mcolors
+from scipy.stats import spearmanr
 
 from utils.csi_processing import process_magnitude_data
+from utils.fingerprint import FEATURE_LABELS, canonical_feature_family, resolve_esps
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -2927,3 +2929,281 @@ def plot_magnitude_analysis_interactive(
         empty_room_location_key=empty_room_location_key,
         column_count=column_count,
     )
+
+
+def plot_fingerprint_facets(  # noqa: PLR0913
+    fingerprints: dict[str, pd.DataFrame],
+    *,
+    feature_family: str,
+    esps: str | Sequence[str] = "all",
+    share_y: bool = True,
+    spreads: dict[str, pd.DataFrame] | None = None,
+    marked_subcarriers: dict[str, Sequence[int]] | None = None,
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Plot one or more organized fingerprints with one panel per ESP.
+
+    ``fingerprints`` maps a legend label to a table from ``organize_fingerprint``. Each ESP
+    keeps its own retained-subcarrier axis; ``share_y`` compares absolute values across
+    panels without rescaling them. ``spreads`` (same keys, SD tables) adds a shaded
+    mean +/- SD band. ``marked_subcarriers`` maps an ESP to 1-based subcarrier numbers
+    drawn as dotted vertical lines (e.g. pilot tones).
+    """
+    family = canonical_feature_family(feature_family)
+    selected_esps = resolve_esps(next(iter(fingerprints.values())), esps)
+    ncols = min(3, len(selected_esps))
+    nrows = -(-len(selected_esps) // ncols)
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(5.2 * ncols, 3.3 * nrows),
+        sharey=share_y,
+        squeeze=False,
+        layout="constrained",
+    )
+
+    for ax, esp in zip(axes.flat, selected_esps, strict=False):
+        for label, table in fingerprints.items():
+            if esp not in table.index.get_level_values("ESP"):
+                continue
+            values = table.xs(esp, level="ESP")[family].dropna()
+            x = values.index.get_level_values("subcarrier_number")
+            (line,) = ax.plot(x, values.to_numpy(), linewidth=1.6, label=label)
+            if spreads is not None and label in spreads:
+                sd = spreads[label].xs(esp, level="ESP")[family].reindex(values.index)
+                ax.fill_between(
+                    x,
+                    (values - sd).to_numpy(),
+                    (values + sd).to_numpy(),
+                    color=line.get_color(),
+                    alpha=0.2,
+                    linewidth=0,
+                )
+        for number in (marked_subcarriers or {}).get(esp, ()):
+            ax.axvline(number, color="0.4", linestyle=":", linewidth=0.9, zorder=0)
+        ax.set_title(esp.upper())
+        ax.set_xlabel("Retained subcarrier number")
+        ax.set_ylabel(FEATURE_LABELS[family])
+        ax.grid(alpha=0.25)
+        if len(fingerprints) > 1:
+            ax.legend()
+
+    for ax in axes.flat[len(selected_esps) :]:
+        ax.set_visible(False)
+    fig.suptitle(title or f"{FEATURE_LABELS[family]} across retained subcarriers")
+    _save_and_show(fig, save_path, show=show)
+
+
+def plot_fingerprint_esp_overlay(  # noqa: PLR0913
+    table: pd.DataFrame,
+    *,
+    feature_family: str,
+    esps: str | Sequence[str] = "all",
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Overlay every ESP of one organized fingerprint on a single axis."""
+    family = canonical_feature_family(feature_family)
+    selected_esps = resolve_esps(table, esps)
+    fig, ax = plt.subplots(figsize=(12, 5), layout="constrained")
+    for esp in selected_esps:
+        values = table.xs(esp, level="ESP")[family].dropna()
+        ax.plot(
+            values.index.get_level_values("subcarrier_number"),
+            values.to_numpy(),
+            linewidth=1.2,
+            alpha=0.85,
+            label=esp.upper(),
+        )
+    ax.set(
+        title=title or f"ESP overlay: {FEATURE_LABELS[family]}",
+        xlabel="Retained subcarrier number",
+        ylabel=FEATURE_LABELS[family],
+    )
+    ax.grid(alpha=0.25)
+    ax.legend(ncol=min(5, max(1, len(selected_esps))), fontsize=8)
+    _save_and_show(fig, save_path, show=show)
+
+
+def plot_raw_tone_profiles(
+    profiles: dict[str, pd.DataFrame],
+    *,
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Plot raw per-tone mean magnitude and CV, marking pilots and tones the selection drops.
+
+    ``profiles`` maps a label to a table from ``data_quality.raw_tone_profile``. Pilot tones
+    are dotted vertical lines; dropped raw positions (DC, guard band, invalid) are crosses.
+    """
+    fig, (ax_mean, ax_cv) = plt.subplots(2, 1, figsize=(12, 6.5), sharex=True, layout="constrained")
+    for label, profile in profiles.items():
+        ordered = profile.sort_values("tone")
+        kept = ordered["retained_index"].notna()
+        (line,) = ax_mean.plot(
+            ordered["tone"], ordered["mean_magnitude"], marker=".", linewidth=1.2, label=label
+        )
+        ax_cv.plot(
+            ordered["tone"], ordered["cv"], marker=".", linewidth=1.2, color=line.get_color()
+        )
+        for ax, column in ((ax_mean, "mean_magnitude"), (ax_cv, "cv")):
+            ax.scatter(
+                ordered.loc[~kept, "tone"],
+                ordered.loc[~kept, column],
+                marker="x",
+                s=40,
+                color=line.get_color(),
+                zorder=3,
+            )
+    pilots = next(iter(profiles.values())).query("is_pilot")["tone"]
+    for ax in (ax_mean, ax_cv):
+        for tone in pilots:
+            ax.axvline(tone, color="0.4", linestyle=":", linewidth=0.9, zorder=0)
+        ax.grid(alpha=0.25)
+    ax_mean.set_ylabel("Mean raw |H|")
+    ax_cv.set_ylabel("CV over packets")
+    ax_cv.set_xlabel("Physical tone (dotted = pilot, x = dropped by selection)")
+    ax_mean.legend(fontsize=8, ncol=2)
+    fig.suptitle(title or "Raw CSI tone profiles")
+    _save_and_show(fig, save_path, show=show)
+
+
+def plot_metric_by_esp(  # noqa: PLR0913
+    table: pd.DataFrame,
+    *,
+    metric: str,
+    hue: str | None = None,
+    ylabel: str | None = None,
+    reference: float | None = None,
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Box plots of one metric per ESP, optionally split by ``hue`` (e.g. trial or user)."""
+    _validate_columns(table, {"esp", metric} | ({hue} if hue else set()))
+    esps = sorted(table["esp"].unique(), key=lambda esp: int(str(esp).removeprefix("esp_")))
+    hue_values = sorted(table[hue].dropna().unique()) if hue else [None]
+    width = 0.8 / len(hue_values)
+    fig, ax = plt.subplots(figsize=(min(14.0, max(8.0, 0.35 * len(esps) * len(hue_values))), 4.5))
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for hue_index, hue_value in enumerate(hue_values):
+        subset = table if hue is None else table.loc[table[hue] == hue_value]
+        data = [subset.loc[subset["esp"] == esp, metric].dropna().to_numpy() for esp in esps]
+        positions = np.arange(len(esps)) - 0.4 + width * (hue_index + 0.5)
+        color = colors[hue_index % len(colors)]
+        ax.boxplot(
+            data,
+            positions=positions,
+            widths=width * 0.9,
+            patch_artist=True,
+            showfliers=False,
+            boxprops={"facecolor": color, "alpha": 0.55},
+            medianprops={"color": "black"},
+        )
+        if hue is not None:
+            ax.plot([], [], color=color, linewidth=6, alpha=0.55, label=f"{hue} {hue_value}")
+    if reference is not None:
+        ax.axhline(reference, color="0.3", linestyle="--", linewidth=1)
+    ax.set_xticks(range(len(esps)))
+    ax.set_xticklabels([str(esp).upper() for esp in esps], rotation=45, ha="right")
+    ax.set_ylabel(ylabel or metric)
+    ax.grid(axis="y", alpha=0.25)
+    if hue is not None:
+        ax.legend(fontsize=8)
+    if title:
+        ax.set_title(title)
+    _save_and_show(fig, save_path, show=show)
+
+
+def plot_floor_plan_metric(  # noqa: PLR0913
+    values: pd.Series,
+    *,
+    label: str,
+    cmap: str = "viridis",
+    vmin: float | None = None,
+    vmax: float | None = None,
+    fmt: str = "{:.2f}",
+    annotate: bool = True,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Draw any per-location metric (Series indexed by location label) on the floor plan."""
+    records = []
+    for location, value in values.items():
+        match = LOCATION_PATTERN.fullmatch(_normalize_location_label(location))
+        if match is None or match.group("row") not in FLOOR_PLAN_ROWS:
+            continue
+        records.append(
+            {
+                "row_idx": FLOOR_PLAN_ROWS.index(match.group("row")),
+                "col_idx": int(match.group("column")) - 1,
+                "value": float(value),
+            }
+        )
+    if not records:
+        print("No valid locations for the floor-plan metric.")
+        return
+    finite = np.array([record["value"] for record in records], dtype=float)
+    norm = mcolors.Normalize(
+        vmin=float(np.nanmin(finite)) if vmin is None else vmin,
+        vmax=float(np.nanmax(finite)) if vmax is None else vmax,
+    )
+    fig = _render_floor_plan_panel(
+        records,
+        metric_key="value",
+        cmap_name=cmap,
+        norm=norm,
+        metric_label=label,
+        fmt_fn=fmt.format,
+        annotate=annotate,
+        n_rows=len(FLOOR_PLAN_ROWS),
+        n_cols=max(record["col_idx"] for record in records) + 1,
+    )
+    _save_and_show(fig, save_path, show=show)
+
+
+def plot_shift_vs_localization(  # noqa: PLR0913
+    merged: pd.DataFrame,
+    *,
+    shift_metrics: Sequence[str],
+    performance_metrics: Sequence[str],
+    hue: str = "user",
+    labels: dict[str, str] | None = None,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Scatter grid of shift measures (columns) against localization metrics (rows).
+
+    Each panel title reports the pooled Spearman correlation.
+    """
+    labels = labels or {}
+    fig, axes = plt.subplots(
+        len(performance_metrics),
+        len(shift_metrics),
+        figsize=(3.6 * len(shift_metrics), 3.1 * len(performance_metrics)),
+        squeeze=False,
+        layout="constrained",
+    )
+    for row, performance_metric in enumerate(performance_metrics):
+        for col, shift_metric in enumerate(shift_metrics):
+            ax = axes[row, col]
+            for hue_value, group in merged.groupby(hue):
+                ax.scatter(
+                    group[shift_metric],
+                    group[performance_metric],
+                    s=14,
+                    alpha=0.7,
+                    label=f"{hue} {hue_value}",
+                )
+            valid = merged[[shift_metric, performance_metric]].dropna()
+            rho = spearmanr(valid[shift_metric], valid[performance_metric]).statistic
+            ax.set_title(f"Spearman rho = {rho:.2f} (n={len(valid)})", fontsize=9)
+            ax.set_xlabel(labels.get(shift_metric, shift_metric), fontsize=9)
+            ax.set_ylabel(labels.get(performance_metric, performance_metric), fontsize=9)
+            ax.grid(alpha=0.25)
+    axes[0, 0].legend(fontsize=7)
+    _save_and_show(fig, save_path, show=show)

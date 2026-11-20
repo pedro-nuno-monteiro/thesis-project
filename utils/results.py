@@ -741,6 +741,15 @@ def save_summary(df: pd.DataFrame, results_dir: Path, basename: str = "summary")
     print(f"[results] Summary saved to {results_dir}/{basename}.*")
 
 
+def save_table(df: pd.DataFrame, directory: Path, basename: str) -> None:
+    """Write a table to CSV and LaTeX (no index) in ``directory``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    df.to_csv(directory / f"{basename}.csv", index=False)
+    tex = df.to_latex(index=False, escape=True, float_format="%.4f")
+    (directory / f"{basename}.tex").write_text(tex, encoding="utf-8")
+    print(f"[results] Table saved to {directory}/{basename}.{{csv,tex}}")
+
+
 # ── Reproducibility manifest ──────────────────────────────────────────────────
 
 

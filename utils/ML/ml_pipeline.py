@@ -229,6 +229,22 @@ def select_cross_session_trials(magnitude_data: dict[str, Any]) -> dict[str, Any
     return selected
 
 
+def build_preproc_opts(
+    magnitude_options: dict[str, Any],
+    *,
+    baseline_scope: str,
+) -> dict[str, Any]:
+    """Return the preprocessing options hashed into feature-cache keys.
+
+    ``baseline_scope`` is attached only for ``empty_baseline`` normalization, matching the
+    keys the ML and DL notebooks have always produced.
+    """
+    preproc_opts = dict(magnitude_options)
+    if preproc_opts.get("normalization") == "empty_baseline":
+        preproc_opts["baseline_scope"] = baseline_scope
+    return preproc_opts
+
+
 def load_feature_dataframes(
     magnitude_data: dict[str, Any],
     *,

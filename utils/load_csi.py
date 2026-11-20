@@ -200,6 +200,25 @@ def iq_values_to_complex(csi_values: np.ndarray) -> np.ndarray:
     return real + 1j * imaginary
 
 
+def load_raw_complex_csi(file_path: str | Path, *, its5ghz: bool) -> np.ndarray:
+    """Parse one CSV file to complex CSI *before* FFT shift and subcarrier selection.
+
+    Rows are the complete packets kept by the standard parser; columns are the raw tone
+    positions reported by the ESP (64 for 2.4 GHz, 57 for 5 GHz).
+    """
+    job = _ProcessingJob("", "", "", "", "", str(file_path), its5ghz)
+    csi_raw, rssi_raw, expected_length = read_csi_columns(job)
+    valid_csi, _, _, _ = parse_valid_packet_rows(
+        csi_raw,
+        rssi_raw,
+        expected_length,
+        its5ghz=its5ghz,
+    )
+    if not valid_csi:
+        return np.empty((0, expected_length // 2), dtype=complex)
+    return iq_values_to_complex(np.asarray(valid_csi, dtype=float))
+
+
 def processing_diagnostics_frame(
     results: list[_CachedResult],
     options: _RunOptions,
