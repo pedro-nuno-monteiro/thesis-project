@@ -13,11 +13,13 @@ from scipy.stats import spearmanr
 
 from utils.csi_processing import process_magnitude_data
 from utils.fingerprint import FEATURE_LABELS, canonical_feature_family, resolve_esps
+from utils.results import room_label_for_location
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from matplotlib.axes import Axes
+    from matplotlib.patches import Ellipse
 
 LOCATION_PATTERN = re.compile(r"^(?P<row>[A-Z])[-_ ]?(?P<column>\d+)$")
 EMPTY_ROOM_LOCATION = "Z-0"
@@ -2939,11 +2941,15 @@ def plot_fingerprint_facets(  # noqa: PLR0913
     share_y: bool = True,
     spreads: dict[str, pd.DataFrame] | None = None,
     marked_subcarriers: dict[str, Sequence[int]] | None = None,
+    styles: dict[str, dict[str, object]] | None = None,
     title: str | None = None,
     save_path: str | Path | None = None,
     show: bool = True,
 ) -> None:
     """Plot one or more organized fingerprints with one panel per ESP.
+
+    ``styles`` maps a legend label to extra ``Axes.plot`` keyword arguments (e.g. the
+    output of ``user_trial_styles``: colour per user, line style per trial).
 
     ``fingerprints`` maps a legend label to a table from ``organize_fingerprint``. Each ESP
     keeps its own retained-subcarrier axis; ``share_y`` compares absolute values across
@@ -2970,7 +2976,8 @@ def plot_fingerprint_facets(  # noqa: PLR0913
                 continue
             values = table.xs(esp, level="ESP")[family].dropna()
             x = values.index.get_level_values("subcarrier_number")
-            (line,) = ax.plot(x, values.to_numpy(), linewidth=1.6, label=label)
+            line_style = {"linewidth": 1.6, **(styles or {}).get(label, {})}
+            (line,) = ax.plot(x, values.to_numpy(), label=label, **line_style)
             if spreads is not None and label in spreads:
                 sd = spreads[label].xs(esp, level="ESP")[family].reindex(values.index)
                 ax.fill_between(
@@ -2988,7 +2995,7 @@ def plot_fingerprint_facets(  # noqa: PLR0913
         ax.set_ylabel(FEATURE_LABELS[family])
         ax.grid(alpha=0.25)
         if len(fingerprints) > 1:
-            ax.legend()
+            ax.legend(fontsize=8)
 
     for ax in axes.flat[len(selected_esps) :]:
         ax.set_visible(False)
@@ -3206,4 +3213,181 @@ def plot_shift_vs_localization(  # noqa: PLR0913
             ax.set_ylabel(labels.get(performance_metric, performance_metric), fontsize=9)
             ax.grid(alpha=0.25)
     axes[0, 0].legend(fontsize=7)
+    _save_and_show(fig, save_path, show=show)
+
+
+TRIAL_LINESTYLES = {"01": "-", "02": "--"}
+TRIAL_MARKERS = {"01": "o", "02": "s"}
+
+
+def user_trial_styles(labels: Sequence[str]) -> dict[str, dict[str, object]]:
+    """Colour per user and line style per trial for ``"User XX / TYY"`` labels."""
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    users = sorted({label.split(" / ")[0] for label in labels})
+    styles = {}
+    for label in labels:
+        user, trial = label.split(" / ")
+        styles[label] = {
+            "color": colors[users.index(user) % len(colors)],
+            "linestyle": TRIAL_LINESTYLES.get(trial.removeprefix("T"), ":"),
+        }
+    return styles
+
+
+def _covariance_ellipse(row: pd.Series, *, n_std: float = 1.0, **kwargs: object) -> Ellipse | None:
+    """Ellipse patch of one centroid row (``dim1``, ``dim2``, ``var1``, ``var2``, ``cov12``)."""
+    from matplotlib.patches import Ellipse  # noqa: PLC0415
+
+    covariance = np.array([[row["var1"], row["cov12"]], [row["cov12"], row["var2"]]], dtype=float)
+    if not np.isfinite(covariance).all():
+        return None
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    eigenvalues = np.clip(eigenvalues, 0.0, None)
+    angle = float(np.degrees(np.arctan2(eigenvectors[1, 1], eigenvectors[0, 1])))
+    width, height = 2 * n_std * np.sqrt(eigenvalues[::-1])
+    return Ellipse((row["dim1"], row["dim2"]), width, height, angle=angle, **kwargs)
+
+
+def plot_fingerprint_embedding(  # noqa: C901, PLR0913
+    panels: dict[str, tuple[pd.DataFrame, pd.DataFrame]],
+    *,
+    color_by: str = "location",
+    marker_by: str | None = "trial",
+    reference: dict[str, pd.DataFrame] | None = None,
+    show_points: bool = True,
+    xlabel: str = "Dimension 1",
+    ylabel: str = "Dimension 2",
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Bubble map of fingerprints in a 2-D embedding, one panel per entry of ``panels``.
+
+    Each panel is ``(windows, centroids)`` from ``embed_windows`` and ``centroid_table``.
+    Every group gets faint window dots, a centroid marker and a 1-SD covariance ellipse,
+    coloured by ``color_by`` with markers/line styles by ``marker_by`` (trial 01 solid
+    circle, trial 02 dashed square). ``reference`` (same panel keys) adds labelled grey
+    centroids, e.g. the trial-01 centroids of the neighbouring positions, as a scale.
+    """
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    fig, axes = plt.subplots(
+        1, len(panels), figsize=(6.0 * len(panels), 5.2), squeeze=False, layout="constrained"
+    )
+    for ax, (panel_title, (windows, centroids)) in zip(axes.flat, panels.items(), strict=True):
+        color_values = sorted(centroids[color_by].unique())
+        for ref_row in (reference or {}).get(panel_title, pd.DataFrame()).itertuples():
+            ax.scatter(ref_row.dim1, ref_row.dim2, color="0.6", marker="x", s=40, zorder=2)
+            ax.annotate(
+                str(ref_row.location),
+                (ref_row.dim1, ref_row.dim2),
+                fontsize=7,
+                color="0.4",
+                xytext=(3, 3),
+                textcoords="offset points",
+            )
+        for _, row in centroids.iterrows():
+            color = colors[color_values.index(row[color_by]) % len(colors)]
+            trial_key = str(row[marker_by]) if marker_by else "01"
+            if show_points:
+                mask = windows[color_by].eq(row[color_by])
+                if marker_by:
+                    mask &= windows[marker_by].eq(row[marker_by])
+                for key in ("user", "trial", "location"):
+                    if key in centroids.columns:
+                        mask &= windows[key].eq(row[key])
+                ax.scatter(
+                    windows.loc[mask, "dim1"],
+                    windows.loc[mask, "dim2"],
+                    color=color,
+                    s=6,
+                    alpha=0.18,
+                    linewidths=0,
+                    marker=TRIAL_MARKERS.get(trial_key, "o"),
+                )
+            ellipse = _covariance_ellipse(
+                row,
+                facecolor=color,
+                edgecolor=color,
+                alpha=0.25,
+                linestyle=TRIAL_LINESTYLES.get(trial_key, "-"),
+                linewidth=1.5,
+            )
+            if ellipse is not None:
+                ax.add_patch(ellipse)
+            ax.scatter(
+                row["dim1"],
+                row["dim2"],
+                color=color,
+                edgecolor="black",
+                s=70,
+                zorder=3,
+                marker=TRIAL_MARKERS.get(trial_key, "o"),
+            )
+        for index, value in enumerate(color_values):
+            ax.scatter([], [], color=colors[index % len(colors)], label=f"{color_by} {value}")
+        if marker_by:
+            for key, marker in TRIAL_MARKERS.items():
+                ax.scatter([], [], color="0.3", marker=marker, label=f"{marker_by} {key}")
+        ax.set_title(panel_title)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=7, loc="best")
+    if title:
+        fig.suptitle(title)
+    _save_and_show(fig, save_path, show=show)
+
+
+def plot_centroid_shift_arrows(  # noqa: PLR0913
+    panels: dict[str, pd.DataFrame],
+    *,
+    trials: tuple[str, str] = ("01", "02"),
+    xlabel: str = "Dimension 1",
+    ylabel: str = "Dimension 2",
+    title: str | None = None,
+    save_path: str | Path | None = None,
+    show: bool = True,
+) -> None:
+    """Arrows from each position's trial-A centroid to its trial-B centroid.
+
+    ``panels`` maps a panel title to the centroid table of one user (``centroid_table``).
+    Trial-A centroids are labelled and coloured by room, so an arrow ending next to another
+    label shows the session moving that fingerprint onto a different position.
+    """
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    fig, axes = plt.subplots(
+        1, len(panels), figsize=(6.5 * len(panels), 5.6), squeeze=False, layout="constrained"
+    )
+    for ax, (panel_title, centroids) in zip(axes.flat, panels.items(), strict=True):
+        frame = centroids.assign(room=centroids["location"].map(room_label_for_location))
+        rooms = sorted(frame["room"].unique())
+        a = frame.loc[frame["trial"] == trials[0]].set_index("location")
+        b = frame.loc[frame["trial"] == trials[1]].set_index("location")
+        for location, row in a.iterrows():
+            color = colors[rooms.index(row["room"]) % len(colors)]
+            ax.scatter(row["dim1"], row["dim2"], color=color, s=28, zorder=3)
+            ax.annotate(
+                location,
+                (row["dim1"], row["dim2"]),
+                fontsize=6.5,
+                xytext=(2, 2),
+                textcoords="offset points",
+            )
+            if location in b.index:
+                end = b.loc[location]
+                ax.annotate(
+                    "",
+                    xy=(end["dim1"], end["dim2"]),
+                    xytext=(row["dim1"], row["dim2"]),
+                    arrowprops={"arrowstyle": "->", "color": color, "alpha": 0.7, "lw": 1.0},
+                )
+        for index, room in enumerate(rooms):
+            ax.scatter([], [], color=colors[index % len(colors)], label=f"Room {room}")
+        ax.set_title(panel_title)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=7, title=f"T{trials[0]} -> T{trials[1]}")
+    if title:
+        fig.suptitle(title)
     _save_and_show(fig, save_path, show=show)

@@ -551,8 +551,15 @@ def run_global_baselines(  # noqa: PLR0913
     svm_fallback_seconds: float,
     row_spacing: float,
     column_spacing: float,
+    users: tuple[str, ...] | None = None,
 ) -> tuple[pd.DataFrame, dict[tuple[str, str, str], pd.DataFrame]]:
-    """Run requested ML baselines and persist the flat, global result contract."""
+    """Run requested ML baselines and persist the flat, global result contract.
+
+    ``users`` restricts every band's dataframe to those volunteers before splitting (e.g. the
+    three volunteers recorded in both sessions). It is hashed into the run ID only when set,
+    so runs on the full dataset keep their existing IDs.
+    """
+    user_subset = sorted(_normalized_user_values(pd.Series(users))) if users else None
     predictions_by_key = {}
     summary_rows = []
     lovo_per_fold_rows = []
@@ -566,6 +573,14 @@ def run_global_baselines(  # noqa: PLR0913
             msg = f"No feature dataframe found for band {band!r}."
             raise KeyError(msg)
         dataframe = feature_dataframes[band]
+        if user_subset is not None:
+            dataframe = dataframe.loc[
+                _normalized_user_values(dataframe["user"]).isin(user_subset)
+            ].copy()
+            if dataframe.empty:
+                msg = f"User subset {user_subset} leaves no rows for band {band!r}."
+                raise ValueError(msg)
+            print(f"[users] {band}: restricted to users {user_subset} ({len(dataframe)} windows)")
         for model_name in models_to_run:
             params = params_lookup[(model_name, band)]
             for split_mode in split_modes:
@@ -588,6 +603,8 @@ def run_global_baselines(  # noqa: PLR0913
                         "column_spacing": column_spacing,
                     },
                 }
+                if user_subset is not None:
+                    full_config["split_params"]["users"] = user_subset
                 run_id = make_run_id(
                     family="ml",
                     model=model_name,
@@ -693,6 +710,8 @@ def run_global_baselines(  # noqa: PLR0913
                     }
                 )
                 run_metrics = dict(metrics)
+                if user_subset is not None:
+                    run_metrics["users"] = ",".join(user_subset)
                 if split_mode == "lovo":
                     for metric_name in (
                         "position_accuracy",
@@ -2616,6 +2635,16 @@ def _validate_required_columns(df: pd.DataFrame, required_columns: set[str]) -> 
     if missing_columns:
         msg = f"Missing required columns: {', '.join(missing_columns)}"
         raise ValueError(msg)
+
+
+def _normalized_user_values(values: pd.Series) -> pd.Series:
+    """Normalize user identifiers to two-digit strings."""
+    return (
+        values.astype(str)
+        .str.removeprefix("user_")
+        .str.replace(r"\.0$", "", regex=True)
+        .str.zfill(2)
+    )
 
 
 def _normalized_trial_values(values: pd.Series) -> pd.Series:
