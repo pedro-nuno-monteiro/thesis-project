@@ -71,7 +71,6 @@ from utils.results import (
     checkpoint_path,
     compute_localization_metrics,
     derive_seed_summary,
-    derive_table_from_runs,
     majority_class_baselines,
     upsert_fold_rows,
     upsert_run,
@@ -808,7 +807,7 @@ def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
             history.insert(0, "fold", str(held_out_user or "single"))
             histories.append(history)
             plot_root = (
-                result_root / "plots" / resolved_run_id
+                result_root / "training_curves" / resolved_run_id
                 if plots_dir is None
                 else Path(plots_dir) / resolved_run_id
             )
@@ -923,7 +922,6 @@ def train_evaluate_cnn(  # noqa: PLR0913, PLR0915
         hyperparameter_columns=resolved_params.keys(),
         results_root=result_root,
     )
-    derive_table_from_runs("global_summary", results_root=result_root)
     return predictions, metrics, history_df
 
 
@@ -940,7 +938,7 @@ def train_evaluate_cnn_multi_seed(
     seed_summary = derive_seed_summary(results_root=result_root)
     if not seed_summary.empty:
         print(
-            "[DL seeds] mean +/- std across seeds written to tables/seed_summary; "
+            "[DL seeds] mean +/- std across seeds written to summaries/seed_summary; "
             "LOVO uses each seed's fold mean and keeps within-seed fold std separate."
         )
     return outputs

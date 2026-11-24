@@ -793,7 +793,6 @@ def run_global_baselines(  # noqa: PLR0913
                     upsert_fold_rows(cross_rows, results_root=results_dir)
 
     summary = pd.DataFrame(summary_rows)
-    derive_table_from_runs("global_summary", results_root=results_dir)
     return summary, predictions_by_key
 
 

@@ -426,8 +426,8 @@ def _require_columns(df: pd.DataFrame, required_columns: set[str]) -> None:
 
 
 def ensure_results_layout(results_root: Path = RESULTS_ROOT) -> None:
-    """Create the directories in the flat results contract."""
-    for relative in ("predictions", "plots", "tables", "tuning", "manifests", "checkpoints"):
+    """Create the directories of the internal results store."""
+    for relative in ("predictions", "tuning", "manifests", "checkpoints"):
         (Path(results_root) / relative).mkdir(parents=True, exist_ok=True)
 
 
@@ -570,7 +570,7 @@ def derive_table_from_runs(
     query: str | None = None,
     results_root: Path = RESULTS_ROOT,
 ) -> pd.DataFrame:
-    """Create CSV/LaTeX views exclusively from the global ``runs.csv`` table."""
+    """Write a filtered CSV view of ``runs.csv`` to ``summaries/``."""
     runs_path = Path(results_root) / "runs.csv"
     if not runs_path.exists():
         raise FileNotFoundError(f"Cannot derive tables before {runs_path} exists.")
@@ -580,13 +580,9 @@ def derive_table_from_runs(
     if columns is not None:
         selected = [column for column in columns if column in table.columns]
         table = table.loc[:, selected]
-    tables_dir = Path(results_root) / "tables"
-    tables_dir.mkdir(parents=True, exist_ok=True)
-    table.to_csv(tables_dir / f"{basename}.csv", index=False)
-    (tables_dir / f"{basename}.tex").write_text(
-        table.to_latex(index=False, escape=False, float_format="%.4f"),
-        encoding="utf-8",
-    )
+    summaries_dir = Path(results_root) / "summaries"
+    summaries_dir.mkdir(parents=True, exist_ok=True)
+    table.to_csv(summaries_dir / f"{basename}.csv", index=False)
     return table
 
 
@@ -634,13 +630,9 @@ def derive_seed_summary(*, results_root: Path = RESULTS_ROOT) -> pd.DataFrame:
             }
         )
     summary = pd.DataFrame(rows)
-    tables_dir = Path(results_root) / "tables"
-    tables_dir.mkdir(parents=True, exist_ok=True)
-    summary.to_csv(tables_dir / "seed_summary.csv", index=False)
-    (tables_dir / "seed_summary.tex").write_text(
-        summary.to_latex(index=False, escape=False, float_format="%.4f"),
-        encoding="utf-8",
-    )
+    summaries_dir = Path(results_root) / "summaries"
+    summaries_dir.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(summaries_dir / "seed_summary.csv", index=False)
     return summary
 
 
@@ -723,31 +715,17 @@ def _unique(values: Iterable[str]) -> list[str]:
 
 
 def save_summary(df: pd.DataFrame, results_dir: Path, basename: str = "summary") -> None:
-    """Write the summary dataframe to CSV, Markdown, and LaTeX in results_dir."""
+    """Write the summary dataframe to CSV in results_dir."""
     results_dir.mkdir(parents=True, exist_ok=True)
-
     df.to_csv(results_dir / f"{basename}.csv")
-
-    md = df.to_markdown(index=True)
-    (results_dir / f"{basename}.md").write_text(md or "", encoding="utf-8")
-
-    tex = df.to_latex(
-        index=True,
-        escape=False,
-        float_format="%.4f",
-    )
-    (results_dir / f"{basename}.tex").write_text(tex, encoding="utf-8")
-
-    print(f"[results] Summary saved to {results_dir}/{basename}.*")
+    print(f"[results] Summary saved to {results_dir}/{basename}.csv")
 
 
 def save_table(df: pd.DataFrame, directory: Path, basename: str) -> None:
-    """Write a table to CSV and LaTeX (no index) in ``directory``."""
+    """Write a table to CSV (no index) in ``directory``."""
     directory.mkdir(parents=True, exist_ok=True)
     df.to_csv(directory / f"{basename}.csv", index=False)
-    tex = df.to_latex(index=False, escape=True, float_format="%.4f")
-    (directory / f"{basename}.tex").write_text(tex, encoding="utf-8")
-    print(f"[results] Table saved to {directory}/{basename}.{{csv,tex}}")
+    print(f"[results] Table saved to {directory}/{basename}.csv")
 
 
 # ── Reproducibility manifest ──────────────────────────────────────────────────

@@ -15,11 +15,11 @@ import numpy as np
 import pandas as pd
 
 from utils.config import CACHE_DIR as PROJECT_CACHE_DIR
-from utils.config import RESULTS_DIR
+from utils.config import INTERNAL_RESULTS_DIR
 
 CACHE_DIR = PROJECT_CACHE_DIR / "dataframes"
 CSI_CACHE_DIR = PROJECT_CACHE_DIR / "csi_processing"
-RESULTS_ROOT = RESULTS_DIR
+RESULTS_ROOT = INTERNAL_RESULTS_DIR
 
 _EXPECTED_METADATA_COLS = {
     "frequency_scenario",
@@ -234,7 +234,7 @@ def get_cache_path(preproc_opts: dict[str, Any], feat_opts: dict[str, Any]) -> P
 
 
 def get_results_path() -> Path:
-    """Return the shared results root."""
+    """Return the internal results root (runs.csv, predictions, manifests, ...)."""
     return RESULTS_ROOT
 
 

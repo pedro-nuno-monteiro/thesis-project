@@ -68,12 +68,11 @@ Ruff's `ALL` rule set is strict. The existing code silences specific rules inlin
 
 **Caching is content-addressed and pervasive.** `utils/cache.py` keys parsed CSI, feature DataFrames, window arrays and predictions by hashes of the processing options (`make_preproc_key`, `make_feat_key`, `make_run_id`). Changing any processing option produces a new cache entry instead of invalidating the old one. Changing processing *code* without changing options can serve stale results, so pass `force_reprocess` or clear the relevant cache. Run IDs look like `ml__rf__2_4ghz__grid_search__ebl-session__s42__<hash>`.
 
-**Results:** in each project's `results/`, `runs.csv` (plus `runs_folds.csv` for per-fold LOVO rows) is the experiment registry, with one row per run and a wide superset of ML and DL columns. Alongside it:
+**Results (root):** `results/` has two parts.
 
-- `manifests/` holds the run configs;
-- `predictions/` holds the cached parquet predictions;
-- `checkpoints/` holds the CNN weights;
-- `tuning/` holds the grid-search outputs;
-- `tables/` and `plots/` hold the publication-ready outputs.
+- `results/reports/<notebook>/` is what the user reads: the per-run PDF report (`NotebookReport` in `utils/report.py`, built by the notebook's last cell), plus `plots/` and `tables/` (CSV only; no LaTeX).
+- `results/internal/` (`INTERNAL_RESULTS_DIR`, the default `results_root`) is what the code reads back: `runs.csv` (plus `runs_folds.csv` for per-fold LOVO rows) is the experiment registry, with one row per run and a wide superset of ML and DL columns, next to `manifests/` (run configs), `predictions/` (cached parquet), `checkpoints/` (CNN weights), `tuning/` (grid-search logs), `summaries/` (filtered views of runs.csv) and `training_curves/`.
+
+The frozen `thesis/results/` keeps the old flat layout (registry plus `tables/` and `plots/` next to it).
 
 Notebooks reload cached predictions instead of retraining when a matching run exists.

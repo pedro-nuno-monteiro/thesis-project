@@ -16,10 +16,15 @@ from utils.fingerprint import FEATURE_LABELS, canonical_feature_family, resolve_
 from utils.results import room_label_for_location
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
     from matplotlib.patches import Ellipse
+
+# Callables run on every finished figure before it is saved/shown/closed; used by
+# utils.report.NotebookReport.capture to collect figures for the PDF report.
+FIGURE_HOOKS: list[Callable[[Figure], None]] = []
 
 LOCATION_PATTERN = re.compile(r"^(?P<row>[A-Z])[-_ ]?(?P<column>\d+)$")
 EMPTY_ROOM_LOCATION = "Z-0"
@@ -557,6 +562,8 @@ def _save_and_show(fig, save_path: str | Path | None, *, show: bool = True) -> N
     # shared across multiple axes); calling tight_layout on top of it only warns.
     if not fig.get_constrained_layout():
         fig.tight_layout()
+    for hook in tuple(FIGURE_HOOKS):
+        hook(fig)
     if save_path is not None:
         output = save_figure(fig, save_path, kind="vector")
         print(f"[plots] saved {output}.")
@@ -3326,8 +3333,10 @@ def plot_fingerprint_embedding(  # noqa: C901, PLR0913
         for index, value in enumerate(color_values):
             ax.scatter([], [], color=colors[index % len(colors)], label=f"{color_by} {value}")
         if marker_by:
+            present = set(centroids[marker_by].astype(str))
             for key, marker in TRIAL_MARKERS.items():
-                ax.scatter([], [], color="0.3", marker=marker, label=f"{marker_by} {key}")
+                if key in present:
+                    ax.scatter([], [], color="0.3", marker=marker, label=f"{marker_by} {key}")
         ax.set_title(panel_title)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)

@@ -8,6 +8,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = "/disco1500gb/Pedro_Data"
 CACHE_DIR = PROJECT_ROOT / ".cache"
 RESULTS_DIR = PROJECT_ROOT / "results"
+# results/reports/<notebook>/: what you read (PDF reports, plots, tables).
+# results/internal/: what the code reads back (runs.csv, manifests, predictions, ...).
+REPORTS_DIR = RESULTS_DIR / "reports"
+INTERNAL_RESULTS_DIR = RESULTS_DIR / "internal"
+
+
+def notebook_report_dir(notebook: str) -> Path:
+    """Return ``results/reports/<notebook>/``, e.g. ``fingerprint_analysis``."""
+    return REPORTS_DIR / notebook.removesuffix(".ipynb").lower()
+
 
 ESP_IDS_BY_BAND = {
     "2.4 GHz": (*range(1, 6), *range(7, 11)),
